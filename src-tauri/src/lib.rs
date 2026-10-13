@@ -433,13 +433,7 @@ fn quit(app: tauri::AppHandle) {
 #[tauri::command]
 fn set_tray_state(app: tauri::AppHandle, state: String) {
     let Some(tray) = app.try_state::<TrayHandle>() else { return };
-    let bytes: &[u8] = match state.as_str() {
-        "working" => include_bytes!("../icons/tray-working.png"),
-        "attention" => include_bytes!("../icons/tray-attention.png"),
-        "off" => include_bytes!("../icons/tray-off.png"),
-        _ => include_bytes!("../icons/tray.png"),
-    };
-    if let Ok(image) = Image::from_bytes(bytes) {
+    if let Ok(image) = Image::from_bytes(tray_icon(&state)) {
         let _ = tray.0.set_icon(Some(image));
         #[cfg(target_os = "macos")]
         let _ = tray.0.set_icon_as_template(true);
@@ -447,6 +441,44 @@ fn set_tray_state(app: tauri::AppHandle, state: String) {
 }
 
 struct TrayHandle(TrayIcon);
+
+/// The icon for a state. macOS tints a black template for its menu bar; Windows and Linux get the mark on a
+/// white tile, which reads on a dark taskbar and a light one.
+fn tray_icon(state: &str) -> &'static [u8] {
+    #[cfg(target_os = "macos")]
+    {
+        match state {
+            "working" => include_bytes!("../icons/tray-working.png"),
+            "attention" => include_bytes!("../icons/tray-attention.png"),
+            "off" => include_bytes!("../icons/tray-off.png"),
+            _ => include_bytes!("../icons/tray.png"),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        match state {
+            "working" => include_bytes!("../icons/tray-tile-working.png"),
+            "attention" => include_bytes!("../icons/tray-tile-attention.png"),
+            "off" => include_bytes!("../icons/tray-tile-off.png"),
+            _ => include_bytes!("../icons/tray-tile.png"),
+        }
+    }
+}
+
+/// Opens the panel where there is no click to place it by: from the menu, on a Linux tray that only shows
+/// menus. Top right of the screen, under where a status area usually is.
+fn show_panel_top_right(app: &tauri::AppHandle) {
+    let Some(win) = app.get_webview_window("panel") else { return };
+    if let Ok(Some(monitor)) = win.current_monitor().or_else(|_| win.primary_monitor()) {
+        let area = monitor.work_area();
+        let scale = monitor.scale_factor();
+        let width = win.outer_size().map(|s| s.width as f64).unwrap_or(360.0 * scale);
+        let x = area.position.x as f64 + area.size.width as f64 - width - 12.0 * scale;
+        let _ = win.set_position(PhysicalPosition::new(x, area.position.y as f64 + 12.0 * scale));
+    }
+    let _ = win.show();
+    let _ = win.set_focus();
+}
 
 /// Shows the panel under the icon (macOS, a top menu bar) or above it (Windows and Linux taskbars),
 /// kept inside the screen the icon is on.
@@ -506,11 +538,23 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let icon = Image::from_bytes(include_bytes!("../icons/tray.png"))?;
+            let icon = Image::from_bytes(tray_icon("idle"))?;
+            // A small menu too: a right-click on macOS and Windows, and the only way in on a Linux tray
+            // that sends no clicks.
+            let open = tauri::menu::MenuItem::with_id(app, "open", "Open IMD Agents", true, None::<&str>)?;
+            let quit_item = tauri::menu::MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = tauri::menu::Menu::with_items(app, &[&open, &quit_item])?;
             let tray = TrayIconBuilder::new()
                 .icon(icon)
-                .icon_as_template(true)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("IMD Agents")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "open" => show_panel_top_right(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, position, .. } = event {
                         toggle_panel(tray.app_handle(), position);

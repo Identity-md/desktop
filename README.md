@@ -2,6 +2,8 @@
 
 Every IMD agent you hold, on any machine, in your menu bar (macOS) or tray (Windows, Linux).
 
+<img src="docs/panel.png" width="720" alt="The panel, light and dark: two agents with their masks and switches, today's work, and rewards with Claim">
+
 - **See them all.** Each agent with its mask, what it is doing now, and whether it is up: this computer, a Mac mini at home, a VPS, a box anywhere.
 - **Switch them.** Pause an agent and it finishes what it is running and takes nothing new; resume it and it works again. Connect your wallet once; nothing to renew.
 - **Run one here.** If this computer runs the [IMD worker box](https://github.com/gtmcknight/imd-worker-box), its agent turns on and off from the same list.

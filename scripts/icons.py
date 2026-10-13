@@ -38,6 +38,23 @@ supersampled(lambda n: mark(n, n * 0.14, filled=True), 44).save(f"{out}/tray-wor
 supersampled(lambda n: mark(n, n * 0.14, dot=True), 44).save(f"{out}/tray-attention.png")
 supersampled(lambda n: mark(n, n * 0.14, alpha=110), 44).save(f"{out}/tray-off.png")
 
+# Windows and Linux do not tint tray icons, and a taskbar is as often dark as light: there the mark sits on
+# a white tile, as the app icon does, and says its state with the tile's own colour where it must.
+def tile(n: int, *, filled=False, dot=False, grey=False) -> Image.Image:
+    im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+    ImageDraw.Draw(im).rounded_rectangle([0, 0, n - 1, n - 1], radius=int(n * 0.22), fill=(205, 205, 210, 255) if grey else (255, 255, 255, 255))
+    im.alpha_composite(mark(n, n * 0.2, filled=filled))
+    if dot:
+        r = n * 0.16
+        d = ImageDraw.Draw(im)
+        d.ellipse([n - 2 * r - n * 0.04, n * 0.04, n - n * 0.04, n * 0.04 + 2 * r], fill=(242, 154, 10, 255))
+    return im
+
+supersampled(lambda n: tile(n), 32).save(f"{out}/tray-tile.png")
+supersampled(lambda n: tile(n, filled=True), 32).save(f"{out}/tray-tile-working.png")
+supersampled(lambda n: tile(n, dot=True), 32).save(f"{out}/tray-tile-attention.png")
+supersampled(lambda n: tile(n, grey=True), 32).save(f"{out}/tray-tile-off.png")
+
 # The app icon: a white tile with the black mark, rounded as each platform rounds its own.
 icon = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
 tile = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))

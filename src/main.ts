@@ -342,9 +342,14 @@ function settingsHtml(): string {
 const GEAR = `<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M11.3 1.7l.4 2a6.3 6.3 0 0 1 1.6.9l1.9-.7 1.3 2.2-1.5 1.4a6.4 6.4 0 0 1 0 1.9l1.5 1.4-1.3 2.2-1.9-.7a6.3 6.3 0 0 1-1.6.9l-.4 2H8.7l-.4-2a6.3 6.3 0 0 1-1.6-.9l-1.9.7-1.3-2.2L5 9.4a6.4 6.4 0 0 1 0-1.9L3.5 6.1l1.3-2.2 1.9.7a6.3 6.3 0 0 1 1.6-.9l.4-2zM10 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg>`;
 
 let lastHeight = 0;
+let lastTray = "";
 function render(): void {
   app.innerHTML = state.view === "settings" ? settingsHtml() : homeHtml();
-  void api.setTrayState(trayState(state.agents.map(phaseFor))).catch(() => undefined);
+  const tray = trayState(state.agents.map(phaseFor));
+  if (tray !== lastTray) {
+    lastTray = tray;
+    void api.setTrayState(tray).catch(() => undefined);
+  }
   // the window is as tall as what it shows
   const height = Math.min(Math.ceil(app.getBoundingClientRect().height), 720);
   if (height !== lastHeight) {
