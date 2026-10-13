@@ -18,11 +18,6 @@ export async function walletSeats(wallet: string): Promise<PairWallet["tokens"]>
   return answer.status === 200 && answer.body ? answer.body.tokens ?? [] : [];
 }
 
-export async function seatStanding(tokenId: string): Promise<Standing | null> {
-  const answer = await get<Standing>(`/seats/${tokenId}/standing?queue=0`);
-  return answer.status === 200 ? answer.body : null;
-}
-
 export type SeatRecord = { owner: string | null; accepted: number; work: Array<{ submittedAt?: string }> };
 
 /** The seat's record with its newest work, enough to count today's. */

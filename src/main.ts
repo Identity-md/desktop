@@ -62,9 +62,11 @@ let records = new Map<string, { today: number; accepted: number }>();
 let lastRecords = 0;
 let lastRewards = 0;
 let reading = false;
+/** The plane holds each anonymous reader to 120 reads a minute; told to slow down, the panel waits a minute. */
+let coolUntil = 0;
 
 async function refresh(full = false): Promise<void> {
-  if (reading) return;
+  if (reading || Date.now() < coolUntil) return;
   reading = true;
   try {
     const box = await api.boxState().catch(() => null);
@@ -86,7 +88,11 @@ async function refresh(full = false): Promise<void> {
     if (state.localToken && !seats.some((s) => s.tokenId === state.localToken)) {
       seats.unshift({ tokenId: state.localToken, wallet: state.localOwner ?? "", online: state.box?.state === "running" });
     }
-    const standings = await Promise.all(seats.map((seat) => api.seatStanding(seat.tokenId)));
+    // A read that fails keeps the last good one: a busy plane is not an agent gone offline.
+    const before = new Map(state.agents.map((agent) => [agent.tokenId, agent.standing]));
+    const reads = await Promise.all(seats.map((seat) => api.get<Agent["standing"]>(`/seats/${seat.tokenId}/standing?queue=0`)));
+    if (reads.some((read) => read.status === 429)) coolUntil = Date.now() + 60_000;
+    const standings = reads.map((read, i) => (read.status === 200 ? read.body : before.get(seats[i]!.tokenId) ?? null));
     if (full || Date.now() - lastRecords > 60_000) {
       lastRecords = Date.now();
       const read = await Promise.all(seats.map((seat) => api.seatRecord(seat.tokenId)));
@@ -441,6 +447,6 @@ window.addEventListener("focus", () => void refresh());
 
 render();
 void refresh(true);
-// every 8 seconds while the panel is open, every minute while it is not: the icon stays true either way
-const tick = () => { void refresh(); setTimeout(tick, document.hasFocus() ? 8_000 : 60_000); };
-setTimeout(tick, 8_000);
+// every 10 seconds while the panel is open, every minute while it is not: the icon stays true either way
+const tick = () => { void refresh(); setTimeout(tick, document.hasFocus() ? 10_000 : 60_000); };
+setTimeout(tick, 10_000);
