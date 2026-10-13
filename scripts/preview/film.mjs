@@ -2,7 +2,7 @@
 // chart is scrubbed, a job flies in from the agent that did it, an agent starts work and opens into its tray.
 // pnpm dev (port 1430) first, then: node scripts/preview/film.mjs [light|dark]  →  scripts/preview/shots/motion-<scheme>.webm
 import { readFileSync, mkdirSync, renameSync } from "node:fs";
-import { chromium } from "/Users/gtm/Documents/GitHub/node_modules/playwright-core/index.mjs";
+import { chromium } from "playwright-core";
 import { mockApp } from "./mock.mjs";
 const fixtures = JSON.parse(readFileSync(new URL("./fixtures.json", import.meta.url), "utf8"));
 const out = new URL("./shots/", import.meta.url).pathname;

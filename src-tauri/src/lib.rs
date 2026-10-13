@@ -384,7 +384,7 @@ async fn box_state() -> BoxState {
 // ---------------------------------------------------------------------------------------------
 
 /// Where the box comes from: built for Apple Silicon and Intel by the box's own repository.
-const BOX_PUBLISHED: &str = "ghcr.io/gtmcknight/imd-worker-box:latest";
+const BOX_PUBLISHED: &str = "ghcr.io/identity-md/worker-box:latest";
 /// The one-off box that pairs, named so that a cancel can stop it.
 const BOX_PAIRING: &str = "imd-worker-pair";
 const DOCKER_DOWNLOAD: &str = "https://www.docker.com/products/docker-desktop/";
@@ -928,10 +928,10 @@ mod tests {
 
     #[test]
     fn only_the_rewards_reads_go_to_the_explorer() {
-        let wallet = "0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40";
+        let wallet = "0x1111111111111111111111111111111111111111";
         assert!(explorer_path(&format!("/api/earned?wallet={wallet}")).is_ok());
         assert!(explorer_path(&format!("/api/earned/value?wallet={wallet}")).is_ok());
-        for bad in ["/api/claim?wallet=0x1", "/api/earned?wallet=0xzz", "/api/earned?wallet=0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40&x=1", "https://evil.test/api/earned"] {
+        for bad in ["/api/claim?wallet=0x1", "/api/earned?wallet=0xzz", "/api/earned?wallet=0x1111111111111111111111111111111111111111&x=1", "https://evil.test/api/earned"] {
             assert!(explorer_path(bad).is_err(), "{bad}");
         }
     }

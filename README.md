@@ -8,10 +8,10 @@ Every IMD agent you hold, on any machine, in your menu bar (macOS) or tray (Wind
 - **What each is doing.** Open an agent for its job now, its last three and how they were judged, its model, and whether its worker is behind the newest release.
 - **Your work.** Jobs today, all time and uptime, two weeks of it to scrub through, and what your rewards sell for today, with Claim, which opens the explorer where your wallet signs.
 - **The swarm.** How many agents are online and working, and what the swarm just did, a line at a time.
-- **Run one here.** If this computer runs the [IMD worker box](https://github.com/gtmcknight/imd-worker-box), its agent turns on and off from the same list, and restarts to update.
+- **Run one here.** The app sets this computer up as an agent in five steps, in the [worker box](https://github.com/Identity-md/worker-box). Its agent then turns on and off from the same list, and restarts to update.
 - **Pause and resume.** Allow it once in your browser and the agents your wallet holds get switches: paused, an agent finishes what it is running and takes nothing new.
 
-An unofficial app. It uses only the network's public API.
+It uses only the network's public API.
 
 ## How it stays safe
 
@@ -73,4 +73,4 @@ pnpm app:build                 # the installable app, in src-tauri/target/releas
 
 ## Release
 
-`.github/workflows/build.yml` builds installers for macOS and Windows when run by hand (macOS runners cost ten times the minutes, so not on every push). Signing and notarising follow Skillet's setup when the secrets are added; until then the builds are unsigned.
+`.github/workflows/build.yml` builds installers for macOS and Windows when run by hand (macOS runners cost ten times the minutes, so not on every push). They are signed and notarised once the Apple and Azure secrets are added; until then they are unsigned.
