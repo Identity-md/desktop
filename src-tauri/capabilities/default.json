@@ -1,14 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The panel: show, hide and size itself, and switch opening at login. Everything else is the app's own commands.",
-  "windows": ["panel"],
+  "description": "The panel: switch opening at login. Everything else, sizing and hiding included, is the app's own commands.",
+  "windows": [
+    "panel"
+  ],
   "permissions": [
     "core:default",
-    "core:window:allow-show",
-    "core:window:allow-hide",
-    "core:window:allow-set-focus",
-    "core:window:allow-set-size",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled"

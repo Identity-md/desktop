@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Box, Earning, Standing } from "./model";
+import { sumOf, worthOf, type Box, type Earning, type ReleaseRow, type RewardValue, type Standing, type WorkRow } from "./model";
 
 /**
  * Everything the panel asks of the app's Rust side. The page itself reaches no network, holds no key
@@ -18,18 +18,56 @@ export async function walletSeats(wallet: string): Promise<PairWallet["tokens"]>
   return answer.status === 200 && answer.body ? answer.body.tokens ?? [] : [];
 }
 
-export type SeatRecord = { owner: string | null; accepted: number; work: Array<{ submittedAt?: string }> };
+export type SeatRecord = {
+  owner: string | null;
+  accepted: number;
+  rejected?: number;
+  failed?: number;
+  runtimes?: Array<{ id: string; premiumModel?: { model: string; effort?: string } | null }>;
+  work: WorkRow[];
+};
 
-/** The seat's record with its newest work, enough to count today's. */
-export async function seatRecord(tokenId: string): Promise<SeatRecord | null> {
-  const answer = await get<SeatRecord>(`/seats/${tokenId}?work=200&reviews=0&collaborators=0`);
+/** The seat's record with its newest `rows` of work: a hundred count today's, five hundred two weeks'. */
+export async function seatRecord(tokenId: string, rows = 100): Promise<SeatRecord | null> {
+  const answer = await get<SeatRecord>(`/seats/${tokenId}?work=${rows}&reviews=0&collaborators=0`);
   return answer.status === 200 ? answer.body : null;
+}
+
+/** Something that just happened in the swarm: a step started or accepted, a job posted, an agent joined, a site went up. */
+export type SwarmEvent = { kind: string; at: string; tokenId?: number | null; step?: string; state?: string; jobId?: string; objective?: string; ensName?: string };
+
+/** The whole swarm right now: agents online, agents at work, and what just happened, newest first. */
+export async function swarm(): Promise<{ online: number; working: number; events: SwarmEvent[] } | null> {
+  const answer = await get<{ health?: { agentsOnline: number; workingNow: number }; events?: SwarmEvent[] }>("/swarm");
+  const health = answer.status === 200 ? answer.body?.health : null;
+  return health ? { online: health.agentsOnline, working: health.workingNow, events: answer.body?.events ?? [] } : null;
 }
 
 /** Which seat a device serves, from the network's own record of it. */
 export async function deviceSeat(deviceKey: string): Promise<string | null> {
   const answer = await get<Standing>(`/workers/${deviceKey}/standing?queue=0`);
   return answer.status === 200 ? answer.body?.enrollment?.tokenId ?? null : null;
+}
+
+/** Sepolia: a testnet coin is earned, never ready to claim, since claiming it is worth nothing. */
+const TESTNETS = new Set([11155111]);
+
+/**
+ * What a wallet has ready to claim and what that is worth, as the explorer's Earned box says it: a
+ * total only once every reward has a value, since a sum of the first few read looks final and is not.
+ */
+export async function readyToClaim(wallet: string, rewards: Earning[]): Promise<{ count: number; usd: number | null } | null> {
+  const [claim, value] = await Promise.all([
+    invoke<Answer<{ claimable: string[] | null }>>("explorer_get", { path: `/api/earned?wallet=${wallet}` }),
+    invoke<Answer<{ values: Record<string, RewardValue> | null; missing?: number }>>("explorer_get", { path: `/api/earned/value?wallet=${wallet}` }),
+  ]);
+  const ids = claim.status === 200 ? claim.body?.claimable : null;
+  if (!ids) return null;
+  const testnet = new Set(rewards.filter((r) => TESTNETS.has(r.chainId)).map((r) => r.launchId));
+  const ready = ids.filter((id) => !testnet.has(id));
+  const values = value.status === 200 ? value.body?.values : null;
+  const complete = values && !(value.body?.missing ?? 0);
+  return { count: ready.length, usd: complete ? sumOf(ready.map((id) => worthOf(values[id])))?.usd ?? 0 : null };
 }
 
 export async function earnings(wallet: string): Promise<Earning[]> {
@@ -45,6 +83,9 @@ export const boxState = async (): Promise<Box> => {
 };
 export const boxStart = (runtime: string) => invoke<void>("box_start", { runtime });
 export const boxStop = () => invoke<void>("box_stop");
+export const boxRestart = () => invoke<void>("box_restart");
+/** The worker's newest releases, from GitHub, as daemons update from them. */
+export const workerReleases = () => invoke<Answer<ReleaseRow[]>>("worker_releases");
 
 export type LinkStart = { code: string; expiresAt: string; relayOrigin: string };
 export const linkStart = () => invoke<LinkStart>("link_start");
@@ -56,5 +97,6 @@ export const unlink = (relayOrigin: string) => invoke<void>("unlink", { relayOri
 
 export const openExplorer = (path: string) => invoke<void>("open_explorer", { path });
 export const hidePanel = () => invoke<void>("hide_panel");
+export const fitPanel = (height: number) => invoke<void>("fit_panel", { height });
 export const quit = () => invoke<void>("quit");
 export const setTrayState = (state: string) => invoke<void>("set_tray_state", { state });

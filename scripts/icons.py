@@ -1,8 +1,8 @@
 """Draws the app's icons from the IMD mark (the explorer's icon.svg): a square ring around a diamond ring.
 
 Tray icons are template images (black on clear; macOS tints them for the menu bar), 44 px for a 22 pt
-bar. The app icon is the mark in black on white, the explorer's own, from which `tauri icon` makes
-every size each platform wants.
+bar, drawn at the weight of the system's symbols beside them. The app icon is the mark in black on white,
+the explorer's own, from which `tauri icon` makes every size each platform wants.
 """
 from PIL import Image, ImageDraw
 
@@ -32,18 +32,43 @@ def supersampled(make, size: int) -> Image.Image:
     big = make(size * 8)
     return big.resize((size, size), Image.LANCZOS)
 
+def bold(size: int, *, filled=False, dot=False, alpha=255, glyph=16.5) -> Image.Image:
+    """The mark for a menu bar or tray: the weight of the system's own symbols beside it (2 pt strokes at
+    16.5 pt), the square's corners rounded as theirs are. Working, the diamond fills; wanting attention, a
+    dot sits in the corner, cut clear of the square as the system's badge is."""
+    im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    unit = size / 22 * glyph / 32
+    o = (size - 32 * unit) / 2
+    p = lambda x, y: (o + x * unit, o + y * unit)
+    color = (0, 0, 0, alpha)
+    d.rounded_rectangle([p(0, 0), p(32, 32)], radius=5.5 * unit, fill=color)
+    d.rounded_rectangle([p(4, 4), p(28, 28)], radius=1.5 * unit, fill=(0, 0, 0, 0))
+    # the diamond: a ring 3.4 units thick, or a smaller solid one of the same weight
+    reach, stroke = (6.2, 3.4) if filled else (7.4, 3.4)
+    out, inn = reach + stroke / 2 * 2 ** 0.5, reach - stroke / 2 * 2 ** 0.5
+    d.polygon([p(16, 16 - out), p(16 + out, 16), p(16, 16 + out), p(16 - out, 16)], fill=color)
+    if not filled:
+        d.polygon([p(16, 16 - inn), p(16 + inn, 16), p(16, 16 + inn), p(16 - inn, 16)], fill=(0, 0, 0, 0))
+    if dot:
+        r, cx, cy = 5.2 * unit, *p(29, 3)
+        gap = 2.2 * unit
+        d.ellipse([cx - r - gap, cy - r - gap, cx + r + gap, cy + r + gap], fill=(0, 0, 0, 0))
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color)
+    return im
+
 out = "src-tauri/icons"
-supersampled(lambda n: mark(n, n * 0.14), 44).save(f"{out}/tray.png")
-supersampled(lambda n: mark(n, n * 0.14, filled=True), 44).save(f"{out}/tray-working.png")
-supersampled(lambda n: mark(n, n * 0.14, dot=True), 44).save(f"{out}/tray-attention.png")
-supersampled(lambda n: mark(n, n * 0.14, alpha=110), 44).save(f"{out}/tray-off.png")
+supersampled(lambda n: bold(n), 44).save(f"{out}/tray.png")
+supersampled(lambda n: bold(n, filled=True), 44).save(f"{out}/tray-working.png")
+supersampled(lambda n: bold(n, dot=True), 44).save(f"{out}/tray-attention.png")
+supersampled(lambda n: bold(n, alpha=110), 44).save(f"{out}/tray-off.png")
 
 # Windows and Linux do not tint tray icons, and a taskbar is as often dark as light: there the mark sits on
 # a white tile, as the app icon does, and says its state with the tile's own colour where it must.
 def tile(n: int, *, filled=False, dot=False, grey=False) -> Image.Image:
     im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
     ImageDraw.Draw(im).rounded_rectangle([0, 0, n - 1, n - 1], radius=int(n * 0.22), fill=(205, 205, 210, 255) if grey else (255, 255, 255, 255))
-    im.alpha_composite(mark(n, n * 0.2, filled=filled))
+    im.alpha_composite(bold(n, filled=filled, glyph=14.5))
     if dot:
         r = n * 0.16
         d = ImageDraw.Draw(im)

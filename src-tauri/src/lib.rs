@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -19,7 +19,7 @@ use serde::Serialize;
 use tauri::{
     image::Image,
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    Manager, PhysicalPosition,
+    Emitter, LogicalSize, Manager, PhysicalPosition,
 };
 use tauri_plugin_opener::OpenerExt;
 
@@ -77,6 +77,23 @@ async fn answer(response: reqwest::Response) -> Answer {
 #[tauri::command]
 async fn api_get(path: String) -> Answer {
     let Ok(url) = api_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
+    match http().get(url).send().await {
+        Ok(response) => answer(response).await,
+        Err(_) => Answer { status: 0, body: serde_json::Value::Null },
+    }
+}
+
+/// The explorer's two public reads of a wallet's rewards, which the plane does not price: which are
+/// ready to claim, and what each is worth. Only those two, and only for a wallet's address.
+fn explorer_path(path: &str) -> Result<String, String> {
+    let wallet = path.strip_prefix("/api/earned?wallet=").or_else(|| path.strip_prefix("/api/earned/value?wallet="));
+    let ok = wallet.is_some_and(|w| w.len() == 42 && w.starts_with("0x") && w[2..].chars().all(|c| c.is_ascii_hexdigit()));
+    if ok { Ok(format!("{}{}", explorer_base(), path)) } else { Err("not a rewards read".into()) }
+}
+
+#[tauri::command]
+async fn explorer_get(path: String) -> Answer {
+    let Ok(url) = explorer_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
     match http().get(url).send().await {
         Ok(response) => answer(response).await,
         Err(_) => Answer { status: 0, body: serde_json::Value::Null },
@@ -396,6 +413,41 @@ async fn box_stop() -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Restarts this computer's agent: the same box, started again. It runs with `--auto-update`, so a
+/// restart is also how it takes the newest worker.
+#[tauri::command]
+async fn box_restart() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
+        Some((true, _)) => Ok(()),
+        Some((false, why)) => Err(why),
+        None => Err("Docker is not installed".into()),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The worker's newest releases, from the public list daemons update from: newest first, with when
+/// each came out. Read straight from GitHub, as the explorer reads it; nothing is sent with the ask.
+#[tauri::command]
+async fn worker_releases() -> Answer {
+    let request = http()
+        .get("https://api.github.com/repos/Identity-md/worker/releases?per_page=10")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json");
+    match request.send().await {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            // only what the panel reads: the tag, when it came out, and whether it is a real release
+            let rows = response.json::<Vec<serde_json::Value>>().await.unwrap_or_default();
+            let body = rows
+                .iter()
+                .map(|r| serde_json::json!({ "tag_name": r["tag_name"], "published_at": r["published_at"], "draft": r["draft"], "prerelease": r["prerelease"] }))
+                .collect();
+            Answer { status, body: serde_json::Value::Array(body) }
+        }
+        Err(_) => Answer { status: 0, body: serde_json::Value::Null },
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Links out, and the panel itself.
 // ---------------------------------------------------------------------------------------------
@@ -421,6 +473,31 @@ fn hide_panel(app: tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("panel") {
         PANEL_HIDDEN_AT_MS.store(now_ms(), Ordering::Relaxed);
         let _ = win.hide();
+    }
+}
+
+/// Whether the panel opened above its icon, over a taskbar at the bottom: it then grows upward.
+static PANEL_ABOVE: AtomicBool = AtomicBool::new(false);
+
+/// The panel is 360 points wide, drawn inset in its window: room for its own shadow, which grows and
+/// shrinks with it as a window's shadow would not. Little above, where macOS keeps a window below the menu
+/// bar anyway; most below, where the shadow falls. The page's CSS matches.
+const PANEL_WIDTH: f64 = 360.0;
+const INSET_TOP: f64 = 6.0;
+const INSET_SIDE: f64 = 22.0;
+const INSET_BOTTOM: f64 = 32.0;
+
+/// The window is as tall as the panel shows, its inset included. A resize alone keeps a window's bottom
+/// edge on macOS, so the edge by the icon is put back: the top under a menu bar, the bottom over a taskbar.
+#[tauri::command]
+fn fit_panel(window: tauri::WebviewWindow, height: f64) {
+    let height = height.clamp(80.0 + INSET_TOP + INSET_BOTTOM, 720.0 + INSET_TOP + INSET_BOTTOM);
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let before = window.outer_position().ok().zip(window.outer_size().ok());
+    let _ = window.set_size(LogicalSize::new(PANEL_WIDTH + 2.0 * INSET_SIDE, height));
+    if let Some((position, size)) = before {
+        let y = if PANEL_ABOVE.load(Ordering::Relaxed) { position.y as f64 + size.height as f64 - height * scale } else { position.y as f64 };
+        let _ = window.set_position(PhysicalPosition::new(position.x as f64, y));
     }
 }
 
@@ -465,37 +542,40 @@ fn tray_icon(state: &str) -> &'static [u8] {
     }
 }
 
-/// Opens the panel where there is no click to place it by: from the menu, on a Linux tray that only shows
-/// menus. Top right of the screen, under where a status area usually is.
-fn show_panel_top_right(app: &tauri::AppHandle) {
-    let Some(win) = app.get_webview_window("panel") else { return };
-    if let Ok(Some(monitor)) = win.current_monitor().or_else(|_| win.primary_monitor()) {
-        let area = monitor.work_area();
-        let scale = monitor.scale_factor();
-        let width = win.outer_size().map(|s| s.width as f64).unwrap_or(360.0 * scale);
-        let x = area.position.x as f64 + area.size.width as f64 - width - 12.0 * scale;
-        let _ = win.set_position(PhysicalPosition::new(x, area.position.y as f64 + 12.0 * scale));
-    }
+/// Shows the panel and tells the page, which plays it in from the side its icon is on.
+fn open_panel(win: &tauri::WebviewWindow, above: bool) {
+    PANEL_ABOVE.store(above, Ordering::Relaxed);
     let _ = win.show();
     let _ = win.set_focus();
+    let _ = win.emit("panel-shown", above);
 }
 
-/// Shows the panel under the icon (macOS, a top menu bar) or above it (Windows and Linux taskbars),
-/// kept inside the screen the icon is on.
-fn toggle_panel(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+/// Opens the panel where there is no icon to place it by: the app opened by hand, or the menu on a Linux
+/// tray that only shows menus. Top right of the screen, under where a status area usually is.
+fn show_panel_top_right(app: &tauri::AppHandle) {
+    let Some(win) = app.get_webview_window("panel") else { return };
+    // A panel never shown yet has no screen of its own: the primary one, which holds the menu bar.
+    if let Some(monitor) = win.current_monitor().ok().flatten().or_else(|| win.primary_monitor().ok().flatten()) {
+        let area = monitor.work_area();
+        let scale = monitor.scale_factor();
+        let x = area.position.x as f64 + area.size.width as f64 - (PANEL_WIDTH + 12.0 + INSET_SIDE) * scale;
+        let _ = win.set_position(PhysicalPosition::new(x, area.position.y as f64 + (6.0 - INSET_TOP) * scale));
+    }
+    open_panel(&win, false);
+}
+
+/// Opens the panel from its icon: under it below a menu bar (macOS), above it over a taskbar (Windows and
+/// Linux), centred on it and kept inside its screen. Open already, it closes, the page playing it out first.
+fn toggle_panel(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, icon: tauri::Rect) {
     let Some(win) = app.get_webview_window("panel") else { return };
     if win.is_visible().unwrap_or(false) {
-        PANEL_HIDDEN_AT_MS.store(now_ms(), Ordering::Relaxed);
-        let _ = win.hide();
+        let _ = win.emit("panel-close", ());
         return;
     }
     if now_ms().saturating_sub(PANEL_HIDDEN_AT_MS.load(Ordering::Relaxed)) < REOPEN_GUARD_MS {
         return;
     }
-    let scale = win.scale_factor().unwrap_or(2.0);
-    let size = win.outer_size().map(|s| (s.width as f64, s.height as f64)).unwrap_or((360.0 * scale, 480.0 * scale));
-    let margin = 8.0 * scale;
-    let screen = win
+    let monitor = win
         .available_monitors()
         .ok()
         .and_then(|monitors| {
@@ -504,34 +584,48 @@ fn toggle_panel(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
                 cursor.x >= p.x as f64 && cursor.x < (p.x as f64 + s.width as f64) && cursor.y >= p.y as f64 && cursor.y < (p.y as f64 + s.height as f64)
             })
         })
-        .or_else(|| win.primary_monitor().ok().flatten())
-        .map(|m| {
-            let a = m.work_area();
-            (a.position.x as f64, a.position.y as f64, a.size.width as f64, a.size.height as f64)
-        });
-    let (x, y) = match screen {
-        Some((sx, sy, sw, sh)) => {
-            let x = (cursor.x - size.0 / 2.0).clamp(sx + margin, sx + sw - size.0 - margin);
-            // In the top half the bar is above: open below the icon. In the bottom half, above it.
-            let below = cursor.y < sy + sh / 2.0;
-            let y = if below { (cursor.y + 6.0 * scale).max(sy + margin) } else { (cursor.y - size.1 - margin).max(sy + margin) };
-            (x, y.min(sy + sh - size.1 - margin))
-        }
-        None => (cursor.x - size.0 / 2.0, cursor.y + 6.0 * scale),
+        .or_else(|| win.primary_monitor().ok().flatten());
+    let scale = monitor.as_ref().map(|m| m.scale_factor()).unwrap_or_else(|| win.scale_factor().unwrap_or(2.0));
+    // the icon's own bounds, so the panel hangs from the bar rather than from wherever the click landed
+    let (at, size) = (icon.position.to_physical::<f64>(scale), icon.size.to_physical::<f64>(scale));
+    let (centre, top, bottom) = if size.width > 0.0 && size.height > 0.0 {
+        (at.x + size.width / 2.0, at.y, at.y + size.height)
+    } else {
+        (cursor.x, cursor.y, cursor.y)
     };
-    let _ = win.set_position(PhysicalPosition::new(x, y));
-    let _ = win.show();
-    let _ = win.set_focus();
+    let width = PANEL_WIDTH * scale;
+    let height = win.outer_size().map(|s| s.height as f64).unwrap_or(518.0 * scale) - (INSET_TOP + INSET_BOTTOM) * scale;
+    let (gap, margin) = (6.0 * scale, 8.0 * scale);
+    let area = monitor.as_ref().map(|m| {
+        let a = m.work_area();
+        (a.position.x as f64, a.position.y as f64, a.size.width as f64, a.size.height as f64)
+    });
+    let (x, y, above) = match area {
+        Some((sx, sy, sw, sh)) => {
+            let x = (centre - width / 2.0).clamp(sx + margin, sx + sw - width - margin);
+            // In the top half the bar is above: open below the icon. In the bottom half, above it.
+            let above = top >= sy + sh / 2.0;
+            (x, if above { top - gap - height } else { bottom + gap }, above)
+        }
+        None => (centre - width / 2.0, bottom + gap, false),
+    };
+    let _ = win.set_position(PhysicalPosition::new(x - INSET_SIDE * scale, y - INSET_TOP * scale));
+    open_panel(&win, above);
 }
+
+/// What the login item passes, so a start at login stays in the tray while one by hand opens the panel.
+const AT_LOGIN: &str = "--at-login";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Opened again while running, on Windows and Linux: no second icon, the panel opens instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_panel_top_right(app)))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![AT_LOGIN])))
         .invoke_handler(tauri::generate_handler![
-            api_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
-            box_state, box_start, box_stop, open_explorer, hide_panel, quit, set_tray_state
+            api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
+            box_state, box_start, box_stop, box_restart, worker_releases, open_explorer, hide_panel, fit_panel, quit, set_tray_state
         ])
         .setup(|app| {
             // A menu bar app: no Dock icon, no app switcher entry.
@@ -556,29 +650,28 @@ pub fn run() {
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, position, .. } = event {
-                        toggle_panel(tray.app_handle(), position);
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, position, rect, .. } = event {
+                        toggle_panel(tray.app_handle(), position, rect);
                     }
                 })
                 .build(app)?;
             app.manage(TrayHandle(tray));
 
-            // Development only: IMD_AGENTS_SHOW=1 opens the panel at launch, top right, for looking at it
-            // without hunting for the icon (a menu bar manager may hide it).
-            #[cfg(debug_assertions)]
-            if std::env::var_os("IMD_AGENTS_SHOW").is_some() {
-                if let (Some(win), Ok(Some(monitor))) = (app.get_webview_window("panel"), app.primary_monitor()) {
-                    let scale = monitor.scale_factor();
-                    let x = monitor.position().x as f64 + monitor.size().width as f64 - 380.0 * scale;
-                    let _ = win.set_position(PhysicalPosition::new(x, 40.0 * scale));
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+            // Opened by hand, the panel opens too: a menu bar manager may hide the icon.
+            if !std::env::args().any(|arg| arg == AT_LOGIN) {
+                show_panel_top_right(app.handle());
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running IMD Agents");
+        .build(tauri::generate_context!())
+        .expect("error while running IMD Agents")
+        .run(|_app, _event| {
+            // Opened again while running, on macOS (Spotlight, Finder, Raycast): the panel opens.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_panel_top_right(_app);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -592,6 +685,16 @@ mod tests {
             format!("IMD app v1\npause\n22\n{}\n1790000000\nhttps://api.imd.fun", "ab".repeat(32))
         );
         assert_eq!(action_text("unlink", None, "n", 1, "o"), "IMD app v1\nunlink\n-\nn\n1\no");
+    }
+
+    #[test]
+    fn only_the_rewards_reads_go_to_the_explorer() {
+        let wallet = "0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40";
+        assert!(explorer_path(&format!("/api/earned?wallet={wallet}")).is_ok());
+        assert!(explorer_path(&format!("/api/earned/value?wallet={wallet}")).is_ok());
+        for bad in ["/api/claim?wallet=0x1", "/api/earned?wallet=0xzz", "/api/earned?wallet=0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40&x=1", "https://evil.test/api/earned"] {
+            assert!(explorer_path(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

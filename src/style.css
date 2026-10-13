@@ -1,89 +1,120 @@
-/* IMD Agents: one quiet panel. System type, solid surfaces, the masks as the only colour beside the dots.
+/* IMD Agents: one quiet panel. System type, rounded numbers, soft cards, the masks and coins as the only
+   colour beside the dots. Nothing snaps: numbers roll, the panel grows and shrinks, views slide.
    Light and dark follow the system. */
 :root {
   --bg: #ffffff;
+  --card: #f4f4f6;
+  --card-hover: #ececef;
   --ink: #0b0b0c;
   --ink-2: #6e6e73;
   --ink-3: #a1a1a6;
   --line: rgba(0, 0, 0, 0.08);
-  --hover: rgba(0, 0, 0, 0.045);
+  --hover: rgba(0, 0, 0, 0.04);
   --press: rgba(0, 0, 0, 0.08);
   --on: #30b85a;
   --changing: #0a84ff;
   --warn: #f29a0a;
-  --off: #b4b4b9;
+  --warn-ink: #a35f00;
+  --off: #c2c2c7;
   --danger: #e5352b;
+  --shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.14), 0 1px 3px rgba(0, 0, 0, 0.05), 0 12px 28px -8px rgba(0, 0, 0, 0.24);
+  /* settles without passing its mark: most motion */
+  --ease: cubic-bezier(0.2, 0.9, 0.25, 1);
+  /* passes and comes back: only where a hand moved something */
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --rounded: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", system-ui, sans-serif;
   font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   color-scheme: light dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #161617;
+    --bg: #1c1c1e;
+    --card: #2a2a2d;
+    --card-hover: #333337;
     --ink: #f5f5f7;
     --ink-2: #a1a1a6;
     --ink-3: #6e6e73;
     --line: rgba(255, 255, 255, 0.09);
-    --hover: rgba(255, 255, 255, 0.055);
+    --hover: rgba(255, 255, 255, 0.05);
     --press: rgba(255, 255, 255, 0.1);
     --off: #5d5d62;
+    --warn-ink: #ffb340;
+    --shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.16), 0 12px 28px -8px rgba(0, 0, 0, 0.7);
   }
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; background: transparent; overflow: hidden; user-select: none; -webkit-user-select: none; }
-body { color: var(--ink); -webkit-font-smoothing: antialiased; }
+/* the window is the panel and room for its shadow, as the app sizes it: a little above, more at the sides,
+   most below, where the shadow falls */
+body { padding: 6px 22px 32px; color: var(--ink); -webkit-font-smoothing: antialiased; }
+body[data-above="true"] { display: flex; flex-direction: column; justify-content: flex-end; height: 100vh; }
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
-:focus-visible { outline: 2px solid var(--changing); outline-offset: 2px; border-radius: 8px; }
+/* a keyboard's place, in the shape of what holds it */
+:focus-visible { outline: 2px solid color-mix(in srgb, var(--changing) 60%, transparent); outline-offset: 1px; }
+.row:focus-visible, .opener:focus-visible, .reward:focus-visible { outline-offset: -2px; }
 
 .panel {
+  position: relative;
   width: 360px;
-  padding: 14px 10px 10px;
+  overflow: hidden;
   background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  transform-origin: 50% 0;
 }
+body[data-above="true"] .panel { transform-origin: 50% 100%; }
+#app { padding: 14px 10px 10px; }
+/* the view played out while the next slides in */
+.ghost { position: absolute; inset: 0 0 auto; padding: 14px 10px 10px; pointer-events: none; }
 
 /* ── header ─────────────────────────────────────────────────────────── */
-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 10px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 8px; }
 .title { font-size: 15px; font-weight: 650; letter-spacing: -0.012em; }
 .summary { margin-top: 1px; font-size: 12px; color: var(--ink-2); }
-.icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--ink-2); }
+.icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: var(--ink-2); transition: background-color 0.15s, color 0.15s; }
+.icon svg { transition: transform 0.5s var(--ease); }
 .icon:hover { background: var(--hover); color: var(--ink); }
-.back { padding: 4px 6px; border-radius: 6px; color: var(--ink-2); }
+.icon:hover svg { transform: rotate(45deg); }
+.icon:active { background: var(--press); }
+.back { justify-self: start; padding: 5px 8px 5px 4px; border-radius: 8px; color: var(--ink-2); transition: background-color 0.15s, color 0.15s; }
 .back:hover { color: var(--ink); background: var(--hover); }
+.settings-head { display: grid; grid-template-columns: 1fr auto 1fr; padding-bottom: 2px; }
 
 /* ── agents ─────────────────────────────────────────────────────────── */
 .rows { display: flex; flex-direction: column; gap: 2px; }
 .row {
   display: grid;
-  grid-template-columns: 40px 1fr auto;
+  grid-template-columns: 44px 1fr auto;
   align-items: center;
   gap: 12px;
   padding: 8px;
-  border-radius: 10px;
+  border-radius: 12px;
+  transition: background-color 0.15s, transform 0.2s var(--ease);
 }
 .row:hover { background: var(--hover); }
-.row:active { background: var(--press); }
+.row:active { background: var(--press); transform: scale(0.99); }
 
-.mask { position: relative; width: 40px; height: 40px; flex: none; }
-.mask img { display: block; width: 40px; height: 40px; }
-.mask.away img { filter: grayscale(1); opacity: 0.5; }
-.mask-blank { display: block; width: 30px; height: 36px; margin: 2px 5px; border-radius: 12px; background: var(--hover); }
+.mask { position: relative; width: 44px; height: 44px; flex: none; }
+.mask img { display: block; width: 44px; height: 44px; filter: drop-shadow(0 2px 2.5px rgba(0, 0, 0, 0.22)); transition: filter 0.4s, opacity 0.4s; }
+.mask.away img { filter: grayscale(1) drop-shadow(0 2px 2.5px rgba(0, 0, 0, 0.22)); opacity: 0.5; }
+.mask-blank { display: block; width: 32px; height: 40px; margin: 2px 6px; border-radius: 13px; background: var(--card); }
 .dot {
   position: absolute;
   right: 0;
   bottom: 1px;
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--off);
   box-shadow: 0 0 0 2.5px var(--bg);
+  transition: background-color 0.4s;
 }
 .dot.on { background: var(--on); }
 .dot.changing { background: var(--changing); }
 .dot.warn { background: var(--warn); }
-.dot.live::after {
+.dot.live::after, .pulse::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -91,113 +122,319 @@ header { display: flex; align-items: center; justify-content: space-between; gap
   background: var(--on);
   animation: breathe 1.8s ease-out infinite;
 }
-@keyframes breathe { from { transform: scale(1); opacity: 0.55; } to { transform: scale(2.3); opacity: 0; } }
+@keyframes breathe { from { transform: scale(1); opacity: 0.55; } to { transform: scale(2.4); opacity: 0; } }
 
 .lines { display: flex; flex-direction: column; min-width: 0; }
-.name { font-size: 13px; font-weight: 600; letter-spacing: -0.005em; }
+/* the number always, the name after it */
+.name { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: 13px; letter-spacing: -0.005em; }
+.name b { flex: none; font-weight: 650; font-variant-numeric: tabular-nums; }
+.name .label { overflow: hidden; font-weight: 500; color: var(--ink-2); white-space: nowrap; text-overflow: ellipsis; }
+/* a word beside the name for what wants its owner: an older worker */
+.tag { flex: none; align-self: center; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.tag.warn { color: var(--warn-ink); background: color-mix(in srgb, var(--warn) 18%, transparent); }
 .status, .job { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .status { font-size: 12px; color: var(--ink-2); }
-.job { margin-top: 1px; font-size: 11.5px; color: var(--ink-3); }
-.chevron { padding-right: 4px; font-size: 18px; line-height: 1; color: var(--ink-3); }
+.job { margin-top: 1px; font-size: 11px; color: var(--ink-3); }
+/* a working agent's status: a light that passes over it, slowly, as long as it works */
+.status.shimmer {
+  color: transparent;
+  background: linear-gradient(100deg, var(--ink-2) 40%, var(--ink) 50%, var(--ink-2) 60%) 0 0 / 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: shimmer 2.8s linear infinite;
+}
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+/* every row opens: a chevron says so, beside the switch where there is one, and turns as it opens */
+.row-end { display: flex; align-items: center; gap: 10px; }
+.chevron { display: grid; place-items: center; width: 12px; color: var(--ink-3); transition: transform 0.3s var(--ease), color 0.15s; }
+.row:not(.open):hover .chevron { transform: translateX(2px); color: var(--ink-2); }
 
-/* the switch: ink when on, so it reads in black and white like the rest */
-.switch { position: relative; width: 34px; height: 20px; flex: none; border-radius: 10px; background: var(--press); transition: background 0.2s; }
+/* the switch: ink when on, so it reads in black and white like the rest; its knob springs, and
+   stretches while pressed */
+.switch { position: relative; width: 38px; height: 22px; flex: none; border-radius: 11px; background: var(--press); transition: background-color 0.25s var(--ease); }
 .switch span {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
   background: #fff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-  transition: transform 0.28s cubic-bezier(0.2, 0.9, 0.25, 1);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  transition: transform 0.45s var(--spring), width 0.2s var(--ease), background-color 0.25s;
 }
+.switch:active span { width: 23px; }
 .switch.on { background: var(--ink); }
-.switch.on span { transform: translateX(14px); background: var(--bg); }
+.switch.on span { transform: translateX(16px); background: var(--bg); }
+.switch.on:active span { transform: translateX(11px); }
 .switch:disabled { opacity: 0.45; }
+
+.row.open .chevron { transform: rotate(90deg); }
+
+/* an agent's tray: its job now, its last three, how it is judged */
+.agent-tray { margin: 0 0 6px; padding: 10px 12px; border-radius: 12px; background: var(--card); }
+.tray-label { margin-bottom: 6px; font-size: 11px; color: var(--ink-3); }
+.tray-label:not(:first-child) { margin-top: 12px; }
+.job-now + .job-now { margin-top: 10px; }
+.job-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.job-head b { font-weight: 600; }
+.job-age { margin-left: auto; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.objective {
+  display: -webkit-box;
+  margin: 4px 0 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-2);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.idle { margin: 0; font-size: 12px; color: var(--ink-2); }
+.done { display: grid; grid-template-columns: 8px 1fr; gap: 10px; align-items: start; padding: 4px 0; }
+.mark { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--off); }
+.mark.accepted { background: var(--on); }
+.mark.rejected, .mark.failed { background: var(--danger); }
+.mark.pending { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-3); }
+.done-lines { display: flex; flex-direction: column; min-width: 0; }
+.done-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+.done-head b { overflow: hidden; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.done-age { flex: none; font-size: 11px; color: var(--ink-3); }
+.done-objective { overflow: hidden; font-size: 11px; color: var(--ink-2); white-space: nowrap; text-overflow: ellipsis; }
+/* what an agent needs from its owner: an update, a look at what failed, a restart */
+.care { margin: 10px 0 0; font-size: 12px; line-height: 1.4; color: var(--ink-2); }
+.care.warn::before, .care.bad::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 7px 1px 0; border-radius: 50%; background: var(--warn); }
+.care.bad::before { background: var(--danger); }
+.care.bad { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.care-actions { margin-top: 10px; }
+.care-actions .pill:disabled { opacity: 0.6; }
+.tray-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 0.5px solid var(--line); font-size: 11px; color: var(--ink-2); }
+.facts { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.link { flex: none; padding: 2px 6px; margin-right: -6px; border-radius: 6px; font-size: 11px; font-weight: 600; color: var(--ink-2); transition: background-color 0.15s, color 0.15s; }
+.link:hover { color: var(--ink); background: var(--card-hover); }
 
 /* skeleton while the first read is out */
 .row.skeleton .lines { gap: 6px; }
-.bar { display: block; width: 58%; height: 9px; border-radius: 5px; background: var(--hover); }
+.bar { display: block; width: 58%; height: 9px; border-radius: 5px; background: var(--card); }
 .bar.short { width: 36%; }
 
-/* ── numbers ────────────────────────────────────────────────────────── */
-.numbers { display: grid; grid-template-columns: 1fr 1fr; margin-top: 8px; padding: 12px 8px 2px; border-top: 1px solid var(--line); }
-.numbers b { display: block; font-size: 20px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
-.numbers span { font-size: 12px; color: var(--ink-2); }
+/* ── cards ──────────────────────────────────────────────────────────── */
+.card { margin-top: 8px; overflow: hidden; background: var(--card); border-radius: 14px; }
 
-/* ── rewards ────────────────────────────────────────────────────────── */
-.rewards { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
-.rewards .head { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 6px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
-.claim { padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--bg); background: var(--ink); }
+/* the work: three numbers, then two weeks of it */
+.work { padding: 14px 14px 10px; }
+.numbers { display: grid; grid-template-columns: repeat(3, 1fr); }
+.numbers b { display: block; font: 600 24px/1.15 var(--rounded); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.numbers .cap { display: block; margin-top: 2px; font-size: 12px; color: var(--ink-2); }
+/* what came in since the panel was last open */
+/* a job accepted while the panel is open, on its way from the face that did it to the count */
+.flyer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 10;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font: 700 12px/1.2 var(--rounded);
+  color: #fff;
+  background: var(--on);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--on) 45%, transparent);
+  pointer-events: none;
+}
+.gain {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font: 600 11px/1.3 var(--rounded);
+  vertical-align: 5px;
+  color: var(--on);
+  background: color-mix(in srgb, var(--on) 14%, transparent);
+  animation: pop 0.5s var(--spring) 0.3s both;
+}
+@keyframes pop { from { opacity: 0; transform: scale(0.6); } }
+.spark { display: flex; align-items: flex-end; gap: 5px; height: 34px; margin-top: 16px; }
+.spark i { flex: 1; min-width: 0; border-radius: 4px; background: var(--ink-3); opacity: 0.5; transform-origin: 50% 100%; transition: height 0.6s var(--ease), opacity 0.3s; }
+.spark i.today { background: var(--ink); opacity: 1; }
+.spark i.none { opacity: 0.22; }
+.spark i.unknown { background: transparent; opacity: 1; box-shadow: inset 0 0 0 1px var(--line); }
+/* scrubbing: the day under the pointer lights, the other days and numbers step back */
+.spark { cursor: default; outline-offset: 4px; }
+.spark.scrubbing i { opacity: 0.22; }
+.spark.scrubbing i.hot { opacity: 1; background: var(--ink); }
+.numbers > div { transition: opacity 0.25s var(--ease); }
+.card.scrubbing .numbers > div:not(:first-child) { opacity: 0.3; }
+.axis { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: var(--ink-3); }
+.opening .spark i { animation: grow 0.7s var(--ease) both; animation-delay: calc(var(--i) * 22ms); }
+@keyframes grow { from { transform: scaleY(0); } }
+
+/* a list in a card: the swarm, rewards, and every settings group */
+.line {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 13px;
+  text-align: left;
+  --surface: var(--card);
+}
+.line + .line::before, .ticker + .line::before, .work + .line::before, .tray::before { content: ""; position: absolute; top: 0; right: 0; left: 14px; height: 0.5px; background: var(--line); }
+.line-label { color: var(--ink-2); }
+.line-value { display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.pulse { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--on); }
+
+/* the swarm's ticker: what just happened, one line at a time */
+.line.swarm { min-height: 40px; }
+.ticker { position: relative; height: 32px; margin-top: -6px; overflow: hidden; }
+.tick { position: absolute; inset: 0 8px; display: flex; align-items: center; gap: 8px; padding: 0 6px; border-radius: 8px; font-size: 12px; text-align: left; color: var(--ink-2); transition: background-color 0.15s; }
+.tick:hover { background: var(--card-hover); }
+.tick:hover .tick-text { color: var(--ink); }
+.tick b { font-weight: 600; color: var(--ink); }
+.tick-text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tick-age { flex: none; font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.tick-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--off); }
+.tick-dot.accepted { background: var(--on); }
+.tick-dot.working { background: var(--changing); }
+.tick-dot.job { background: var(--warn); }
+.tick-dot.joined { background: transparent; box-shadow: inset 0 0 0 1.5px var(--on); }
+.tick-dot.site { background: #a855f7; }
+
+/* rewards: a stack of coins that opens into a tray */
+.rewards-head { padding: 0 8px 0 0; transition: background-color 0.15s; }
+/* the whole line lights under the pointer, Claim with it, so it reads as one row */
+.rewards-head:has(.opener:hover) { --surface: var(--card-hover); background: var(--card-hover); }
+.opener { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: 10px; align-self: stretch; padding: 0 6px 0 14px; }
+.opener-end { display: flex; align-items: center; gap: 8px; }
+/* what the tokens ready to claim are worth: the dollars said strongly, what they are said after */
+.worth { color: var(--ink-2); white-space: nowrap; }
+.worth b { font: 600 15px/1 var(--rounded); color: var(--ink); font-variant-numeric: tabular-nums; }
+.coins { display: flex; align-items: center; }
+.coin {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-left: -7px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--card-hover);
+  box-shadow: 0 0 0 2px var(--surface, var(--card));
+  font: 700 10px/1 var(--rounded);
+  color: #fff;
+  transition: box-shadow 0.15s;
+}
+.coin:first-child { margin-left: 0; }
+/* a coin that came in since the last look drops into the stack */
+.coin.new { animation: drop 0.7s var(--spring) both; animation-delay: calc(0.5s + var(--d) * 90ms); }
+@keyframes drop { from { opacity: 0; transform: translateY(-16px) scale(0.6); } }
+.coin img { width: 100%; height: 100%; object-fit: cover; }
+/* a box of its own, so the arrow centres on the coins rather than sitting on a line of text */
+.chev { display: grid; place-items: center; width: 12px; height: 12px; color: var(--ink-3); transition: transform 0.35s var(--ease); }
+.chev svg, .chevron svg { display: block; }
+.open .chev { transform: rotate(90deg); }
+.claim { flex: none; padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--bg); background: var(--ink); transition: transform 0.15s var(--ease), opacity 0.15s; }
 .claim:hover { opacity: 0.88; }
-.claim:active { transform: scale(0.97); }
+.claim:active { transform: scale(0.95); }
+.tray { position: relative; padding: 4px 6px 6px; }
 .reward {
   display: grid;
   grid-template-columns: 22px 1fr auto 30px;
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 6px 8px;
-  border-radius: 8px;
+  padding: 7px 8px;
+  border-radius: 10px;
   text-align: left;
+  --surface: var(--card);
+  transition: background-color 0.15s;
 }
-.reward:hover { background: var(--hover); }
-.logo { display: grid; place-items: center; width: 22px; height: 22px; overflow: hidden; border-radius: 6px; background: var(--hover); font-size: 11px; font-weight: 600; color: var(--ink-2); }
-.logo img { width: 100%; height: 100%; object-fit: cover; }
-.symbol { overflow: hidden; font-size: 12.5px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
-.amount { font-size: 12.5px; font-variant-numeric: tabular-nums; }
-.when { font-size: 11.5px; color: var(--ink-3); text-align: right; }
-.more { padding: 4px 8px; font-size: 12px; color: var(--ink-2); }
+.reward:hover { --surface: var(--card-hover); background: var(--card-hover); }
+.reward .coin { margin: 0; }
+.symbol { overflow: hidden; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.amount { font-variant-numeric: tabular-nums; }
+.age { font-size: 11px; color: var(--ink-3); text-align: right; }
+.more { width: 100%; padding: 6px 8px 2px; font-size: 12px; text-align: left; color: var(--ink-2); }
 .more:hover { color: var(--ink); }
 
-/* ── connecting ─────────────────────────────────────────────────────── */
-.connect { width: 100%; margin-top: 10px; padding: 9px; border-radius: 10px; font-size: 12.5px; font-weight: 600; background: var(--hover); }
-.connect:hover { background: var(--press); }
-.welcome { padding: 4px 8px 2px; }
+/* numbers that roll, digit by digit, when they change */
+.roll { display: inline-flex; vertical-align: top; white-space: pre; }
+/* each cell one line tall, in the line's own height, so a rolling digit sits on the text's baseline */
+.digit { display: inline-block; height: 1lh; overflow: hidden; }
+.digit > span { display: flex; flex-direction: column; transition: transform 0.7s var(--ease); }
+.digit > span > span { height: 1lh; }
+
+/* ── first run ──────────────────────────────────────────────────────── */
+.welcome { padding: 2px 8px 4px; }
 .welcome-title { font-size: 15px; font-weight: 650; letter-spacing: -0.012em; }
-.welcome p { margin: 6px 0 14px; font-size: 12.5px; color: var(--ink-2); }
-.primary { padding: 8px 14px; border-radius: 10px; font-size: 12.5px; font-weight: 600; color: var(--bg); background: var(--ink); }
+.welcome p { margin: 4px 0 12px; font-size: 12px; color: var(--ink-2); }
+.welcome form { display: flex; gap: 8px; }
+.welcome input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+  transition: border-color 0.15s;
+}
+.welcome input:focus { border-color: var(--ink-3); }
+.primary { padding: 8px 14px; border-radius: 10px; font-weight: 600; color: var(--bg); background: var(--ink); transition: transform 0.15s var(--ease), opacity 0.15s; }
 .primary:hover { opacity: 0.9; }
-.primary:active { transform: scale(0.98); }
-.primary.wide { width: 100%; }
-.ghost { padding: 6px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 500; background: var(--hover); }
-.ghost:hover { background: var(--press); }
-.ghost.danger { color: var(--danger); }
-.linking { margin-top: 10px; padding: 12px 8px 2px; border-top: 1px solid var(--line); }
+.primary:active { transform: scale(0.97); }
+.pill { padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--bg); box-shadow: 0 0 0 0.5px var(--line); transition: transform 0.15s var(--ease), background-color 0.15s; }
+.pill:hover { background: var(--card-hover); }
+.pill:active { transform: scale(0.96); }
+.pill.danger { color: var(--danger); }
+
+/* ── settings ───────────────────────────────────────────────────────── */
+.group-label { padding: 14px 8px 6px; font-size: 12px; color: var(--ink-2); }
+.card.list { margin-top: 0; }
+.list .line { min-height: 42px; }
+.wallet .address { font-variant-numeric: tabular-nums; }
+.wallet .line-value { color: var(--ink-2); }
+.remove { display: grid; place-items: center; width: 22px; height: 22px; margin-right: -4px; border-radius: 6px; color: var(--ink-3); transition: background-color 0.15s, color 0.15s; }
+.remove:hover { color: var(--ink); background: var(--card-hover); }
+.inline-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--ink);
+  background: none;
+  border: 0;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.inline-input::placeholder { color: var(--ink-3); }
+.name-field .inline-input { text-align: right; }
+.footnote { margin: 0; padding: 6px 14px 0; font-size: 11px; line-height: 1.45; color: var(--ink-3); }
+.sub { display: block; font-size: 11px; color: var(--ink-2); }
+.linking { padding: 12px 14px; }
 .linking-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-.code { margin: 8px 0 12px; font: 600 26px/1.2 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 0.14em; user-select: text; -webkit-user-select: text; }
+.code { margin: 8px 0 10px; font: 600 24px/1.2 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 0.14em; user-select: text; -webkit-user-select: text; }
 .actions { display: flex; justify-content: flex-end; gap: 8px; }
 .spinner { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--ink-2); border-radius: 50%; animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.card.spaced { margin-top: 14px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .note { margin-top: 10px; padding: 0 8px; font-size: 12px; color: var(--ink-2); }
 .note.bad { color: var(--danger); }
 
-/* ── settings ───────────────────────────────────────────────────────── */
-.group { margin-top: 6px; padding: 8px 0 4px; border-top: 1px solid var(--line); }
-.label { padding: 0 8px 4px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
-.item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 8px; font-size: 13px; }
-.item.actions { justify-content: flex-start; }
-.muted { font-size: 12px; color: var(--ink-2); }
-.field input {
-  flex: 1;
-  max-width: 210px;
-  padding: 6px 8px;
-  font: inherit;
-  font-size: 12.5px;
-  text-align: right;
-  color: var(--ink);
-  background: var(--hover);
-  border: 1px solid transparent;
-  border-radius: 8px;
-  outline: none;
-}
-.field input:focus { border-color: var(--ink-3); }
-.hint { margin: 2px 0 0; padding: 0 8px 4px; font-size: 11.5px; line-height: 1.45; color: var(--ink-3); }
-
 @media (prefers-reduced-motion: reduce) {
-  .dot.live::after { display: none; }
-  .switch, .switch span { transition: none; }
-  .spinner { animation-duration: 3s; }
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+  .dot.live::after, .pulse::after { display: none; }
+  .status.shimmer { color: var(--ink-2); background: none; animation: none; }
+  .flyer { display: none; }
 }

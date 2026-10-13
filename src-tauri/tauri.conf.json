@@ -17,15 +17,16 @@
         "label": "panel",
         "url": "index.html",
         "title": "IMD Agents",
-        "width": 360,
-        "height": 480,
+        "width": 404,
+        "height": 518,
         "decorations": false,
         "transparent": true,
         "visible": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "shadow": true,
-        "resizable": false
+        "shadow": false,
+        "resizable": false,
+        "acceptFirstMouse": true
       }
     ],
     "security": {
