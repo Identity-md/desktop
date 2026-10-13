@@ -84,6 +84,19 @@ export const boxState = async (): Promise<Box> => {
 export const boxStart = (runtime: string) => invoke<void>("box_start", { runtime });
 export const boxStop = () => invoke<void>("box_stop");
 export const boxRestart = () => invoke<void>("box_restart");
+
+/** How far setting this computer's box up has got. */
+export type Setup = { docker: "missing" | "stopped" | "running"; image: boolean; worker: boolean; claude: boolean; device_key: string | null };
+export const boxSetupState = () => invoke<Setup>("box_setup_state");
+/** Docker Desktop: its download page if it is not installed, the app if it is not running. */
+export const dockerOpen = () => invoke<void>("docker_open");
+export const boxPull = () => invoke<void>("box_pull");
+export const boxInstall = () => invoke<void>("box_install");
+export const boxSignIn = () => invoke<void>("box_sign_in");
+/** Pairs the box; its code arrives first as the `box-pairing` event. */
+export const boxPair = () => invoke<{ token_id: string | null; register: string | null }>("box_pair");
+export const boxPairCancel = () => invoke<void>("box_pair_cancel");
+export const openPairing = (url: string) => invoke<void>("open_pairing", { url });
 /** The worker's newest releases, from GitHub, as daemons update from them. */
 export const workerReleases = () => invoke<Answer<ReleaseRow[]>>("worker_releases");
 

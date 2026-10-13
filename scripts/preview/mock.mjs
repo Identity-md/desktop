@@ -47,6 +47,13 @@ export async function mockApp(context, { fixtures, scenario, owner, scheme, zoom
           case "plugin:event|listen": handlers[args.event] = args.handler; return 1;
           case "seat_pause": return { status: 200, body: { paused: args.paused } };
           case "worker_releases": return { status: 200, body: window.__fixtures.releases ?? [] };
+          // setting a box up: how far it has got (`setup` in the scenario), and steps that take their time
+          case "box_setup_state": return scenario.setup ?? { docker: "running", image: true, worker: true, claude: true, device_key: deviceKey };
+          case "docker_open": case "box_sign_in": case "open_pairing": return null;
+          case "box_pull": case "box_install": return new Promise((done) => setTimeout(done, 60_000));
+          case "box_pair":
+            setTimeout(() => window.__emit("box-pairing", { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" }), 300);
+            return new Promise(() => {});
           case "explorer_get": return window.__fixtures.explorer?.[args.path] ?? { status: 404, body: null };
           default: return null;
         }

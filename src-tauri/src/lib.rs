@@ -306,11 +306,11 @@ fn docker() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-fn run_docker(args: &[&str], timeout: Duration) -> Option<(bool, String)> {
+/// Docker's CLI, ready to run: its own directory first on PATH, where Docker Desktop's credential
+/// helpers live beside it.
+fn docker_command() -> Option<Command> {
     let binary = docker()?;
     let mut command = hidden(Command::new(&binary));
-    command.args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    // Docker Desktop's credential helpers live beside the CLI; keep its directory on PATH for them.
     if let Some(dir) = binary.parent() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
@@ -319,6 +319,12 @@ fn run_docker(args: &[&str], timeout: Duration) -> Option<(bool, String)> {
             command.env("PATH", joined);
         }
     }
+    Some(command)
+}
+
+fn run_docker(args: &[&str], timeout: Duration) -> Option<(bool, String)> {
+    let mut command = docker_command()?;
+    command.args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = command.spawn().ok()?;
     let started = std::time::Instant::now();
     loop {
@@ -370,6 +376,238 @@ async fn box_state() -> BoxState {
     })
     .await
     .unwrap_or(BoxState { state: "no-docker", installed: false, device_key: None })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Setting a box up, as the box's README does it the first time, one step at a time from the panel:
+// Docker, the box, the worker in it, Claude's sign-in, pairing. Then it starts like any other.
+// ---------------------------------------------------------------------------------------------
+
+/// Where the box comes from: built for Apple Silicon and Intel by the box's own repository.
+const BOX_PUBLISHED: &str = "ghcr.io/gtmcknight/imd-worker-box:latest";
+/// The one-off box that pairs, named so that a cancel can stop it.
+const BOX_PAIRING: &str = "imd-worker-pair";
+const DOCKER_DOWNLOAD: &str = "https://www.docker.com/products/docker-desktop/";
+
+/// The flags every box runs with, as `./box` gives them: nothing of this computer mounted, every
+/// capability dropped but the few its firewall needs before it hands over to the worker's own user.
+fn box_flags() -> Vec<String> {
+    [
+        "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "SETPCAP", "--cap-add", "CHOWN",
+        "--security-opt", "no-new-privileges:true",
+        "--cpus", "4", "--memory", "6g", "--pids-limit", "2048",
+        "-v",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .chain([format!("{BOX_VOLUME}:/home/imd")])
+    .collect()
+}
+
+#[derive(Serialize)]
+struct Setup {
+    /// "missing", "stopped" (installed, not running) or "running".
+    docker: &'static str,
+    /// The box's image is here.
+    image: bool,
+    /// The worker is installed in the box's volume.
+    worker: bool,
+    /// Claude Code is signed in, in the box.
+    claude: bool,
+    /// The worker's device key: the network says which agent it is paired to.
+    device_key: Option<String>,
+}
+
+/// How far setting this computer's box up has got. One look inside the box answers the last three:
+/// whether the worker is there, whether Claude's sign-in file is (never what is in it), and the key.
+#[tauri::command]
+async fn box_setup_state() -> Setup {
+    tauri::async_runtime::spawn_blocking(|| {
+        let none = |docker| Setup { docker, image: false, worker: false, claude: false, device_key: None };
+        if docker().is_none() {
+            return none("missing");
+        }
+        if !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
+            return none("stopped");
+        }
+        if !run_docker(&["image", "inspect", "--format", "{{.Id}}", BOX_IMAGE], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
+            return none("running");
+        }
+        let look = r#"command -v imd >/dev/null && echo worker; test -s "$HOME/.claude/.credentials.json" && echo claude; command -v imd >/dev/null && imd whoami 2>/dev/null | head -1; true"#;
+        let running = run_docker(&["inspect", "-f", "{{.State.Running}}", BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, out)| ok && out == "true");
+        let answer = if running {
+            run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", look], Duration::from_secs(30))
+        } else {
+            let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
+            args.extend(box_flags());
+            args.extend([BOX_IMAGE.to_string(), "sh".into(), "-c".into(), look.to_string()]);
+            run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(60))
+        };
+        let lines: Vec<String> = answer.filter(|(ok, _)| *ok).map(|(_, out)| out.lines().map(str::to_string).collect()).unwrap_or_default();
+        Setup {
+            docker: "running",
+            image: true,
+            worker: lines.iter().any(|l| l == "worker"),
+            claude: lines.iter().any(|l| l == "claude"),
+            device_key: lines.into_iter().find(|l| l.len() == 64 && l.chars().all(|c| c.is_ascii_hexdigit())),
+        }
+    })
+    .await
+    .unwrap_or(Setup { docker: "missing", image: false, worker: false, claude: false, device_key: None })
+}
+
+/// Docker Desktop: its download page when it is not installed, the app itself when it is not running.
+#[tauri::command]
+fn docker_open(app: tauri::AppHandle) -> Result<(), String> {
+    if docker().is_none() {
+        return app.opener().open_url(DOCKER_DOWNLOAD, None::<&str>).map_err(|e| e.to_string());
+    }
+    #[cfg(target_os = "macos")]
+    let opened = Command::new("open").args(["-a", "Docker"]).status();
+    #[cfg(target_os = "windows")]
+    let opened = hidden(Command::new("cmd")).args(["/c", "start", "", "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe"]).status();
+    #[cfg(target_os = "linux")]
+    let opened = Command::new("systemctl").args(["--user", "start", "docker-desktop"]).status();
+    match opened {
+        Ok(status) if status.success() => Ok(()),
+        _ => Err("Open Docker yourself, then come back".into()),
+    }
+}
+
+/// Downloads the published box and names it as `./box` names its own build, so either runs it.
+#[tauri::command]
+async fn box_pull() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        match run_docker(&["pull", BOX_PUBLISHED], Duration::from_secs(30 * 60)) {
+            Some((true, _)) => {}
+            Some((false, why)) => return Err(why.lines().last().unwrap_or("could not download the box").to_string()),
+            None => return Err("Docker is not installed".into()),
+        }
+        match run_docker(&["tag", BOX_PUBLISHED, BOX_IMAGE], Duration::from_secs(30)) {
+            Some((true, _)) => Ok(()),
+            Some((false, why)) => Err(why),
+            None => Err("Docker is not installed".into()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Installs the worker and Claude Code into the box's volume, as `./box setup` does before its shell.
+#[tauri::command]
+async fn box_install() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
+        args.extend(box_flags());
+        args.extend([BOX_IMAGE.to_string(), "imd-box-setup".into()]);
+        match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(20 * 60)) {
+            Some((true, _)) => Ok(()),
+            Some((false, why)) => Err(why.lines().last().unwrap_or("could not install the worker").to_string()),
+            None => Err("Docker is not installed".into()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Claude's sign-in is Claude's own, in a terminal: a window opens on Claude Code inside the box,
+/// with one line saying what to type. The panel sees it done when the sign-in file appears.
+#[tauri::command]
+fn box_sign_in() -> Result<(), String> {
+    let binary = docker().ok_or("Docker is not installed")?;
+    let docker = binary.to_string_lossy().to_string();
+    let flags = box_flags().join(" ");
+    let say = "Sign in to Claude for your IMD agent: type /login, follow it in your browser, then /exit.";
+    #[cfg(target_os = "macos")]
+    {
+        let line = format!("clear; echo '{say}'; echo; '{docker}' run -it --rm {flags} {BOX_IMAGE} claude; exit");
+        let script = format!("tell application \"Terminal\"\n  activate\n  do script \"{}\"\nend tell", line.replace('\\', "\\\\").replace('"', "\\\""));
+        Command::new("osascript").args(["-e", &script]).status().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let line = format!("echo {say} && \"{docker}\" run -it --rm {flags} {BOX_IMAGE} claude");
+        Command::new("cmd").args(["/c", "start", "IMD box", "cmd", "/k", &line]).status().map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let line = format!("echo '{say}'; echo; '{docker}' run -it --rm {flags} {BOX_IMAGE} claude");
+        Command::new("x-terminal-emulator").args(["-e", "sh", "-c", &line]).status().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Clone)]
+struct PairingCode {
+    code: String,
+    url: String,
+}
+
+#[derive(Serialize)]
+struct Paired {
+    token_id: Option<String>,
+    /// The page to register the agent at, when its token is not an ERC-8004 agent yet.
+    register: Option<String>,
+}
+
+/// Pairs the box with the wallet that holds an agent: `imd pair` in a one-off box, its code and page
+/// handed to the panel as soon as it prints them, then its answer once the wallet has signed.
+#[tauri::command]
+async fn box_pair(app: tauri::AppHandle) -> Result<Paired, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::BufRead;
+        let _ = run_docker(&["rm", "-f", BOX_PAIRING], Duration::from_secs(30));
+        let mut command = docker_command().ok_or("Docker is not installed")?;
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_PAIRING.into()];
+        args.extend(box_flags());
+        args.extend([BOX_IMAGE.to_string(), "imd".into(), "pair".into()]);
+        command.args(&args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|e| e.to_string())?;
+        let stdout = child.stdout.take().ok_or("no output")?;
+        let mut code = String::new();
+        let mut paired = Paired { token_id: None, register: None };
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("Code") {
+                code = rest.trim().to_string();
+            } else if line.starts_with("http") && line.contains("/pair?code=") {
+                let _ = app.emit("box-pairing", PairingCode { code: code.clone(), url: line.to_string() });
+            } else if line.starts_with("http") && line.contains("/pair?register=") {
+                paired.register = Some(line.to_string());
+            } else if let Some(rest) = line.strip_prefix("Paired. Token ") {
+                paired.token_id = rest.split_whitespace().next().map(str::to_string);
+            }
+        }
+        let status = child.wait().map_err(|e| e.to_string())?;
+        if status.success() && paired.token_id.is_some() {
+            return Ok(paired);
+        }
+        let mut why = String::new();
+        if let Some(mut err) = child.stderr.take() {
+            use std::io::Read;
+            let _ = err.read_to_string(&mut why);
+        }
+        Err(why.lines().last().map(str::to_string).filter(|l| !l.is_empty()).unwrap_or_else(|| "Pairing stopped".into()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Opens the page a pairing code is approved on: the network's own pairing page, never another.
+#[tauri::command]
+fn open_pairing(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let base = format!("{}/pair?", api_base());
+    let ok = url.starts_with(&base) && url.len() < 256 && url.chars().all(|c| c.is_ascii_graphic()) && !url.contains("..");
+    if !ok {
+        return Err("not a pairing page".into());
+    }
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Stops a pairing that is waiting for a signature.
+#[tauri::command]
+async fn box_pair_cancel() {
+    let _ = tauri::async_runtime::spawn_blocking(|| run_docker(&["rm", "-f", BOX_PAIRING], Duration::from_secs(30))).await;
 }
 
 /// Starts the box exactly as `./box start` does: nothing of this computer mounted, every capability
@@ -625,7 +863,8 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![AT_LOGIN])))
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
-            box_state, box_start, box_stop, box_restart, worker_releases, open_explorer, hide_panel, fit_panel, quit, set_tray_state
+            box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
+            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state
         ])
         .setup(|app| {
             // A menu bar app: no Dock icon, no app switcher entry.
@@ -717,6 +956,16 @@ mod tests {
             println!("face {} bytes", svg.as_ref().map(|s| s.len()).unwrap_or(0));
             let state = box_state().await;
             println!("box {} installed {} device {:?}", state.state, state.installed, state.device_key.as_deref().map(|k| &k[..8]));
+        });
+    }
+
+    /// How far this computer's box is set up: `cargo test -- --ignored reads_this_computers_setup --nocapture`.
+    #[test]
+    #[ignore]
+    fn reads_this_computers_setup() {
+        tauri::async_runtime::block_on(async {
+            let s = box_setup_state().await;
+            println!("docker {} image {} worker {} claude {} device {:?}", s.docker, s.image, s.worker, s.claude, s.device_key.as_deref().map(|k| &k[..8]));
         });
     }
 

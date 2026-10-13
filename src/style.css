@@ -175,6 +175,7 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .agent-tray { margin: 0 0 6px; padding: 10px 12px; border-radius: 12px; background: var(--card); }
 .tray-label { margin-bottom: 6px; font-size: 11px; color: var(--ink-3); }
 .tray-label:not(:first-child) { margin-top: 12px; }
+.care + .tray-label { margin-top: 0; }
 .job-now + .job-now { margin-top: 10px; }
 .job-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .job-head b { font-weight: 600; }
@@ -202,13 +203,15 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .done-head b { overflow: hidden; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
 .done-age { flex: none; font-size: 11px; color: var(--ink-3); }
 .done-objective { overflow: hidden; font-size: 11px; color: var(--ink-2); white-space: nowrap; text-overflow: ellipsis; }
-/* what an agent needs from its owner: an update, a look at what failed, a restart */
-.care { margin: 10px 0 0; font-size: 12px; line-height: 1.4; color: var(--ink-2); }
-.care.warn::before, .care.bad::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 7px 1px 0; border-radius: 50%; background: var(--warn); }
-.care.bad::before { background: var(--danger); }
-.care.bad { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.care-actions { margin-top: 10px; }
-.care-actions .pill:disabled { opacity: 0.6; }
+/* what an agent needs from its owner, first in its tray: an update, a look at what failed, a restart */
+.care { margin: -2px 0 10px; padding-bottom: 10px; border-bottom: 0.5px solid var(--line); }
+.care-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 28px; font-size: 12px; color: var(--ink-2); }
+.care-row + .care-row { margin-top: 6px; }
+.care-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.care-row.warn .care-text, .care-row.bad .care-text { color: var(--ink); }
+.care-row.warn .care-text::before, .care-row.bad .care-text::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 7px 1px 0; border-radius: 50%; background: var(--warn); }
+.care-row.bad .care-text::before { background: var(--danger); }
+.care-row .pill:disabled { opacity: 0.6; }
 .tray-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 0.5px solid var(--line); font-size: 11px; color: var(--ink-2); }
 .facts { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .link { flex: none; padding: 2px 6px; margin-right: -6px; border-radius: 6px; font-size: 11px; font-weight: 600; color: var(--ink-2); transition: background-color 0.15s, color 0.15s; }
@@ -392,7 +395,7 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .primary { padding: 8px 14px; border-radius: 10px; font-weight: 600; color: var(--bg); background: var(--ink); transition: transform 0.15s var(--ease), opacity 0.15s; }
 .primary:hover { opacity: 0.9; }
 .primary:active { transform: scale(0.97); }
-.pill { padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--bg); box-shadow: 0 0 0 0.5px var(--line); transition: transform 0.15s var(--ease), background-color 0.15s; }
+.pill { flex: none; white-space: nowrap; padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--bg); box-shadow: 0 0 0 0.5px var(--line); transition: transform 0.15s var(--ease), background-color 0.15s; }
 .pill:hover { background: var(--card-hover); }
 .pill:active { transform: scale(0.96); }
 .pill.danger { color: var(--danger); }
@@ -428,6 +431,24 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .spinner { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--ink-2); border-radius: 50%; animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .card.spaced { margin-top: 14px; }
+/* running an agent here: five steps, each done or the one button that does it */
+.setup-intro { margin: 0 8px 12px; font-size: 12px; color: var(--ink-2); }
+.step { display: grid; grid-template-columns: 22px 1fr auto; gap: 12px; min-height: 54px; padding-top: 10px; padding-bottom: 10px; transition: opacity 0.3s var(--ease); }
+.step-num { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; font: 600 11px/1 var(--rounded); color: var(--ink-3); box-shadow: inset 0 0 0 1.5px var(--line); transition: background-color 0.3s, color 0.3s; }
+/* the number trimmed to its cap height and baseline, so it centres in the circle by its ink, not its line */
+.step-num b { display: block; font-weight: inherit; text-box: trim-both cap alphabetic; }
+.step.next .step-num { color: var(--bg); background: var(--ink); box-shadow: none; }
+.step.done .step-num { color: var(--on); background: color-mix(in srgb, var(--on) 16%, transparent); box-shadow: none; animation: pop 0.45s var(--spring) both; }
+.step:not(.done):not(.next) { opacity: 0.45; }
+.step-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.step-name { font-weight: 600; }
+.check { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; color: var(--on); background: color-mix(in srgb, var(--on) 16%, transparent); animation: pop 0.45s var(--spring) both; }
+.pairing { position: relative; padding: 0 14px 12px 48px; }
+.pairing .code { margin: 0 0 10px; }
+.primary.wide { display: block; width: 100%; margin-top: 12px; }
+.link-row { display: block; margin-top: 12px; font-size: 12px; color: var(--ink-2); }
+.link-row:hover { color: var(--ink); }
+.text-link { font: inherit; color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .note { margin-top: 10px; padding: 0 8px; font-size: 12px; color: var(--ink-2); }
 .note.bad { color: var(--danger); }
@@ -438,3 +459,5 @@ header { display: flex; align-items: center; justify-content: space-between; gap
   .status.shimmer { color: var(--ink-2); background: none; animation: none; }
   .flyer { display: none; }
 }
+
+.step + .step::before { left: 48px; }
