@@ -1,0 +1,36 @@
+[package]
+name = "imd-agents"
+version = "0.1.0"
+description = "IMD Agents"
+edition = "2021"
+
+[lib]
+name = "imd_agents_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+base64 = "0.22"
+hex = "0.4"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+tokio = { version = "1", features = ["process", "time"] }
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

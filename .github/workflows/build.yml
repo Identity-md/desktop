@@ -1,0 +1,39 @@
+name: Build installers
+
+permissions:
+  contents: read
+
+# Installers for macOS and Windows, as Skillet builds its desktop app. Tauri does not cross-compile, so
+# each platform has its own runner. Run it from the Actions tab: macOS runners bill at ten times the
+# minutes, so it does not run on every push while the repository is private.
+#
+# Unsigned until the secrets are added. Then, as Skillet does: an Apple Developer ID certificate and
+# notarisation for macOS, and Azure Trusted Signing (tauri.windows-signing.conf.json) for Windows.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, name: macos }
+          - { os: windows-latest, name: windows }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 24, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with: { workspaces: "src-tauri -> target" }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm tauri build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: imd-agents-${{ matrix.name }}
+          path: src-tauri/target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 14
