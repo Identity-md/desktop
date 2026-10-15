@@ -19,6 +19,7 @@ It uses only the network's public API.
 - **One narrow key.** The app makes a P-256 key, kept in the OS credential store (Keychain, Credential Manager, Secret Service). It signs three things: a pause, a resume and an unlink. The network checks, on every pause, that the key is linked and that the wallet holds that seat at that moment, so a seat you sell stops listening at once.
 - **The page holds nothing.** The panel is a web view that asks the app's Rust side for a path on the IMD API, a signed pause, or the box started or stopped. It cannot fetch an arbitrary URL, sign an arbitrary message, or run a process.
 - **The box sees nothing of this computer.** See the box repository: nothing mounted, a firewall set before the worker starts, every capability dropped.
+- **Signed updates only.** The app updates itself from this repository's releases and refuses any update not signed with the release key, which never leaves the maintainer's Mac.
 
 The link never expires. Disconnect from Settings, which unlinks every wallet and deletes the key.
 
@@ -73,4 +74,8 @@ pnpm app:build                 # the installable app, in src-tauri/target/releas
 
 ## Release
 
-`.github/workflows/build.yml` builds installers for macOS and Windows when run by hand (macOS runners cost ten times the minutes, so not on every push). They are signed and notarised once the Apple and Azure secrets are added; until then they are unsigned.
+`pnpm release 0.1.1`, on the maintainer's Mac, builds one app for Apple Silicon and Intel, signs it with the Developer ID, notarizes and staples it and its disk image, and publishes both on this repository's releases with the update installed copies fetch. `pnpm release --dry-run` does everything but commit and publish. The certificate, the notarization profile and the update key stay in that Mac's keychain, never in GitHub's secrets.
+
+Installed copies update themselves: a minute after they start and every six hours, they read the latest release, and install a newer one once the panel has been closed for five minutes with no setup under way.
+
+`.github/workflows/build.yml` still builds unsigned installers for macOS and Windows when run by hand.
