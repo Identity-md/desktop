@@ -5,11 +5,12 @@
 //! - reads go to the IMD API by path only, never to a URL the page names;
 //! - the app's key is P-256, kept in the OS credential store (Keychain, Credential Manager, Secret
 //!   Service), and signs exactly three things: a pause, a resume and an unlink;
-//! - the box is started and stopped with the same `docker run` the box repository's script uses.
+//! - the box is started and stopped with the same `docker run` the box repository's script uses;
+//! - the app updates itself from the latest GitHub release, signed with the key tauri.conf.json names.
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -22,6 +23,7 @@ use tauri::{
     Emitter, LogicalSize, Manager, PhysicalPosition,
 };
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 
 const API: &str = "https://api.imd.fun";
 const EXPLORER: &str = "https://explorer.imd.fun";
@@ -477,6 +479,7 @@ fn docker_open(app: tauri::AppHandle) -> Result<(), String> {
 /// Downloads the published box and names it as `./box` names its own build, so either runs it.
 #[tauri::command]
 async fn box_pull() -> Result<(), String> {
+    let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(|| {
         match run_docker(&["pull", BOX_PUBLISHED], Duration::from_secs(30 * 60)) {
             Some((true, _)) => {}
@@ -496,6 +499,7 @@ async fn box_pull() -> Result<(), String> {
 /// Installs the worker and Claude Code into the box's volume, as `./box setup` does before its shell.
 #[tauri::command]
 async fn box_install() -> Result<(), String> {
+    let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(|| {
         let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
         args.extend(box_flags());
@@ -554,6 +558,7 @@ struct Paired {
 /// handed to the panel as soon as it prints them, then its answer once the wallet has signed.
 #[tauri::command]
 async fn box_pair(app: tauri::AppHandle) -> Result<Paired, String> {
+    let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::BufRead;
         let _ = run_docker(&["rm", "-f", BOX_PAIRING], Duration::from_secs(30));
@@ -617,6 +622,7 @@ async fn box_start(runtime: String) -> Result<(), String> {
     if !["claude", "codex", "claude,grok", "codex,grok"].contains(&runtime.as_str()) {
         return Err("unknown runtime".into());
     }
+    let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
         let _ = run_docker(&["rm", "-f", BOX_NAME], Duration::from_secs(30));
         let volume = format!("{BOX_VOLUME}:/home/imd");
@@ -641,6 +647,7 @@ async fn box_start(runtime: String) -> Result<(), String> {
 /// Stops the box: the job it holds goes back to the network, as `./box stop` does.
 #[tauri::command]
 async fn box_stop() -> Result<(), String> {
+    let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(|| match run_docker(&["rm", "-f", BOX_NAME], Duration::from_secs(60)) {
         Some((true, _)) => Ok(()),
         Some((false, why)) if why.contains("No such container") => Ok(()),
@@ -655,6 +662,7 @@ async fn box_stop() -> Result<(), String> {
 /// restart is also how it takes the newest worker.
 #[tauri::command]
 async fn box_restart() -> Result<(), String> {
+    let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(|| match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
         Some((true, _)) => Ok(()),
         Some((false, why)) => Err(why),
@@ -742,6 +750,56 @@ fn fit_panel(window: tauri::WebviewWindow, height: f64) {
 #[tauri::command]
 fn quit(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+/// Docker work under way: a download, an install, pairing, a start, stop or restart. The app does not
+/// start again on an update while any of it runs.
+static BUSY: AtomicUsize = AtomicUsize::new(0);
+
+struct Busy;
+
+impl Busy {
+    fn new() -> Self {
+        BUSY.fetch_add(1, Ordering::SeqCst);
+        Busy
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        BUSY.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Closed for five minutes with no Docker work under way: a moment no one is using the app.
+fn quiet(app: &tauri::AppHandle) -> bool {
+    let open = app.get_webview_window("panel").and_then(|win| win.is_visible().ok()).unwrap_or(false);
+    let closed_for = now_ms().saturating_sub(PANEL_HIDDEN_AT_MS.load(Ordering::Relaxed));
+    !open && closed_for >= 5 * 60 * 1000 && BUSY.load(Ordering::SeqCst) == 0
+}
+
+/// The app updates itself as the worker does. A minute after it starts and every six hours after, it
+/// asks the latest GitHub release whether there is a newer version; once the app is quiet it installs
+/// that version and starts again on it. An update not signed with the key in tauri.conf.json is refused.
+fn watch_for_updates(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            let found = match app.updater() {
+                Ok(updater) => updater.check().await.ok().flatten(),
+                Err(_) => None,
+            };
+            if let Some(update) = found {
+                while !quiet(&app) {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+                if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+                    app.restart();
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
+        }
+    });
 }
 
 /// The icon says, at a glance, how the agents are: resting, working, or one needs you.
@@ -861,6 +919,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_panel_top_right(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![AT_LOGIN])))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
@@ -899,6 +958,10 @@ pub fn run() {
             // Opened by hand, the panel opens too: a menu bar manager may hide the icon.
             if !std::env::args().any(|arg| arg == AT_LOGIN) {
                 show_panel_top_right(app.handle());
+            }
+            // A release build only: one run from source is not an install to replace.
+            if !cfg!(debug_assertions) {
+                watch_for_updates(app.handle().clone());
             }
             Ok(())
         })

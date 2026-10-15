@@ -44,6 +44,7 @@ export async function mockApp(context, { fixtures, scenario, owner, scheme, zoom
           case "link_start": return { code: "K7QM4XJ2", expiresAt: new Date(Date.now() + 600000).toISOString(), relayOrigin: "https://api.imd.fun" };
           case "link_poll": return { status: 200, body: { status: "pending", wallet: null } };
           case "plugin:autostart|is_enabled": return true;
+          case "plugin:app|version": return "0.1.0";
           case "plugin:event|listen": handlers[args.event] = args.handler; return 1;
           case "seat_pause": return { status: 200, body: { paused: args.paused } };
           case "worker_releases": return { status: 200, body: window.__fixtures.releases ?? [] };

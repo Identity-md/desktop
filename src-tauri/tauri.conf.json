@@ -49,5 +49,11 @@
       "minimumSystemVersion": "12.0",
       "hardenedRuntime": true
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYzREM5RkM4QjMyNkQ1MDAKUldRQTFTYXp5Si9jODBZVHd4Q3BLeSt1SE51UE1ZL1RhcXBWQWY3c0cyZHBLYk1sMjhJb1k1Q3MK",
+      "endpoints": ["https://github.com/Identity-md/desktop/releases/latest/download/latest.json"]
+    }
   }
 }

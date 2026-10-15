@@ -105,6 +105,8 @@ let lastRewards = 0;
 let lastSwarm = 0;
 let lastRelease = 0;
 let reading = false;
+/** This app's own version, under Quit in Settings. It updates itself, so this says which it is on. */
+let appVersion = "";
 /** What each agent had accepted at the last read, and what it has accepted since, to fly in. */
 const lastAccepted = new Map<string, number>();
 const gains: Array<{ tokenId: string; by: number }> = [];
@@ -858,7 +860,7 @@ function settingsHtml(): string {
     </section>` : ""}
     <section class="card list spaced">
       <label class="line"><span>Open at login</span><button class="switch${state.openAtLogin ? " on" : ""}" role="switch" aria-checked="${state.openAtLogin}" data-action="login"><span></span></button></label>
-      <div class="line"><span>Quit IMD Agents</span><button class="pill" data-action="quit" title="Quit (⌘Q)">Quit</button></div>
+      <div class="line"><span>Quit IMD Agents${appVersion ? `<span class="sub">Version ${esc(appVersion)}</span>` : ""}</span><button class="pill" data-action="quit" title="Quit (⌘Q)">Quit</button></div>
     </section>
     ${noteHtml()}`;
 }
@@ -1265,6 +1267,7 @@ window.addEventListener("focus", () => {
 save();
 render();
 void refresh(true);
+void api.appVersion().then((version) => { appVersion = version; render(); }, () => {});
 // the swarm's line moves on every few seconds while anyone can see it
 setInterval(() => { if (!document.hidden && !closing && state.view === "home") tick(); }, 3600);
 // every 10 seconds while the panel is open, every minute while it is not: the icon stays true either way

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+export { getVersion as appVersion } from "@tauri-apps/api/app";
 import { sumOf, worthOf, type Box, type Earning, type ReleaseRow, type RewardValue, type Standing, type WorkRow } from "./model";
 
 /**
