@@ -397,13 +397,30 @@ fn box_flags() -> Vec<String> {
     [
         "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "SETPCAP", "--cap-add", "CHOWN",
         "--security-opt", "no-new-privileges:true",
-        "--cpus", "4", "--memory", "6g", "--pids-limit", "2048",
-        "-v",
     ]
     .iter()
     .map(|s| s.to_string())
+    .chain(jail_flags())
+    .chain(["--cpus", "4", "--memory", "6g", "--pids-limit", "2048", "-v"].iter().map(|s| s.to_string()))
     .chain([format!("{BOX_VOLUME}:/home/imd")])
     .collect()
+}
+
+/// The box repository's seccomp.json, kept identical to it: Docker's default profile with the
+/// namespace calls bubblewrap needs, so the worker's read jail starts and the box takes oracle,
+/// research and contract work.
+const BOX_SECCOMP: &str = include_str!("../box-seccomp.json");
+
+/// Docker reads a seccomp profile from a file on this computer, so the app writes its copy first,
+/// and /proc is left unmasked for the jail to mount its own. Without the file the box still runs,
+/// under Docker's own profile, and the worker withholds the jailed work.
+fn jail_flags() -> Vec<String> {
+    let path = std::env::temp_dir().join("imd-box-seccomp.json");
+    let current = std::fs::read_to_string(&path).is_ok_and(|text| text == BOX_SECCOMP);
+    if !current && std::fs::write(&path, BOX_SECCOMP).is_err() {
+        return Vec::new();
+    }
+    vec!["--security-opt".into(), format!("seccomp={}", path.display()), "--security-opt".into(), "systempaths=unconfined".into()]
 }
 
 #[derive(Serialize)]
@@ -520,7 +537,9 @@ async fn box_install() -> Result<(), String> {
 fn box_sign_in() -> Result<(), String> {
     let binary = docker().ok_or("Docker is not installed")?;
     let docker = binary.to_string_lossy().to_string();
-    let flags = box_flags().join(" ");
+    // Quoted, for the seccomp profile's path: a temporary folder can have a space in it on Windows.
+    let quote = if cfg!(target_os = "windows") { '"' } else { '\'' };
+    let flags = box_flags().iter().map(|flag| format!("{quote}{flag}{quote}")).collect::<Vec<_>>().join(" ");
     let say = "Sign in to Claude for your IMD agent: type /login, follow it in your browser, then /exit.";
     #[cfg(target_os = "macos")]
     {
@@ -625,16 +644,10 @@ async fn box_start(runtime: String) -> Result<(), String> {
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
         let _ = run_docker(&["rm", "-f", BOX_NAME], Duration::from_secs(30));
-        let volume = format!("{BOX_VOLUME}:/home/imd");
-        let args = [
-            "run", "-d", "--name", BOX_NAME, "--restart", "unless-stopped",
-            "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "SETPCAP", "--cap-add", "CHOWN",
-            "--security-opt", "no-new-privileges:true",
-            "--cpus", "4", "--memory", "6g", "--pids-limit", "2048",
-            "-v", &volume,
-            BOX_IMAGE, "imd", "start", "--runtime", &runtime, "--auto-update",
-        ];
-        match run_docker(&args, Duration::from_secs(120)) {
+        let mut args: Vec<String> = ["run", "-d", "--name", BOX_NAME, "--restart", "unless-stopped"].iter().map(|s| s.to_string()).collect();
+        args.extend(box_flags());
+        args.extend([BOX_IMAGE, "imd", "start", "--runtime", &runtime, "--auto-update"].iter().map(|s| s.to_string()));
+        match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(120)) {
             Some((true, _)) => Ok(()),
             Some((false, why)) => Err(why.lines().last().unwrap_or("could not start").to_string()),
             None => Err("Docker is not installed".into()),
@@ -997,6 +1010,21 @@ mod tests {
         for bad in ["/api/claim?wallet=0x1", "/api/earned?wallet=0xzz", "/api/earned?wallet=0x1111111111111111111111111111111111111111&x=1", "https://evil.test/api/earned"] {
             assert!(explorer_path(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_box_runs_with_the_jails_profile() {
+        let flags = box_flags();
+        let seccomp = flags.iter().find_map(|flag| flag.strip_prefix("seccomp=")).expect("a seccomp profile");
+        assert_eq!(std::fs::read_to_string(seccomp).unwrap(), BOX_SECCOMP);
+        assert!(flags.iter().any(|flag| flag == "systempaths=unconfined"));
+        let profile: serde_json::Value = serde_json::from_str(BOX_SECCOMP).unwrap();
+        let unshare_outright = profile["syscalls"].as_array().unwrap().iter().any(|rule| {
+            rule["action"] == "SCMP_ACT_ALLOW" && rule.get("includes").is_none() && rule["names"].as_array().unwrap().iter().any(|name| name == "unshare")
+        });
+        assert!(unshare_outright, "unshare is allowed without CAP_SYS_ADMIN");
+        assert_eq!(&flags[..2], ["--cap-drop", "ALL"]);
+        assert_eq!(flags.last().unwrap(), &format!("{BOX_VOLUME}:/home/imd"));
     }
 
     #[test]
