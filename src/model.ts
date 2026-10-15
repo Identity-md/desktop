@@ -305,6 +305,16 @@ export function currentWorker(rows: ReleaseRow[], now = new Date()): { newest: s
   return { newest: newest.version, accepted: fresh && before ? [newest.version, before.version] : [newest.version], order: releases.map((r) => r.version) };
 }
 
+/** Whether release `a` ("0.1.2" of "0.1.2+d1681b55") is above `b`, as the explorer's `newerRelease` reads them. */
+export function newerRelease(a: string, b: string): boolean {
+  const parts = (version: string) => (version.split("+")[0] ?? "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const [left, right] = [parts(a), parts(b)];
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    if ((left[i] ?? 0) !== (right[i] ?? 0)) return (left[i] ?? 0) > (right[i] ?? 0);
+  }
+  return false;
+}
+
 /** How far behind the newest worker a version is, in releases, as a person says it: "2 updates behind". */
 export function behindWords(version: string, order: string[]): string {
   const behind = order.indexOf(version);

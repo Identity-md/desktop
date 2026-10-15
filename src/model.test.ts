@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, judgedRate, modelName, phaseOf, runLength, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, judgedRate, modelName, newerRelease, phaseOf, runLength, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -52,6 +52,11 @@ describe("the menu bar icon", () => {
     expect(behindWords("0.1.0+aca0ff06", later.order)).toBe("1 update behind");
     expect(behindWords("0.1.0+00000000", later.order)).toBe("Many updates behind");
     expect(currentWorker([], new Date())).toBeNull();
+    // the release list is read every half hour: a worker already on the next release is ahead of it
+    expect(newerRelease("0.1.2+d1681b55", "0.1.1+c23cfac6")).toBe(true);
+    expect(newerRelease("0.1.1+c23cfac6", "0.1.1+aaaaaaaa")).toBe(false);
+    expect(newerRelease("0.1.0+00000000", "0.1.1+c23cfac6")).toBe(false);
+    expect(newerRelease("0.10.0", "0.9.9")).toBe(true);
     expect(failureWords({ at: "x", reason: "claude: please run /login\nmore" })).toBe("claude: please run /login");
   });
 });

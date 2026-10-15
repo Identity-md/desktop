@@ -4,7 +4,7 @@ import { disable as autostartOff, enable as autostartOn, isEnabled as autostartI
 import morphdom from "morphdom";
 import * as api from "./api";
 import { faceFor, loadFace } from "./masks";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, judgedRate, localPhase, modelName, phaseOf, runLength, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, judgedRate, localPhase, modelName, newerRelease, phaseOf, runLength, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
 
 // ---------------------------------------------------------------------------------------------
 // What the app remembers between runs: wallets, the network it signs for, names. Nothing secret:
@@ -226,10 +226,15 @@ function workDays(): Array<number | null> {
 // Acting.
 // ---------------------------------------------------------------------------------------------
 
-/** Whether an agent runs a worker behind the current release, past the grace a new one gets. */
+/**
+ * Whether an agent runs a worker behind the current release, past the grace a new one gets. One newer
+ * than the release list knows is not: the list is read every half hour, and in the minutes after a
+ * release the machines that already took it are ahead of it.
+ */
 function outdated(agent: Agent): boolean {
   const version = agent.standing?.presence?.daemonVersion;
-  return Boolean(version && state.release && !state.release.accepted.includes(version));
+  if (!version || !state.release || newerRelease(version, state.release.newest)) return false;
+  return !state.release.accepted.includes(version);
 }
 
 /**
