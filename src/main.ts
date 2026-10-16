@@ -4,7 +4,7 @@ import { disable as autostartOff, enable as autostartOn, isEnabled as autostartI
 import morphdom from "morphdom";
 import * as api from "./api";
 import { faceFor, loadFace } from "./masks";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, judgedRate, localPhase, modelName, newerRelease, phaseOf, runLength, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailWords, judgedRate, localPhase, modelName, newerRelease, phaseOf, runLength, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
 
 // ---------------------------------------------------------------------------------------------
 // What the app remembers between runs: wallets, the network it signs for, names. Nothing secret:
@@ -441,7 +441,7 @@ function agentsHtml(): string {
     return `<div class="row${open ? " open" : ""}" id="agent-${esc(agent.tokenId)}" data-agent="${esc(agent.tokenId)}" tabindex="0" aria-expanded="${open}" title="${open ? "Fold" : `What ${esc(nameOf(agent.tokenId))} is doing`}${i < 9 ? ` (⇧${i + 1})` : ""}">
       ${maskHtml(agent, phase)}
       <span class="lines">
-        <span class="name"><b>${esc(label || `Agent #${agent.tokenId}`)}</b>${label ? `<span class="label">#${esc(agent.tokenId)}</span>` : ""}${outdated(agent) ? `<span class="tag warn" title="${esc(`Runs worker ${agent.standing?.presence?.daemonVersion ?? ""}; the newest is ${state.release?.newest ?? ""}`)}">Outdated</span>` : ""}</span>
+        <span class="name"><b>${esc(label || `Agent #${agent.tokenId}`)}</b>${label ? `<span class="label">#${esc(agent.tokenId)}</span>` : ""}${outdated(agent) ? `<span class="tag warn" title="${esc(`Runs worker ${agent.standing?.presence?.daemonVersion ?? ""}; the newest is ${state.release?.newest ?? ""}`)}">Outdated</span>` : ""}${jailWords(agent.standing) ? `<span class="tag warn" title="No oracle, research or contract jobs">Fewer jobs</span>` : ""}</span>
         <span class="status${phase.kind === "working" ? " shimmer" : ""}">${esc(status)}</span>
       </span>
       <span class="row-end">${switchHtml(agent, phase, i)}<span class="chevron" aria-hidden="true">${CHEVRON}</span></span>
@@ -485,7 +485,8 @@ function agentTrayHtml(agent: Agent): string {
   const local = agent.tokenId === state.localToken && state.box?.installed && state.box.state === "running";
   const failing = (agent.standing?.standing.consecutiveFailures ?? 0) > 0 ? failureWords(agent.standing?.standing.recentFailures?.[0]) : null;
   const behind = outdated(agent);
-  // what wants doing comes first: an older worker, a failure, or this computer's own Restart
+  const jailed = jailWords(agent.standing);
+  // what wants doing comes first: an older worker, a failure, work it cannot take, or this computer's own Restart
   const restart = local
     ? `<button class="pill" data-action="restart" title="Restart this computer's agent (U)" ${state.restartWhenIdle ? "disabled" : ""}>${state.restartWhenIdle ? "Restarts after this job" : phaseFor(agent).kind === "working" ? "Restart after this job" : behind ? "Update" : "Restart"}</button>`
     : "";
@@ -493,7 +494,9 @@ function agentTrayHtml(agent: Agent): string {
   const care = [
     failing ? `<div class="care-row bad"><span class="care-text" title="${esc(failing)}">Its last job failed: ${esc(failing)}</span>${local && !behind ? restart : ""}</div>` : "",
     behind ? `<div class="care-row warn"><span class="care-text">${esc(behindText)}</span>${restart}</div>` : "",
-    local && !behind && !failing ? `<div class="care-row"><span class="care-text">Runs on this computer</span>${restart}</div>` : "",
+    // the worker's own words say why and what fixes it; on this computer, a restart starts the box with its sandbox
+    jailed ? `<div class="care-row warn"><span class="care-text" title="${esc(jailed)}">No oracle, research or contract jobs</span>${local && !behind && !failing ? restart : ""}</div>` : "",
+    local && !behind && !failing && !jailed ? `<div class="care-row"><span class="care-text">Runs on this computer</span>${restart}</div>` : "",
   ].join("");
   return `<div class="agent-tray" id="tray-${esc(agent.tokenId)}">
     ${care ? `<div class="care">${care}</div>` : ""}

@@ -17,6 +17,8 @@ const scenarios = {
   agent: { box: "running", linked: [owner], watching: [], clicks: ["#agent-22 .lines"] },
   outdated: { box: "running", linked: [owner], watching: [], outdated: "22", clicks: ["#agent-22 .lines"] },
   restart: { box: "running", linked: [owner], watching: [], clicks: ["#agent-12 .lines"] },
+  jailed: { box: "running", linked: [owner], watching: [], jailed: ["12", "22"], clicks: ["#agent-12 .lines"] },
+  "jailed-other": { box: "running", linked: [owner], watching: [], jailed: ["12", "22"], clicks: ["#agent-22 .lines"] },
   held: { box: "running", linked: [owner], watching: [], held: "22" },
   welcome: { box: "no-docker", linked: [], watching: [] },
   "setup-docker": { box: "no-docker", linked: [], watching: [], setup: { docker: "missing", image: false, worker: false, claude: false, device_key: null }, clicks: ["[data-action=setup]"] },

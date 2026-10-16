@@ -2,7 +2,7 @@
 
 export type Standing = {
   enrollment: { status: string; tokenId: string } | null;
-  presence: { connected: boolean; stale: boolean; connectedAt?: string; lastHeartbeatAt: string; daemonVersion?: string; runtimes?: Array<{ id: string }> } | null;
+  presence: { connected: boolean; stale: boolean; connectedAt?: string; lastHeartbeatAt: string; daemonVersion?: string; runtimes?: Array<{ id: string }>; jail?: { ok: boolean; detail: string } | null } | null;
   standing: {
     working: number;
     pausedUntil: string | null;
@@ -330,4 +330,15 @@ export function failureWords(failure: Record<string, unknown> | undefined): stri
     if (typeof value === "string" && value.trim()) return value.trim().split("\n")[0]!.slice(0, 140);
   }
   return null;
+}
+
+/**
+ * Why an agent takes no oracle, research or contract jobs, in its worker's own words: where its read jail
+ * does not hold, the worker withholds that work rather than run it unjailed. Null when the jail holds, or
+ * when the network did not say.
+ */
+export function jailWords(standing: Standing | null): string | null {
+  const jail = standing?.presence?.jail;
+  if (!jail || jail.ok) return null;
+  return jail.detail.trim() || "its sandbox cannot start";
 }

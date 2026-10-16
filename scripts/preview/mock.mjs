@@ -21,6 +21,8 @@ export async function mockApp(context, { fixtures, scenario, owner, scheme, zoom
       if (scenario.held && path === `/seats/${scenario.held}/standing?queue=0` && body?.standing) { body.standing.pausedByOwnerAt = new Date().toISOString(); body.standing.working = 0; body.standing.running = []; }
       // an agent on an older worker: `outdated: "22"`
       if (scenario.outdated && path === `/seats/${scenario.outdated}/standing?queue=0` && body?.presence) body.presence.daemonVersion = "0.1.0+aca0ff06";
+      // agents whose read jail does not hold: `jailed: ["12"]`
+      if (scenario.jailed && body?.presence && scenario.jailed.some((t) => path === `/seats/${t}/standing?queue=0`)) body.presence.jail = { ok: false, detail: "Claude's sandbox needs bwrap and socat: run sudo imd sandbox once (it installs bubblewrap and socat), or install them yourself" };
       // an agent at work: `working: { tokenId, nodeKey, objective, minutes }`
       const w = window.__working ?? scenario.working;
       if (w && path === `/seats/${w.tokenId}/standing?queue=0` && body?.standing) {

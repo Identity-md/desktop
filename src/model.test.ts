@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, judgedRate, modelName, newerRelease, phaseOf, runLength, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -111,5 +111,15 @@ describe("numbers", () => {
     expect(amountWords("1500000000000000000", 18)).toBe("1.5");
     expect(amountWords("40000000000000000", 18)).toBe("0.04");
     expect(amountWords("0", 18)).toBe("0");
+  });
+
+  it("says why an agent takes no oracle, research or contract jobs, only when its jail does not hold", () => {
+    const detail = "Claude's sandbox needs socat: run sudo imd sandbox once";
+    expect(jailWords(standing({}, { jail: { ok: false, detail } }))).toBe(detail);
+    expect(jailWords(standing({}, { jail: { ok: false, detail: " " } }))).toBe("its sandbox cannot start");
+    expect(jailWords(standing({}, { jail: { ok: true, detail: "bubblewrap" } }))).toBeNull();
+    expect(jailWords(standing({}, { jail: null }))).toBeNull();
+    expect(jailWords(standing())).toBeNull();
+    expect(jailWords(null)).toBeNull();
   });
 });
