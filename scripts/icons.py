@@ -4,6 +4,10 @@ Tray icons are template images (black on clear; macOS tints them for the menu ba
 bar, drawn at the weight of the system's symbols beside them. The app icon is the mark in black on white,
 the explorer's own, from which `tauri icon` makes every size each platform wants.
 """
+import os
+import subprocess
+import tempfile
+
 from PIL import Image, ImageDraw
 
 def mark(size: int, pad: float, *, filled=False, dot=False, alpha=255, ink=(0, 0, 0), paper=None) -> Image.Image:
@@ -15,9 +19,11 @@ def mark(size: int, pad: float, *, filled=False, dot=False, alpha=255, ink=(0, 0
     # square ring: 1.5..30.5 with a 3-unit stroke
     d.rectangle([p(0, 0), p(32, 32)], fill=color)
     d.rectangle([p(3, 3), p(29, 29)], fill=paper or (0, 0, 0, 0))
-    # diamond ring: centre 16, half-diagonal 7.5 with a 2.6-unit stroke
-    outer = [p(16, 16 - 8.8), p(16 + 8.8, 16), p(16, 16 + 8.8), p(16 - 8.8, 16)]
-    inner = [p(16, 16 - 6.2), p(16 + 6.2, 16), p(16, 16 + 6.2), p(16 - 6.2, 16)]
+    # diamond ring: centre 16, half-diagonal 7.5 with a 2.6-unit stroke, measured square to its sides as the
+    # SVG's stroke is, so its reach along the diagonal is 1.3 x sqrt 2 either side: the weight of the square
+    o, i = 7.5 + 1.3 * 2 ** 0.5, 7.5 - 1.3 * 2 ** 0.5
+    outer = [p(16, 16 - o), p(16 + o, 16), p(16, 16 + o), p(16 - o, 16)]
+    inner = [p(16, 16 - i), p(16 + i, 16), p(16, 16 + i), p(16 - i, 16)]
     d.polygon(outer, fill=color)
     if not filled:
         d.polygon(inner, fill=paper or (0, 0, 0, 0))
@@ -33,19 +39,20 @@ def supersampled(make, size: int) -> Image.Image:
     return big.resize((size, size), Image.LANCZOS)
 
 def bold(size: int, *, filled=False, dot=False, alpha=255, glyph=16.5) -> Image.Image:
-    """The mark for a menu bar or tray: the weight of the system's own symbols beside it (2 pt strokes at
-    16.5 pt), the square's corners rounded as theirs are. Working, the diamond fills; wanting attention, a
-    dot sits in the corner, cut clear of the square as the system's badge is."""
+    """The mark for a menu bar or tray: the site's mark, square corners and all, at about the weight of the
+    system's own symbols beside it (strokes near 1.8 pt at 16.5 pt), the diamond's stroke to the square's as
+    the site's icon.svg has them. Working, the diamond fills; wanting attention, a dot sits in the corner,
+    cut clear of the square as the system's badge is."""
     im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     unit = size / 22 * glyph / 32
     o = (size - 32 * unit) / 2
     p = lambda x, y: (o + x * unit, o + y * unit)
     color = (0, 0, 0, alpha)
-    d.rounded_rectangle([p(0, 0), p(32, 32)], radius=5.5 * unit, fill=color)
-    d.rounded_rectangle([p(4, 4), p(28, 28)], radius=1.5 * unit, fill=(0, 0, 0, 0))
-    # the diamond: a ring 3.4 units thick, or a smaller solid one of the same weight
-    reach, stroke = (6.2, 3.4) if filled else (7.4, 3.4)
+    d.rectangle([p(0, 0), p(32, 32)], fill=color)
+    d.rectangle([p(3.6, 3.6), p(28.4, 28.4)], fill=(0, 0, 0, 0))
+    # the diamond: a ring 3.2 units thick, square to its sides, or a smaller solid one of the same weight
+    reach, stroke = (6.2, 3.2) if filled else (7.5, 3.2)
     out, inn = reach + stroke / 2 * 2 ** 0.5, reach - stroke / 2 * 2 ** 0.5
     d.polygon([p(16, 16 - out), p(16 + out, 16), p(16, 16 + out), p(16 - out, 16)], fill=color)
     if not filled:
@@ -87,4 +94,18 @@ ImageDraw.Draw(tile).rounded_rectangle([100, 100, 924, 924], radius=185, fill=(2
 icon.alpha_composite(tile)
 icon.alpha_composite(supersampled(lambda n: mark(n, n * 0.30), 1024))
 icon.save(f"{out}/app-icon.png")
+
+# The Mac's icon is the white square itself, full bleed, the mark a little larger to sit as it does on the
+# tile. macOS 26 puts an icon that keeps its own margins into a plate of its own and gives the mark a glassy
+# bevel; a full-bleed one it rounds and draws flat (both tried in Finder on 2026-10-16). Written here, after
+# `tauri icon`, which would draw icon.icns from the tile.
+mac = Image.new("RGBA", (1024, 1024), (255, 255, 255, 255))
+mac.alpha_composite(supersampled(lambda n: mark(n, n * 0.26), 1024))
+with tempfile.TemporaryDirectory() as tmp:
+    iconset = os.path.join(tmp, "icon.iconset")
+    os.mkdir(iconset)
+    for s in (16, 32, 128, 256, 512):
+        for k, suffix in ((1, ""), (2, "@2x")):
+            mac.resize((s * k, s * k), Image.LANCZOS).save(f"{iconset}/icon_{s}x{s}{suffix}.png")
+    subprocess.run(["iconutil", "-c", "icns", iconset, "-o", f"{out}/icon.icns"], check=True)
 print("icons drawn")
