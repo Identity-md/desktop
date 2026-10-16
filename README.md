@@ -74,7 +74,7 @@ pnpm app:build                 # the installable app, in src-tauri/target/releas
 
 ## Release
 
-`pnpm release 0.1.1`, on the maintainer's Mac, builds one app for Apple Silicon and Intel, signs it with the Developer ID, notarizes and staples it and its disk image, and publishes both on this repository's releases with the update installed copies fetch. `pnpm release --dry-run` does everything but commit and publish. The certificate, the notarization profile and the update key stay in that Mac's keychain, never in GitHub's secrets.
+`pnpm release 0.1.1`, on the maintainer's Mac, builds one app for Apple Silicon and Intel, signs it with the Developer ID, notarizes and staples it and its disk image, and publishes both on this repository's releases with the update installed copies fetch. `pnpm release --dry-run` does everything but commit and publish. The disk image opens on imd.fun's wall with the app, an arrow and Applications on its monitor (`scripts/installer/background.mjs` draws it with the site's own renderer, from the website checked out beside this one); it needs `brew install create-dmg`, and the first run asks to let the terminal control Finder. The certificate, the notarization profile and the update key stay in that Mac's keychain, never in GitHub's secrets.
 
 Installed copies update themselves: a minute after they start and every six hours, they read the latest release, and install a newer one once the panel has been closed for five minutes with no setup under way.
 

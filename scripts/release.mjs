@@ -13,8 +13,9 @@
 // 5. Commits the version, then publishes the disk image, the update and latest.json as a GitHub
 //    release, a draft until every file is up.
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ICONS, TITLE_BAR, WINDOW } from "./installer/window.mjs";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const REPO = "Identity-md/desktop";
@@ -67,6 +68,7 @@ const updaterPassword = secret("updater-password");
 for (const target of ["aarch64-apple-darwin", "x86_64-apple-darwin"]) {
   if (!run("rustup", ["target", "list", "--installed"]).split("\n").includes(target)) run("rustup", ["target", "add", target]);
 }
+try { run("create-dmg", ["--version"]); } catch { fail("The disk image needs create-dmg: brew install create-dmg"); }
 console.log(`  ${NAME} ${version}${dryRun ? " (dry run: nothing is committed or published)" : ""}, signed by team ${TEAM_ID}`);
 
 // ---------------------------------------------------------------------------------------------
@@ -124,12 +126,16 @@ run("xcrun", ["stapler", "staple", app]);
 assess(["--assess", "--type", "execute"], app);
 
 step("Building, signing and notarizing the disk image");
+// The window it opens on: imd.fun's wall around a lit monitor holding the app, an arrow and Applications
+// (scripts/installer/background.mjs draws it for window.mjs's points). create-dmg lays it out through Finder.
 const stage = join(out, "stage");
 mkdirSync(stage);
 run("ditto", [app, join(stage, `${NAME}.app`)]);
-symlinkSync("/Applications", join(stage, "Applications"));
 const dmg = join(out, "IMD-Agents.dmg");
-run("hdiutil", ["create", "-volname", NAME, "-srcfolder", stage, "-ov", "-format", "UDZO", dmg]);
+run("create-dmg", ["--volname", NAME, "--background", join(ROOT, "src-tauri/installer/dmg-background.tiff"),
+  "--window-pos", "200", "120", "--window-size", String(WINDOW.width), String(WINDOW.height + TITLE_BAR), "--icon-size", "128", "--text-size", "12",
+  "--icon", `${NAME}.app`, ...ICONS.app.map(String), "--hide-extension", `${NAME}.app`, "--app-drop-link", ...ICONS.applications.map(String),
+  "--no-internet-enable", dmg, stage], { timeout: 10 * 60 * 1000 });
 rmSync(stage, { recursive: true });
 run("codesign", ["--sign", identity, "--timestamp", dmg]);
 notarize(dmg);
