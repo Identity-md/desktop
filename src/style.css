@@ -443,6 +443,7 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .step-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .step-name { font-weight: 600; }
 .check { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; color: var(--on); background: color-mix(in srgb, var(--on) 16%, transparent); animation: pop 0.45s var(--spring) both; }
+.step-help { margin: -4px 0 0; padding: 0 14px 12px 48px; font-size: 12px; line-height: 1.5; color: var(--ink-2); text-wrap: pretty; }
 .pairing { position: relative; padding: 0 14px 12px 48px; }
 .pairing .code { margin: 0 0 10px; }
 .primary.wide { display: block; width: 100%; margin-top: 12px; }

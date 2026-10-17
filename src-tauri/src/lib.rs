@@ -389,6 +389,15 @@ async fn box_state() -> BoxState {
 const BOX_PUBLISHED: &str = "ghcr.io/identity-md/worker-box:latest";
 /// The one-off box that pairs, named so that a cancel can stop it.
 const BOX_PAIRING: &str = "imd-worker-pair";
+/// Docker Desktop's installer for this computer, straight from Docker, so Get Docker downloads it rather than
+/// opening a page that asks which chip it is for; anywhere else, Docker's page.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const DOCKER_DOWNLOAD: &str = "https://desktop.docker.com/mac/main/arm64/Docker.dmg";
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+const DOCKER_DOWNLOAD: &str = "https://desktop.docker.com/mac/main/amd64/Docker.dmg";
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const DOCKER_DOWNLOAD: &str = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe";
+#[cfg(not(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64"))))]
 const DOCKER_DOWNLOAD: &str = "https://www.docker.com/products/docker-desktop/";
 
 /// The flags every box runs with, as `./box` gives them: nothing of this computer mounted, every
@@ -475,7 +484,7 @@ async fn box_setup_state() -> Setup {
     .unwrap_or(Setup { docker: "missing", image: false, worker: false, claude: false, device_key: None })
 }
 
-/// Docker Desktop: its download page when it is not installed, the app itself when it is not running.
+/// Docker Desktop: its installer when it is not installed, the app itself when it is not running.
 #[tauri::command]
 fn docker_open(app: tauri::AppHandle) -> Result<(), String> {
     if docker().is_none() {

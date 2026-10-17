@@ -22,6 +22,7 @@ const scenarios = {
   held: { box: "running", linked: [owner], watching: [], held: "22" },
   welcome: { box: "no-docker", linked: [], watching: [] },
   "setup-docker": { box: "no-docker", linked: [], watching: [], setup: { docker: "missing", image: false, worker: false, claude: false, device_key: null }, clicks: ["[data-action=setup]"] },
+  "setup-docker-wait": { box: "no-docker", linked: [], watching: [], setup: { docker: "missing", image: false, worker: false, claude: false, device_key: null }, clicks: ["[data-action=setup]", "[data-action=step]"] },
   "setup-signin": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: true, worker: true, claude: false, device_key: "e000000000000000000000000000000000000000000000000000000000000000" }, clicks: ["[data-action=setup]"] },
   "setup-pair": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: true, worker: true, claude: true, device_key: "e000000000000000000000000000000000000000000000000000000000000000" }, clicks: ["[data-action=setup]", "[data-action=step]"] },
   "setup-start": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: true, worker: true, claude: true, device_key: "d5e40d01".padEnd(64, "0") }, clicks: ["[data-action=setup]"] },

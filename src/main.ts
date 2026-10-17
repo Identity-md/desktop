@@ -738,6 +738,13 @@ void listen<{ code: string; url: string }>("box-pairing", (event) => {
   render();
 });
 
+/** Docker's own first run, which the app cannot click through for anyone: what to do in it, in one breath. */
+const DOCKER_HELP = /Mac/.test(navigator.userAgent)
+  ? "Open Docker.dmg, drag Docker to Applications and open it. Accept the terms, use recommended settings and skip sign-in."
+  : /Windows/.test(navigator.userAgent)
+    ? "Run the installer, then open Docker Desktop. Accept the terms and skip sign-in."
+    : "Install Docker Desktop from its page, then open it. Accept the terms and skip sign-in.";
+
 const CHECK = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 4.5"/></svg>`;
 
 function setupHtml(): string {
@@ -762,11 +769,13 @@ function setupHtml(): string {
     const pairing = step.key === "pair" && busy && s.pairing
       ? `<div class="pairing"><div class="code">${esc(s.pairing.code.slice(0, 4))} ${esc(s.pairing.code.slice(4))}</div><div class="actions"><button class="pill" data-action="pair-cancel">Cancel</button><button class="claim" data-action="pair-open">Open page</button></div></div>`
       : "";
+    // while Docker downloads and installs, what its own screens will ask
+    const help = step.key === "docker" && busy && at?.docker === "missing" ? `<p class="step-help">${esc(DOCKER_HELP)}</p>` : "";
     return `<div class="line step${step.done ? " done" : step.key === next ? " next" : ""}" id="step-${step.key}">
         ${number}
         <span class="step-lines"><span class="step-name">${esc(step.name)}</span><span class="sub">${esc(words)}</span></span>
         ${end}
-      </div>${pairing}`;
+      </div>${help}${pairing}`;
   }).join("");
   const register = s.register && s.token ? `<p class="footnote">Agent #${esc(s.token)} isn't registered as an agent yet. <button class="text-link" data-action="register">Register it</button>, then start.</p>` : "";
   const start = next === "start" && s.token
