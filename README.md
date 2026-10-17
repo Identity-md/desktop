@@ -23,7 +23,7 @@
 
 ## What it does
 
-- **Every agent you hold, wherever it runs.** Paste a wallet and its agents appear, each with its mask, its state and its last job: this computer, a Mac mini at home, a VPS. Watching needs no signature.
+- **Every agent you hold, wherever it runs.** Paste a wallet or its ENS name and its agents appear, each with its mask, its state and its last job: this computer, a Mac mini at home, a VPS. Watching needs no signature.
 - **What each one is doing.** Open an agent for the job it is on, its last three and how they were judged, its model, and whether its worker is behind the newest release.
 - **Your numbers.** Jobs today, all time and uptime, two weeks to scrub through, and what your rewards sell for today, with Claim.
 - **Run one here.** Five steps set this computer up as an agent, in the [worker box](https://github.com/Identity-md/worker-box). It turns on and off from the list, and restarts to update.
@@ -41,7 +41,7 @@
 
 1. Download [IMD-Agents.dmg](https://github.com/Identity-md/desktop/releases/latest/download/IMD-Agents.dmg), open it and drag IMD Agents to Applications.
 2. Open it. The IMD mark sits in the menu bar; click it for the panel.
-3. Paste a wallet to watch its agents, or choose **Run an agent here**.
+3. Paste a wallet or its ENS name to watch its agents, or choose **Run an agent here**.
 
 <p align="center">
   <img src="docs/install.png" width="560" alt="The disk image's window: imd.fun's wall around a green screen, with IMD Agents, an arrow, and Applications">
@@ -88,6 +88,8 @@ The link never expires. Disconnect in Settings unlinks every wallet and deletes 
 | `⇧1`–`⇧9`, `Enter` | Open that agent: what it is doing and has done |
 | `O` | That agent on the explorer |
 | `U` | Restart this computer's agent, which updates it |
+| `⇧U` | Update this app, when Settings shows a newer version |
+| `S` | Run an agent here: set this computer up |
 | `←` `→` | Scrub the last 14 days |
 | `E` | Rewards |
 | `C` | Claim, on the explorer |
@@ -143,6 +145,6 @@ pnpm app:build                # the installable app, in src-tauri/target/release
 
 `pnpm release 0.1.1`, on the maintainer's Mac, builds one app for Apple Silicon and Intel, signs it with the Developer ID, notarizes and staples it and its disk image, and publishes both on this repository's releases with the update installed copies fetch. `pnpm release --dry-run` does everything but commit and publish. The disk image opens on imd.fun's wall with the app, an arrow and Applications on its monitor (`scripts/installer/background.mjs` draws it with the site's own renderer, from the website checked out beside this one); it needs `brew install create-dmg`, and the first run asks to let the terminal control Finder. The certificate, the notarization profile and the update key stay in that Mac's keychain, never in GitHub's secrets.
 
-Installed copies update themselves: a minute after they start and every six hours, they read the latest release, and install a newer one once the panel has been closed for five minutes with no setup under way.
+Installed copies update themselves: a minute after they start and every six hours, they read the latest release, and install a newer one once the panel has been closed for five minutes with no setup under way. Settings shows a newer version as soon as it opens, and Update installs it there and then.
 
 `.github/workflows/build.yml` still builds unsigned installers for macOS and Windows when run by hand.

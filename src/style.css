@@ -373,7 +373,9 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .digit > span > span { height: 1lh; }
 
 /* ── first run ──────────────────────────────────────────────────────── */
-.welcome { padding: 2px 8px 4px; }
+.welcome { padding: 14px 14px 14px; }
+.welcome-act { display: flex; justify-content: flex-end; }
+.primary:disabled { opacity: 0.6; }
 .welcome-title { font-size: 15px; font-weight: 650; letter-spacing: -0.012em; }
 .welcome p { margin: 4px 0 12px; font-size: 12px; color: var(--ink-2); }
 .welcome form { display: flex; gap: 8px; }
@@ -383,8 +385,9 @@ header { display: flex; align-items: center; justify-content: space-between; gap
   padding: 8px 12px;
   font: inherit;
   color: var(--ink);
-  background: var(--card);
-  border: 1px solid transparent;
+  /* the field sits in its card, so it takes the panel's own ground to stand out from it */
+  background: var(--bg);
+  border: 1px solid var(--line);
   border-radius: 10px;
   outline: none;
   user-select: text;

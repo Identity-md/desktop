@@ -89,8 +89,17 @@ async fn api_get(path: String) -> Answer {
 /// ready to claim, and what each is worth. Only those two, and only for a wallet's address.
 fn explorer_path(path: &str) -> Result<String, String> {
     let wallet = path.strip_prefix("/api/earned?wallet=").or_else(|| path.strip_prefix("/api/earned/value?wallet="));
-    let ok = wallet.is_some_and(|w| w.len() == 42 && w.starts_with("0x") && w[2..].chars().all(|c| c.is_ascii_hexdigit()));
-    if ok { Ok(format!("{}{}", explorer_base(), path)) } else { Err("not a rewards read".into()) }
+    let rewards = wallet.is_some_and(|w| w.len() == 42 && w.starts_with("0x") && w[2..].chars().all(|c| c.is_ascii_hexdigit()));
+    // an ENS name typed where a wallet goes, which the explorer's own search turns into its address
+    let name = path.strip_prefix("/api/search?q=").is_some_and(ens_like);
+    if rewards || name { Ok(format!("{}{}", explorer_base(), path)) } else { Err("not a rewards read or a name".into()) }
+}
+
+/// An ENS name in plain letters, digits and hyphens: two labels or more, nothing that could reach past a query.
+fn ens_like(name: &str) -> bool {
+    name.len() <= 255
+        && name.split('.').count() >= 2
+        && name.split('.').all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
 }
 
 #[tauri::command]
@@ -868,6 +877,8 @@ fn watch_for_updates(app: tauri::AppHandle) {
                 Err(_) => None,
             };
             if let Some(update) = found {
+                // Settings offers it at once; on its own, it waits for a quiet moment
+                let _ = app.emit("update-available", update.version.clone());
                 while !quiet(&app) {
                     tokio::time::sleep(Duration::from_secs(60)).await;
                 }
@@ -878,6 +889,22 @@ fn watch_for_updates(app: tauri::AppHandle) {
             tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
         }
     });
+}
+
+/// Asked when Settings opens: a newer release, by its version, if there is one.
+#[tauri::command]
+async fn update_check(app: tauri::AppHandle) -> Option<String> {
+    let update = app.updater().ok()?.check().await.ok().flatten()?;
+    Some(update.version)
+}
+
+/// Update in Settings: the newer release, installed now rather than at the next quiet moment, and the app
+/// started again on it. The same signed update the app would install on its own.
+#[tauri::command]
+async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
+    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?.ok_or("This is the newest version")?;
+    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
+    app.restart();
 }
 
 /// The icon says, at a glance, how the agents are: resting, working, or one needs you.
@@ -1001,7 +1028,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
-            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state
+            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install
         ])
         .setup(|app| {
             // A menu bar app: no Dock icon, no app switcher entry.
@@ -1056,6 +1083,16 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_only_a_plain_ens_name_from_the_explorer() {
+        assert!(super::explorer_path("/api/search?q=vitalik.eth").is_ok());
+        assert!(super::explorer_path("/api/search?q=taylor.fyi").is_ok());
+        assert!(super::explorer_path("/api/search?q=agent-12.imd.eth").is_ok());
+        for bad in ["/api/search?q=vitalik", "/api/search?q=a.eth&part=published", "/api/search?q=../x.eth", "/api/search?q=Vitalik.eth", "/api/search?q=a..eth"] {
+            assert!(super::explorer_path(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn finder_dates_an_item_it_is_still_copying() {
         // 24 January 1984, 08:00 UTC: Finder's stamp on a copy in progress, read off one mid-copy

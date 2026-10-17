@@ -59,7 +59,12 @@ export async function mockApp(context, { fixtures, scenario, owner, scheme, zoom
           case "box_pair":
             setTimeout(() => window.__emit("box-pairing", { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" }), 300);
             return new Promise(() => {});
-          case "explorer_get": return window.__fixtures.explorer?.[args.path] ?? { status: 404, body: null };
+          case "explorer_get":
+            // an ENS name: the explorer's search answers with the wallet, `ens: { "name.eth": "0x…" }`
+            if (args.path.startsWith("/api/search?q=")) { const w = scenario.ens?.[args.path.slice(14)]; return { status: 200, body: { groups: w ? [{ key: "go", hits: [{ meta: "wallet", href: `/wallet/${w}` }] }] : [] } }; }
+            return window.__fixtures.explorer?.[args.path] ?? { status: 404, body: null };
+          case "update_check": return scenario.update ?? null;
+          case "update_install": return new Promise(() => {});
           default: return null;
         }
       },

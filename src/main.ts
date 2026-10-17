@@ -73,6 +73,11 @@ const state = {
   /** What each wallet has ready to claim, and its worth in dollars once every reward has a price. */
   worth: new Map<string, { count: number; usd: number | null }>(),
   linking: null as { code: string; until: number } | null,
+  /** A newer release of this app, by its version, which Settings offers as Update; and whether it is installing. */
+  update: null as string | null,
+  updating: false,
+  /** An ENS name being looked up, while the explorer finds its wallet. */
+  resolving: false,
   note: null as { text: string; bad: boolean } | null,
   sending: new Set<string>(),
   openAtLogin: false,
@@ -311,12 +316,24 @@ async function toggle(agent: Agent): Promise<void> {
   render();
 }
 
-/** Watching a wallet: its address, nothing signed. */
-function watch(value: string): void {
-  const wallet = value.trim().toLowerCase();
-  if (!/^0x[0-9a-f]{40}$/.test(wallet)) {
-    state.note = { text: "A wallet address starts with 0x and has 40 more letters and numbers.", bad: true };
-    return render();
+/** Watching a wallet: its address, or an ENS name the explorer turns into one. Nothing signed. */
+async function watch(value: string): Promise<void> {
+  const typed = value.trim().toLowerCase();
+  let wallet = typed;
+  if (!/^0x[0-9a-f]{40}$/.test(typed)) {
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(typed)) {
+      state.note = { text: "Paste a wallet address, 0x and 40 letters and numbers, or an ENS name.", bad: true };
+      return render();
+    }
+    state.resolving = true;
+    render();
+    const found = await api.ensWallet(typed).catch(() => null);
+    state.resolving = false;
+    if (!found) {
+      state.note = { text: `No wallet found for ${typed}. Paste its 0x address instead.`, bad: true };
+      return render();
+    }
+    wallet = found;
   }
   if (!settings.watching.includes(wallet)) settings.watching.push(wallet);
   save();
@@ -647,13 +664,18 @@ function networkHtml(): string {
   return lines.length ? `<section class="card">${lines.join("")}</section>` : "";
 }
 
+/** The two ways in, side by side and the same weight: watch agents that run anywhere, or run one here. */
 function welcomeHtml(): string {
-  return `<section class="welcome">
-    <div class="welcome-title">Watch your agents</div>
-    <p>Paste the wallet that holds them.</p>
-    <form data-form="watch"><input data-field="add" placeholder="0x…" spellcheck="false" autocomplete="off" aria-label="Wallet address (W)"><button class="primary" type="submit">Watch</button></form>
-    <button class="link-row" data-action="setup">Or run an agent on this computer ›</button>
-  </section>`;
+  return `<section class="card welcome">
+      <div class="welcome-title">Watch your agents</div>
+      <p>Paste the wallet that holds them, or its ENS name.</p>
+      <form data-form="watch"><input data-field="add" placeholder="0x… or name.eth" spellcheck="false" autocomplete="off" aria-label="Wallet address or ENS name (W)"><button class="primary" type="submit" title="Watch (Enter)" ${state.resolving ? "disabled" : ""}>${state.resolving ? "Finding…" : "Watch"}</button></form>
+    </section>
+    <section class="card welcome">
+      <div class="welcome-title">Run an agent here</div>
+      <p>In a box that can't see this computer. Five steps.</p>
+      <div class="welcome-act"><button class="primary" data-action="setup" title="Set up (S)">Set up</button></div>
+    </section>`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -869,7 +891,7 @@ function settingsHtml(): string {
           <span class="line-value">${count === undefined ? "" : `${count} agent${count === 1 ? "" : "s"}`}${removable ? `<button class="remove" data-remove="${esc(wallet)}" title="Stop watching ${esc(short(wallet))}" aria-label="Stop watching ${esc(short(wallet))}">×</button>` : ""}</span>
         </div>`;
       }).join("")}
-      <form class="line" data-form="watch"><input class="inline-input" data-field="add" placeholder="Add a wallet: 0x…" spellcheck="false" autocomplete="off" aria-label="Wallet address to watch (W)"></form>
+      <form class="line" data-form="watch"><input class="inline-input" data-field="add" placeholder="Add a wallet: 0x… or name.eth" spellcheck="false" autocomplete="off" aria-label="Wallet address or ENS name to watch (W)"></form>
     </section>
     <section class="card list spaced">${pauseHtml()}</section>
     ${thisComputerHtml()}
@@ -880,6 +902,7 @@ function settingsHtml(): string {
     </section>` : ""}
     <section class="card list spaced">
       <label class="line"><span>Open at login</span><button class="switch${state.openAtLogin ? " on" : ""}" role="switch" aria-checked="${state.openAtLogin}" data-action="login"><span></span></button></label>
+      ${state.update ? `<div class="line"><span>Update to ${esc(state.update)}<span class="sub">It restarts on the new version</span></span><button class="pill" data-action="update" title="Update (⇧U)" ${state.updating ? "disabled" : ""}>${state.updating ? "Updating…" : "Update"}</button></div>` : ""}
       <div class="line"><span>Quit IMD Agents${appVersion ? `<span class="sub">Version ${esc(appVersion)}</span>` : ""}</span><button class="pill" data-action="quit" title="Quit (⌘Q)">Quit</button></div>
     </section>
     ${noteHtml()}`;
@@ -1096,6 +1119,8 @@ function close(): void {
   fading.onfinish = () => void api.hidePanel();
 }
 
+void listen<string>("update-available", (event) => { state.update = event.payload; render(); });
+
 void listen<boolean>("panel-shown", (event) => {
   playIn(event.payload === true);
   void refresh();
@@ -1109,7 +1134,21 @@ void listen("panel-close", () => close());
 function openSettings(): void {
   state.view = "settings";
   void autostartIsOn().then((on) => { state.openAtLogin = on; render(); }).catch(() => undefined);
+  // Settings says at once whether a newer version is out, rather than at the six-hourly check
+  void api.updateCheck().then((version) => { state.update = version; render(); }).catch(() => undefined);
   render();
+}
+
+/** Update: the newer release installed now, the app starting again on it. */
+function updateNow(): void {
+  if (!state.update || state.updating) return;
+  state.updating = true;
+  render();
+  void api.updateInstall().catch((error) => {
+    state.updating = false;
+    state.note = { text: `Could not update: ${String(error).replace(/^Error: /, "")}`, bad: true };
+    render();
+  });
 }
 
 /** W: the field that takes a wallet, on the welcome or in Settings. */
@@ -1143,6 +1182,7 @@ app.addEventListener("click", (event) => {
   if (action === "settings") return openSettings();
   if (action === "home") { state.view = "home"; return render(); }
   if (action === "setup") return openSetup();
+  if (action === "update") return updateNow();
   if (action === "leave-setup") return leaveSetup();
   if (action === "step") return void setupStep();
   if (action === "pair-open" && state.setup.pairing) return void api.openPairing(state.setup.pairing.url);
@@ -1211,7 +1251,7 @@ app.addEventListener("focusout", (event) => { if ((event.target as HTMLElement).
 app.addEventListener("submit", (event) => {
   event.preventDefault();
   const input = (event.target as HTMLElement).querySelector<HTMLInputElement>("[data-field=add]");
-  if (input) watch(input.value);
+  if (input) void watch(input.value);
 });
 
 app.addEventListener("change", (event) => {
@@ -1250,6 +1290,8 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "c") return claim();
   if (event.key === "e") return toggleRewards();
   if (event.key === "u") return void restartLocal();
+  if (event.key === "U") return updateNow();
+  if (event.key === "s" && !state.box?.installed) return openSetup();
   if (event.key === "r") return void refresh(true);
   if (event.key === "Enter") {
     const row = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-agent]");

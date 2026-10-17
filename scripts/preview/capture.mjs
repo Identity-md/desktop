@@ -29,6 +29,7 @@ const scenarios = {
   "setup-start": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: true, worker: true, claude: true, device_key: "d5e40d01".padEnd(64, "0") }, clicks: ["[data-action=setup]"] },
   linking: { box: "running", linked: [], watching: [owner], clicks: ["[data-action=settings]", "[data-action=connect]"] },
   settings: { box: "running", linked: [owner], watching: other ? [other] : [], clicks: ["[data-action=settings]"] },
+  "settings-update": { box: "running", linked: [owner], watching: [], update: "0.1.4", clicks: ["[data-action=settings]"] },
   "settings-watching": { box: "running", linked: [], watching: [owner], clicks: ["[data-action=settings]"] },
   off: { box: "stopped", linked: [owner], watching: [] },
 };

@@ -113,4 +113,15 @@ export const openExplorer = (path: string) => invoke<void>("open_explorer", { pa
 export const hidePanel = () => invoke<void>("hide_panel");
 export const fitPanel = (height: number) => invoke<void>("fit_panel", { height });
 export const quit = () => invoke<void>("quit");
+/** A newer release's version, if there is one, and installing it now. */
+export const updateCheck = () => invoke<string | null>("update_check");
+export const updateInstall = () => invoke<void>("update_install");
+
+/** An ENS name's wallet, as the explorer's own search finds it: null when it finds none. */
+export async function ensWallet(name: string): Promise<string | null> {
+  const answer = await invoke<Answer<{ groups?: Array<{ key: string; hits?: Array<{ meta?: string; href?: string }> }> }>>("explorer_get", { path: `/api/search?q=${name}` });
+  const hit = answer.body?.groups?.find((g) => g.key === "go")?.hits?.find((h) => h.meta === "wallet" && h.href?.startsWith("/wallet/"));
+  const wallet = hit?.href?.slice("/wallet/".length).toLowerCase();
+  return wallet && /^0x[0-9a-f]{40}$/.test(wallet) ? wallet : null;
+}
 export const setTrayState = (state: string) => invoke<void>("set_tray_state", { state });
