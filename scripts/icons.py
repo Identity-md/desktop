@@ -4,7 +4,9 @@ Tray icons are template images (black on clear; macOS tints them for the menu ba
 bar, drawn at the weight of the system's symbols beside them. The app icon is the mark in black on white,
 the explorer's own, from which `tauri icon` makes every size each platform wants.
 """
+import json
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -95,17 +97,42 @@ icon.alpha_composite(tile)
 icon.alpha_composite(supersampled(lambda n: mark(n, n * 0.30), 1024))
 icon.save(f"{out}/app-icon.png")
 
-# The Mac's icon is the white square itself, full bleed, the mark a little larger to sit as it does on the
-# tile. macOS 26 puts an icon that keeps its own margins into a plate of its own and gives the mark a glassy
-# bevel; a full-bleed one it rounds and draws flat (both tried in Finder on 2026-10-16). Written here, after
-# `tauri icon`, which would draw icon.icns from the tile.
-mac = Image.new("RGBA", (1024, 1024), (255, 255, 255, 255))
-mac.alpha_composite(supersampled(lambda n: mark(n, n * 0.26), 1024))
+# The Mac's icon comes from one Icon Composer document, icons/AppIcon.icon: the white square with the mark,
+# drawn here as a vector at the size it sits on the tile. actool compiles it into Assets.car, which macOS 26
+# draws as its own icon, and an icon.icns of the rounded tile it renders for older macOS. A plain icns can't
+# serve both: macOS 26 puts one that keeps its margins on a plate with a glassy bevel, and a full-bleed square
+# it rounds itself showed as a hard square on macOS before 26 (both seen in Finder on 2026-10-16). actool
+# needs Xcode 26 and its license accepted once (sudo xcodebuild -license accept).
+pad = 1024 * 0.26
+u = (1024 - 2 * pad) / 32
+q = lambda x, y: f"{pad + x * u:.3f} {pad + y * u:.3f}"
+o, i = 7.5 + 1.3 * 2 ** 0.5, 7.5 - 1.3 * 2 ** 0.5
+square = f"M{q(0, 0)}H{pad + 32 * u:.3f}V{pad + 32 * u:.3f}H{pad:.3f}Z M{q(3, 3)}V{pad + 29 * u:.3f}H{pad + 29 * u:.3f}V{pad + 3 * u:.3f}Z"
+diamond = f"M{q(16, 16 - o)}L{q(16 + o, 16)}L{q(16, 16 + o)}L{q(16 - o, 16)}Z M{q(16, 16 - i)}L{q(16 - i, 16)}L{q(16, 16 + i)}L{q(16 + i, 16)}Z"
+doc = f"{out}/AppIcon.icon"
+os.makedirs(f"{doc}/Assets", exist_ok=True)
+with open(f"{doc}/Assets/mark.svg", "w") as f:
+    f.write(f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <path fill="#000" fill-rule="evenodd" d="{square}"/>
+  <path fill="#000" fill-rule="evenodd" d="{diamond}"/>
+</svg>
+''')
+with open(f"{doc}/icon.json", "w") as f:
+    json.dump({
+        "fill": {"solid": "extended-srgb:1.00000,1.00000,1.00000,1.00000"},
+        "groups": [{
+            "layers": [{"glass": False, "image-name": "mark.svg", "name": "mark"}],
+            "shadow": {"kind": "neutral", "opacity": 0},
+            "specular": False,
+            "translucency": {"enabled": False, "value": 0.5},
+        }],
+        "supported-platforms": {"squares": "shared"},
+    }, f, indent=2)
+    f.write("\n")
 with tempfile.TemporaryDirectory() as tmp:
-    iconset = os.path.join(tmp, "icon.iconset")
-    os.mkdir(iconset)
-    for s in (16, 32, 128, 256, 512):
-        for k, suffix in ((1, ""), (2, "@2x")):
-            mac.resize((s * k, s * k), Image.LANCZOS).save(f"{iconset}/icon_{s}x{s}{suffix}.png")
-    subprocess.run(["iconutil", "-c", "icns", iconset, "-o", f"{out}/icon.icns"], check=True)
+    subprocess.run(["xcrun", "actool", doc, "--compile", tmp, "--platform", "macosx", "--minimum-deployment-target", "12.0",
+                    "--app-icon", "AppIcon", "--output-partial-info-plist", f"{tmp}/partial.plist", "--output-format", "human-readable-text"],
+                   check=True, env={**os.environ, "DEVELOPER_DIR": os.environ.get("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")})
+    shutil.copy(f"{tmp}/Assets.car", f"{out}/Assets.car")
+    shutil.copy(f"{tmp}/AppIcon.icns", f"{out}/icon.icns")
 print("icons drawn")
