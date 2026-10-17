@@ -8,7 +8,7 @@
 //! - the box is started and stopped with the same `docker run` the box repository's script uses;
 //! - the app updates itself from the latest GitHub release, signed with the key tauri.conf.json names.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -305,7 +305,47 @@ fn docker() -> Option<PathBuf> {
     ] {
         candidates.push(PathBuf::from(fixed));
     }
-    candidates.into_iter().find(|p| p.is_file())
+    // Docker.app's own copy only once Finder has finished copying it into Applications (below)
+    candidates.into_iter().find(|p| p.is_file() && !(p.starts_with("/Applications/Docker.app") && still_copying(Path::new("/Applications/Docker.app"))))
+}
+
+/// Whether Finder is still copying an item: until a copy finishes, Finder dates the item 24 January 1984, the
+/// day of the first Macintosh, and puts its real date back at the end (seen in Finder on 2026-10-16).
+fn still_copying(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.created())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|d| finder_copy_date(d.as_secs()))
+}
+
+/// 24 January 1984 in any time zone: from the 23rd to the 26th, UTC.
+fn finder_copy_date(secs: u64) -> bool {
+    (443_664_000..443_923_200).contains(&secs)
+}
+
+/// Whether Docker's engine is answering, asked of its socket alone, so nothing of Docker's runs before
+/// Docker itself does. Running Docker's CLI from a Docker.app Finder was still copying made macOS judge the
+/// half-copied app damaged, and it kept refusing to open it after the copy finished (the Mac mini, 2026-10-16).
+fn engine_listening() -> bool {
+    #[cfg(unix)]
+    {
+        let mut sockets = vec![PathBuf::from("/var/run/docker.sock")];
+        if let Some(home) = std::env::var_os("HOME") {
+            sockets.push(PathBuf::from(home).join(".docker/run/docker.sock"));
+        }
+        if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR") {
+            sockets.push(PathBuf::from(run).join("docker.sock"));
+        }
+        if let Some(host) = std::env::var("DOCKER_HOST").ok().and_then(|h| h.strip_prefix("unix://").map(PathBuf::from)) {
+            sockets.push(host);
+        }
+        sockets.iter().any(|socket| std::os::unix::net::UnixStream::connect(socket).is_ok())
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Docker's CLI, ready to run: its own directory first on PATH, where Docker Desktop's credential
@@ -362,7 +402,7 @@ async fn box_state() -> BoxState {
         if docker().is_none() {
             return BoxState { state: "no-docker", installed: false, device_key: None };
         }
-        if !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
+        if !engine_listening() || !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
             return BoxState { state: "docker-down", installed: true, device_key: None };
         }
         let installed = run_docker(&["image", "inspect", "--format", "{{.Id}}", BOX_IMAGE], Duration::from_secs(10)).is_some_and(|(ok, _)| ok);
@@ -471,7 +511,7 @@ async fn box_setup_state() -> Setup {
         if docker().is_none() {
             return none("missing");
         }
-        if !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
+        if !engine_listening() || !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
             return none("stopped");
         }
         if !run_docker(&["image", "inspect", "--format", "{{.Id}}", BOX_IMAGE], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
@@ -1016,6 +1056,14 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn finder_dates_an_item_it_is_still_copying() {
+        // 24 January 1984, 08:00 UTC: Finder's stamp on a copy in progress, read off one mid-copy
+        assert!(super::finder_copy_date(443_779_200));
+        assert!(!super::finder_copy_date(0));
+        assert!(!super::finder_copy_date(1_792_000_000));
+    }
+
     use super::*;
 
     #[test]
