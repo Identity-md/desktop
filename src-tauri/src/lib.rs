@@ -410,9 +410,25 @@ fn box_flags() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .chain(jail_flags())
-    .chain(["--cpus", "4", "--memory", "6g", "--pids-limit", "2048", "-v"].iter().map(|s| s.to_string()))
+    .chain(["--cpus".to_string(), box_cpus()])
+    .chain(["--memory", "6g", "--pids-limit", "2048", "-v"].iter().map(|s| s.to_string()))
     .chain([format!("{BOX_VOLUME}:/home/imd")])
     .collect()
+}
+
+/// Four CPUs, or as many as Docker has if fewer: Docker refuses to start a container asking for more
+/// than it has, and a Mac whose Docker was given two would never start the box.
+fn box_cpus() -> String {
+    let have = run_docker(&["info", "--format", "{{.NCPU}}"], Duration::from_secs(10))
+        .and_then(|(ok, out)| if ok { out.trim().parse::<u32>().ok() } else { None });
+    have.map_or(4, |n| n.clamp(1, 4)).to_string()
+}
+
+/// What Docker said when a step failed, whole: its error is on the first line and its last is often
+/// only "Run 'docker run --help'", so the panel picks the telling line and says it in plain words.
+fn docker_failure(why: String, otherwise: &str) -> String {
+    let why = why.trim();
+    if why.is_empty() { otherwise.to_string() } else { why.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect() }
 }
 
 /// The box repository's seccomp.json, kept identical to it: Docker's default profile with the
@@ -509,7 +525,7 @@ async fn box_pull() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {
         match run_docker(&["pull", BOX_PUBLISHED], Duration::from_secs(30 * 60)) {
             Some((true, _)) => {}
-            Some((false, why)) => return Err(why.lines().last().unwrap_or("could not download the box").to_string()),
+            Some((false, why)) => return Err(docker_failure(why, "could not download the box")),
             None => return Err("Docker is not installed".into()),
         }
         match run_docker(&["tag", BOX_PUBLISHED, BOX_IMAGE], Duration::from_secs(30)) {
@@ -532,7 +548,7 @@ async fn box_install() -> Result<(), String> {
         args.extend([BOX_IMAGE.to_string(), "imd-box-setup".into()]);
         match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(20 * 60)) {
             Some((true, _)) => Ok(()),
-            Some((false, why)) => Err(why.lines().last().unwrap_or("could not install the worker").to_string()),
+            Some((false, why)) => Err(docker_failure(why, "could not install the worker")),
             None => Err("Docker is not installed".into()),
         }
     })
@@ -658,7 +674,7 @@ async fn box_start(runtime: String) -> Result<(), String> {
         args.extend([BOX_IMAGE, "imd", "start", "--runtime", &runtime, "--auto-update"].iter().map(|s| s.to_string()));
         match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(120)) {
             Some((true, _)) => Ok(()),
-            Some((false, why)) => Err(why.lines().last().unwrap_or("could not start").to_string()),
+            Some((false, why)) => Err(docker_failure(why, "could not start")),
             None => Err("Docker is not installed".into()),
         }
     })

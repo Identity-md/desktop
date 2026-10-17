@@ -342,3 +342,25 @@ export function jailWords(standing: Standing | null): string | null {
   if (!jail || jail.ok) return null;
   return jail.detail.trim() || "its sandbox cannot start";
 }
+
+/**
+ * A failed setup step in plain words: what happened and what to do, from what Docker or the worker said.
+ * A failure it does not know keeps Docker's own most telling line, the error and not its "Run 'docker run
+ * --help'" after it.
+ */
+export function setupErrorWords(raw: string): string {
+  const text = raw.trim();
+  const known: Array<[RegExp, string]> = [
+    [/permission denied.*docker daemon socket/i, "This user can't use Docker. Add it to the docker group, log in again, then try again."],
+    [/cannot connect to the docker daemon|is the docker daemon running|docker is not installed/i, "Docker isn't running. Open Docker, then try again."],
+    [/no space left on device/i, "Docker is out of disk space. Raise its disk limit in Docker's settings or delete images you don't use, then try again."],
+    [/computed checksum did not match|sha256sums?: .*failed|: FAILED$/im, "The worker's download didn't match its published checksum, so nothing was installed. Try again."],
+    [/no such host|could not resolve|network is unreachable|i\/o timeout|tls handshake timeout|connection reset|eai_again|enotfound|etimedout/i, "This computer can't reach the internet right now. Check the connection, then try again."],
+    [/\bdenied\b|unauthorized|authentication required/i, "GitHub refused the box download. Try again in a few minutes."],
+    [/^timed out$/i, "That took too long. Check the connection, then try again."],
+  ];
+  for (const [pattern, words] of known) if (pattern.test(text)) return words;
+  const lines = text.split("\n").map((line) => line.trim()).filter((line) => line && !/^Run '.*--help'/.test(line));
+  const telling = lines.find((line) => /error|denied|failed|cannot|can't|unable/i.test(line)) ?? lines[lines.length - 1] ?? "Something went wrong. Try again.";
+  return telling.replace(/^docker: /, "").replace(/^Error response from daemon: /i, "").slice(0, 200);
+}

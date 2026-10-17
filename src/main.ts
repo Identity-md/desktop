@@ -4,7 +4,7 @@ import { disable as autostartOff, enable as autostartOn, isEnabled as autostartI
 import morphdom from "morphdom";
 import * as api from "./api";
 import { faceFor, loadFace } from "./masks";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailWords, judgedRate, localPhase, modelName, newerRelease, phaseOf, runLength, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailWords, judgedRate, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
 
 // ---------------------------------------------------------------------------------------------
 // What the app remembers between runs: wallets, the network it signs for, names. Nothing secret:
@@ -47,6 +47,8 @@ const state = {
     /** The page to register the agent at, when its token is not an ERC-8004 agent yet. */
     register: null as string | null,
     error: null as string | null,
+    /** What Docker or the worker said, behind the plain words. */
+    errorDetail: null as string | null,
   },
   box: null as Box | null,
   /** This computer's own agent, found from the box's device key. */
@@ -724,7 +726,8 @@ async function setupStep(): Promise<void> {
       return void refresh(true);
     }
   } catch (error) {
-    s.error = String(error).replace(/^Error: /, "");
+    s.errorDetail = String(error).replace(/^Error: /, "");
+    s.error = setupErrorWords(s.errorDetail);
   }
   s.busy = null;
   s.pairing = null;
@@ -790,7 +793,7 @@ function setupHtml(): string {
     ${at ? `<section class="card list">${rows}</section>` : `<section class="card list"><div class="line"><span class="sub">Looking at this computer…</span><span class="spinner"></span></div></section>`}
     ${register}
     ${start}
-    ${s.error ? `<div class="note bad" role="status">${esc(s.error)}</div>` : ""}`;
+    ${s.error ? `<div class="note bad" role="status" title="${esc(s.errorDetail ?? "")}">${esc(s.error)}</div>` : ""}`;
 }
 
 function noteHtml(): string {

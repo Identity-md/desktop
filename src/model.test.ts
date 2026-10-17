@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -121,5 +121,18 @@ describe("numbers", () => {
     expect(jailWords(standing({}, { jail: null }))).toBeNull();
     expect(jailWords(standing())).toBeNull();
     expect(jailWords(null)).toBeNull();
+  });
+
+  it("says a failed setup step in plain words, from what Docker said", () => {
+    expect(setupErrorWords('Error response from daemon: Head "https://ghcr.io/v2/identity-md/worker-box/manifests/latest": denied')).toBe("GitHub refused the box download. Try again in a few minutes.");
+    expect(setupErrorWords('Error response from daemon: Get "https://ghcr.io/v2/": dial tcp: lookup ghcr.io: no such host')).toBe("This computer can't reach the internet right now. Check the connection, then try again.");
+    expect(setupErrorWords("failed to register layer: write /usr/lib/x86_64-linux-gnu/libLLVM.so: no space left on device")).toMatch(/^Docker is out of disk space/);
+    expect(setupErrorWords("Cannot connect to the Docker daemon at unix:///Users/me/.docker/run/docker.sock. Is the docker daemon running?")).toBe("Docker isn't running. Open Docker, then try again.");
+    expect(setupErrorWords("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock")).toMatch(/^This user can't use Docker/);
+    expect(setupErrorWords("identitymd-worker.tgz: FAILED\nsha256sum: WARNING: 1 computed checksum did NOT match")).toMatch(/didn't match its published checksum/);
+    expect(setupErrorWords("timed out")).toBe("That took too long. Check the connection, then try again.");
+    // one it does not know: Docker's error, not the line after it
+    expect(setupErrorWords("docker: Error response from daemon: range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available\nRun 'docker run --help' for more information")).toBe("range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available");
+    expect(setupErrorWords("")).toBe("Something went wrong. Try again.");
   });
 });

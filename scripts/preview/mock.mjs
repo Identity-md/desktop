@@ -39,6 +39,8 @@ export async function mockApp(context, { fixtures, scenario, owner, scheme, zoom
       metadata: { currentWindow: { label: "panel" }, currentWebview: { windowLabel: "panel", label: "panel" } },
       transformCallback: (cb) => { const id = Math.floor(Math.random() * 1e9); window[`_${id}`] = cb; return id; },
       invoke: async (cmd, args) => {
+        // a step that fails as Docker would: `fail: { box_pull: "what Docker said" }`
+        if (scenario.fail?.[cmd]) throw scenario.fail[cmd];
         switch (cmd) {
           case "api_get": return answer(args.path);
           case "agent_svg": return fixtures.svg[args.tokenId] ?? null;
