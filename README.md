@@ -26,7 +26,7 @@
 - **Every agent you hold, wherever it runs.** Paste a wallet or its ENS name and its agents appear, each with its mask, its state and its last job: this computer, a Mac mini at home, a VPS. Watching needs no signature.
 - **What each one is doing.** Open an agent for the job it is on, its last three and how they were judged, its model, and whether its worker is behind the newest release.
 - **Your numbers.** Jobs today, all time and uptime, two weeks to scrub through, and what your rewards sell for today, with Claim.
-- **Run one here.** Five steps set this computer up as an agent, in the [worker box](https://github.com/Identity-md/worker-box). It turns on and off from the list, and restarts to update.
+- **Run one here.** Five steps, in a window of their own that stays open while you work, set this computer up as an agent in the [worker box](https://github.com/Identity-md/worker-box). It turns on and off from the list, and restarts to update.
 - **Pause and resume.** Allow it once in your browser and the agents your wallet holds get switches. Paused, an agent finishes what it is running and takes nothing new.
 - **The swarm.** How many agents are online and working, and what the swarm just did.
 
@@ -54,16 +54,16 @@ It is signed with a Developer ID and notarized by Apple, and it updates itself f
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/setup-dark.png">
-    <img src="docs/setup-light.png" width="400" alt="Run an agent here: Docker running, the box downloading, then the worker, Claude and your agent">
+    <img src="docs/setup-light.png" width="400" alt="The setup window: three promises with padlocks, Docker running, the box downloading 120 of 385 MB, then the worker, Claude and your agent">
   </picture>
 </p>
 
-You need Docker Desktop, an [IMD seat](https://imd.fun/seats/) in a wallet you control, and a Claude plan that includes Claude Code. The app does the rest, one step at a time:
+You need an [IMD seat](https://imd.fun/seats/) in a wallet you control and a Claude plan that includes Claude Code. Setup opens in a window of its own, which stays open beside Finder and Docker, and does the rest one step at a time:
 
 | Step | What happens |
 |---|---|
-| **1&nbsp;·&nbsp;Docker** | Downloads Docker Desktop for this Mac's chip and waits for it to run. In Docker, accept the terms, use the recommended settings and skip sign-in. |
-| **2&nbsp;·&nbsp;The&nbsp;box** | Downloads the worker box, a few hundred MB, once. |
+| **1&nbsp;·&nbsp;Docker** | On a Mac, downloads Docker Desktop for its chip, checks that Docker signed it, and installs it with Docker's own installer after one macOS password prompt, which accepts Docker's terms. Then opens it; its sign-in you can skip. |
+| **2&nbsp;·&nbsp;The&nbsp;box** | Downloads the worker box, a few hundred MB, once, counting the megabytes as they come. |
 | **3&nbsp;·&nbsp;The&nbsp;worker** | Installs IMD's worker and Claude Code inside the box. |
 | **4&nbsp;·&nbsp;Claude** | Opens Terminal in the box. Type `/login` and sign in. |
 | **5&nbsp;·&nbsp;Your&nbsp;agent** | Shows a code. Approve it with the wallet that holds your seat. |
@@ -75,6 +75,7 @@ Then **Start Agent #N**. A seat runs on one machine at a time, so pairing it her
 - **No wallet keys, ever.** Your wallet signs once, in your browser, on `explorer.imd.fun/link`, to let this computer pause and resume the agents it holds. Claims are signed in the browser too.
 - **One narrow key.** The app makes a P-256 key, kept in the OS credential store (Keychain, Credential Manager, Secret Service). It signs three things: a pause, a resume and an unlink. On every pause the network checks that the key is linked and that the wallet holds that seat at that moment, so a seat you sell stops listening at once.
 - **The page holds nothing.** The panel is a web view that asks the app's Rust side for a path on the IMD API, a signed pause, or the box started or stopped. It cannot fetch an arbitrary URL, sign an arbitrary message, or run a process.
+- **Docker is Docker's.** The app installs Docker Desktop only after checking that the download is Docker's own signed app, and only with Docker's own installer.
 - **The box sees nothing of this computer.** Nothing is mounted, a firewall is set before the worker starts, and every capability is dropped. `./box check` in the [box repository](https://github.com/Identity-md/worker-box) proves each wall.
 - **Signed updates only.** The app refuses any update not signed with the release key, which never leaves the maintainer's Mac.
 

@@ -52,6 +52,31 @@ fn http() -> reqwest::Client {
         .expect("http client")
 }
 
+/// For downloads of hundreds of megabytes: a time limit on connecting, none on the whole transfer.
+fn http_long() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .user_agent(concat!("imd-agents/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("http client")
+}
+
+/// What a setup step is doing right now, in words, for the setup window to show under it.
+#[derive(Clone, Serialize)]
+struct StepProgress {
+    step: &'static str,
+    words: String,
+}
+
+fn progress(app: &tauri::AppHandle, step: &'static str, words: impl Into<String>) {
+    let _ = app.emit("setup-step-progress", StepProgress { step, words: words.into() });
+}
+
+/// Megabytes, whole, as a person counts a download.
+fn mb(bytes: u64) -> u64 {
+    (bytes as f64 / 1_000_000.0).round() as u64
+}
+
 #[derive(Serialize)]
 struct Answer {
     status: u16,
@@ -339,22 +364,29 @@ fn finder_copy_date(secs: u64) -> bool {
 fn engine_listening() -> bool {
     #[cfg(unix)]
     {
-        let mut sockets = vec![PathBuf::from("/var/run/docker.sock")];
-        if let Some(home) = std::env::var_os("HOME") {
-            sockets.push(PathBuf::from(home).join(".docker/run/docker.sock"));
-        }
-        if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR") {
-            sockets.push(PathBuf::from(run).join("docker.sock"));
-        }
-        if let Some(host) = std::env::var("DOCKER_HOST").ok().and_then(|h| h.strip_prefix("unix://").map(PathBuf::from)) {
-            sockets.push(host);
-        }
-        sockets.iter().any(|socket| std::os::unix::net::UnixStream::connect(socket).is_ok())
+        engine_socket().is_some()
     }
     #[cfg(not(unix))]
     {
         true
     }
+}
+
+/// The socket Docker's engine answers on: Docker Desktop's own, the system one, or DOCKER_HOST's.
+#[cfg(unix)]
+fn engine_socket() -> Option<PathBuf> {
+    let mut sockets = Vec::new();
+    if let Some(host) = std::env::var("DOCKER_HOST").ok().and_then(|h| h.strip_prefix("unix://").map(PathBuf::from)) {
+        sockets.push(host);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        sockets.push(PathBuf::from(home).join(".docker/run/docker.sock"));
+    }
+    sockets.push(PathBuf::from("/var/run/docker.sock"));
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR") {
+        sockets.push(PathBuf::from(run).join("docker.sock"));
+    }
+    sockets.into_iter().find(|socket| std::os::unix::net::UnixStream::connect(socket).is_ok())
 }
 
 /// Docker's CLI, ready to run: its own directory first on PATH, where Docker Desktop's credential
@@ -549,6 +581,111 @@ async fn box_setup_state() -> Setup {
     .unwrap_or(Setup { docker: "missing", image: false, worker: false, claude: false, device_key: None })
 }
 
+/// Docker's signing team: Docker Desktop is installed only when it is Docker's own signed app.
+#[cfg(target_os = "macos")]
+const DOCKER_TEAM: &str = "9BNSXJN65R";
+
+/// Install Docker: Docker Desktop for this Mac's chip, downloaded with its progress shown, checked as Docker's
+/// own signed app, put in Applications by Docker's own installer after one macOS password prompt, then opened.
+/// The installer accepts Docker's terms, which the setup window states beside the button, and does Docker's
+/// privileged setup for this user now, so Docker's first run asks for no password. Elsewhere, as before:
+/// Docker's installer or page opens, and the setup window waits for Docker to run.
+#[tauri::command]
+async fn docker_install(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _busy = Busy::new();
+        let dir = std::env::temp_dir().join("imd-docker-install");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let dmg = dir.join("Docker.dmg");
+        download(&app, "docker", DOCKER_DOWNLOAD, &dmg).await?;
+        let installer = app.clone();
+        tauri::async_runtime::spawn_blocking(move || install_docker_from(&installer, &dir, &dmg)).await.map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    docker_open(app)
+}
+
+/// Whether an app is Docker's own: intact, and signed by Docker's team.
+#[cfg(target_os = "macos")]
+fn docker_signed(app: &Path) -> bool {
+    let intact = Command::new("codesign").args(["--verify", "--deep", "--strict"]).arg(app).status().is_ok_and(|status| status.success());
+    let signer = Command::new("codesign").arg("-dv").arg(app).output().map(|out| String::from_utf8_lossy(&out.stderr).to_string()).unwrap_or_default();
+    intact && signer.lines().any(|line| line == format!("TeamIdentifier={DOCKER_TEAM}"))
+}
+
+/// A download to a file, its progress said every few megabytes.
+#[cfg(target_os = "macos")]
+async fn download(app: &tauri::AppHandle, step: &'static str, url: &str, to: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let mut response = http_long().get(url).send().await.map_err(|_| "Couldn't reach Docker's download. Check the connection, then try again.".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Docker's download answered {}. Try again in a few minutes.", response.status()));
+    }
+    let total = response.content_length();
+    let mut file = std::fs::File::create(to).map_err(|e| e.to_string())?;
+    let (mut got, mut said) = (0u64, u64::MAX);
+    while let Some(chunk) = response.chunk().await.map_err(|_| "The download stopped. Check the connection, then try again.".to_string())? {
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        got += chunk.len() as u64;
+        if said == u64::MAX || got - said >= 5_000_000 || Some(got) == total {
+            said = got;
+            progress(app, step, match total {
+                Some(total) => format!("Downloading {} of {} MB", mb(got), mb(total)),
+                None => format!("Downloading {} MB", mb(got)),
+            });
+        }
+    }
+    file.flush().map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn install_docker_from(app: &tauri::AppHandle, dir: &Path, dmg: &Path) -> Result<(), String> {
+    progress(app, "docker", "Checking Docker's signature…");
+    let mount = dir.join("mount");
+    let attached = Command::new("hdiutil").args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"]).arg(&mount).arg(dmg).status();
+    if !attached.is_ok_and(|status| status.success()) {
+        let _ = std::fs::remove_dir_all(dir);
+        return Err("Docker's download didn't open. Try again.".into());
+    }
+    let installed = (|| {
+        let docker = mount.join("Docker.app");
+        if !docker_signed(&docker) {
+            return Err("That download isn't Docker's own signed app, so it wasn't installed.".to_string());
+        }
+        let user = std::env::var("USER").unwrap_or_default();
+        if user.is_empty() || !user.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+            return Err("Couldn't tell which user to install Docker for.".into());
+        }
+        progress(app, "docker", "Installing Docker…");
+        let install = docker.join("Contents/MacOS/install");
+        let shell = format!("'{}' --accept-license --user={user}", install.display());
+        let script = format!(
+            "do shell script \"{}\" with prompt \"IMD Agents is installing Docker Desktop.\" with administrator privileges",
+            shell.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let out = Command::new("osascript").args(["-e", &script]).output().map_err(|e| e.to_string())?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let why = String::from_utf8_lossy(&out.stderr).to_string();
+        Err(if why.contains("-128") {
+            "Docker wasn't installed: the password was canceled.".to_string()
+        } else {
+            format!("Docker's installer stopped: {}", why.trim().lines().last().unwrap_or("no reason given"))
+        })
+    })();
+    if !Command::new("hdiutil").args(["detach", "-quiet"]).arg(&mount).status().is_ok_and(|status| status.success()) {
+        let _ = Command::new("hdiutil").args(["detach", "-force", "-quiet"]).arg(&mount).status();
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    installed?;
+    progress(app, "docker", "Opening Docker…");
+    let _ = Command::new("open").args(["-a", "Docker"]).status();
+    Ok(())
+}
+
 /// Docker Desktop: its installer when it is not installed, the app itself when it is not running.
 #[tauri::command]
 fn docker_open(app: tauri::AppHandle) -> Result<(), String> {
@@ -567,15 +704,35 @@ fn docker_open(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-/// Downloads the published box and names it as `./box` names its own build, so either runs it.
+/// Downloads the published box and names it as `./box` names its own build, so either runs it. Asked of the
+/// engine itself where it can be, so the download says how far it has got.
 #[tauri::command]
-async fn box_pull() -> Result<(), String> {
+async fn box_pull(app: tauri::AppHandle) -> Result<(), String> {
     let _busy = Busy::new();
-    tauri::async_runtime::spawn_blocking(|| {
-        match run_docker(&["pull", BOX_PUBLISHED], Duration::from_secs(30 * 60)) {
-            Some((true, _)) => {}
-            Some((false, why)) => return Err(docker_failure(why, "could not download the box")),
-            None => return Err("Docker is not installed".into()),
+    #[cfg(unix)]
+    let through_engine = match engine_socket() {
+        Some(socket) => {
+            let total = published_size().await;
+            let reporter = app.clone();
+            Some(
+                tauri::async_runtime::spawn_blocking(move || pull_through_engine(&socket, "ghcr.io/identity-md/worker-box", "latest", total, &mut |words| progress(&reporter, "pull", words)))
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
+        }
+        None => None,
+    };
+    #[cfg(not(unix))]
+    let through_engine: Option<Result<(), String>> = None;
+    tauri::async_runtime::spawn_blocking(move || {
+        match through_engine {
+            Some(Ok(())) => {}
+            Some(Err(why)) => return Err(why),
+            None => match run_docker(&["pull", BOX_PUBLISHED], Duration::from_secs(30 * 60)) {
+                Some((true, _)) => {}
+                Some((false, why)) => return Err(docker_failure(why, "could not download the box")),
+                None => return Err("Docker is not installed".into()),
+            },
         }
         match run_docker(&["tag", BOX_PUBLISHED, BOX_IMAGE], Duration::from_secs(30)) {
             Some((true, _)) => Ok(()),
@@ -587,19 +744,130 @@ async fn box_pull() -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// The published box's size for this Mac's chip, as the registry lists its layers: the whole a download counts
+/// toward. None when the registry doesn't answer; the download then counts megabytes alone.
+async fn published_size() -> Option<u64> {
+    let client = http();
+    let token: serde_json::Value = client.get("https://ghcr.io/token?scope=repository:identity-md/worker-box:pull").send().await.ok()?.json().await.ok()?;
+    let token = token["token"].as_str()?.to_string();
+    let index: serde_json::Value = client
+        .get("https://ghcr.io/v2/identity-md/worker-box/manifests/latest")
+        .bearer_auth(&token)
+        .header("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json")
+        .send().await.ok()?.json().await.ok()?;
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+    let digest = index["manifests"].as_array()?.iter().find(|m| m["platform"]["os"] == "linux" && m["platform"]["architecture"] == arch)?["digest"].as_str()?.to_string();
+    let manifest: serde_json::Value = client
+        .get(format!("https://ghcr.io/v2/identity-md/worker-box/manifests/{digest}"))
+        .bearer_auth(&token)
+        .header("Accept", "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json")
+        .send().await.ok()?.json().await.ok()?;
+    Some(manifest["layers"].as_array()?.iter().filter_map(|layer| layer["size"].as_u64()).sum())
+}
+
+/// The pull, asked of the engine over its socket rather than of Docker's CLI, whose progress bars go only to
+/// a terminal: it answers with a line of JSON per layer as each moves, which add up to how far it has got.
+#[cfg(unix)]
+fn pull_through_engine(socket: &Path, image: &str, tag: &str, total: Option<u64>, say: &mut dyn FnMut(String)) -> Result<(), String> {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).map_err(|_| "Docker isn't running. Open Docker, then try again.".to_string())?;
+    stream.set_read_timeout(Some(Duration::from_secs(10 * 60))).ok();
+    // HTTP/1.0, so the answer streams plainly until the engine closes it, without chunking to undo
+    let request = format!("POST /images/create?fromImage={}&tag={tag} HTTP/1.0\r\nHost: docker\r\nContent-Length: 0\r\n\r\n", image.replace('/', "%2F"));
+    stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    reader.read_line(&mut status).map_err(|e| e.to_string())?;
+    if !status.split_whitespace().nth(1).is_some_and(|code| code == "200") {
+        let mut rest = String::new();
+        let _ = std::io::Read::read_to_string(&mut reader, &mut rest);
+        let why = rest.lines().rev().find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok().and_then(|v| v["message"].as_str().map(str::to_string)));
+        return Err(why.unwrap_or_else(|| status.trim().to_string()));
+    }
+    // past the headers
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+    // each layer's bytes so far, and those done in full
+    let mut layers: HashMap<String, (u64, u64, bool)> = HashMap::new();
+    let mut said = (u64::MAX, false);
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        if let Some(why) = event["errorDetail"]["message"].as_str().or_else(|| event["error"].as_str()) {
+            return Err(why.to_string());
+        }
+        let Some(id) = event["id"].as_str() else { continue };
+        let entry = layers.entry(id.to_string()).or_insert((0, 0, false));
+        match event["status"].as_str().unwrap_or("") {
+            "Downloading" => {
+                entry.0 = event["progressDetail"]["current"].as_u64().unwrap_or(entry.0);
+                entry.1 = event["progressDetail"]["total"].as_u64().unwrap_or(entry.1);
+            }
+            "Download complete" | "Verifying Checksum" => entry.2 = true,
+            "Extracting" | "Pull complete" | "Already exists" => entry.2 = true,
+            _ => {}
+        }
+        let got: u64 = layers.values().map(|(current, size, done)| if *done && *size > 0 { *size } else { *current }).sum();
+        let unpacking = !layers.is_empty() && layers.values().all(|(_, _, done)| *done);
+        let step = mb(got);
+        if (step, unpacking) != said {
+            said = (step, unpacking);
+            say(if unpacking {
+                "Unpacking…".to_string()
+            } else {
+                match total {
+                    Some(total) if total > 0 => format!("Downloading {} of {} MB", step.min(mb(total)), mb(total)),
+                    _ => format!("Downloading {step} MB"),
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Installs the worker and Claude Code into the box's volume, as `./box setup` does before its shell.
 #[tauri::command]
-async fn box_install() -> Result<(), String> {
+async fn box_install(app: tauri::AppHandle) -> Result<(), String> {
     let _busy = Busy::new();
-    tauri::async_runtime::spawn_blocking(|| {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{BufRead, Read};
         let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
         args.extend(box_flags());
         args.extend([BOX_IMAGE.to_string(), "imd-box-setup".into()]);
-        match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(20 * 60)) {
-            Some((true, _)) => Ok(()),
-            Some((false, why)) => Err(docker_failure(why, "could not install the worker")),
-            None => Err("Docker is not installed".into()),
+        let mut command = docker_command().ok_or("Docker is not installed")?;
+        command.args(&args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|e| e.to_string())?;
+        let mut stderr = child.stderr.take();
+        // what setup.sh says it is doing, a line at a time, under the step
+        if let Some(stdout) = child.stdout.take() {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                let words = if line.starts_with("Installing Claude Code") {
+                    "Installing Claude Code…"
+                } else if line.starts_with("Installing the IMD worker") {
+                    "Installing the IMD worker…"
+                } else if line.starts_with("Connecting the browser") {
+                    "Connecting the browser…"
+                } else {
+                    continue;
+                };
+                progress(&app, "install", words);
+            }
         }
+        let status = child.wait().map_err(|e| e.to_string())?;
+        if status.success() {
+            return Ok(());
+        }
+        let mut why = String::new();
+        if let Some(err) = stderr.as_mut() {
+            let _ = err.read_to_string(&mut why);
+        }
+        Err(docker_failure(why, "could not install the worker"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -907,6 +1175,56 @@ async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
     app.restart();
 }
 
+/// The setup window: its own window, which stays open beside Finder and Docker while they are in use, where
+/// the panel closes as soon as anything else is clicked. While it is open, IMD Agents is in the Dock and the
+/// app switcher, to come back to; closed, it is a menu bar app again.
+#[tauri::command]
+fn open_setup(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(panel) = app.get_webview_window("panel") {
+        let _ = panel.hide();
+    }
+    if let Some(win) = app.get_webview_window("setup") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    let win = tauri::WebviewWindowBuilder::new(&app, "setup", tauri::WebviewUrl::App("setup.html".into()))
+        .title("Run an agent here")
+        .inner_size(460.0, 640.0)
+        .resizable(false)
+        .center()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let _ = win.set_focus();
+    let handle = app.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            #[cfg(target_os = "macos")]
+            let _ = handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let _ = handle.emit("setup-progress", Option::<String>::None);
+        }
+    });
+    Ok(())
+}
+
+/// Docker's terms, which its installer accepts for this computer's person: the setup window links to them.
+#[tauri::command]
+fn open_docker_terms(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener().open_url("https://www.docker.com/legal/docker-subscription-service-agreement/", None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Setup finished: its window closes and the panel opens on the agent now running here.
+#[tauri::command]
+fn setup_done(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("setup") {
+        let _ = win.close();
+    }
+    show_panel_top_right(&app);
+}
+
 /// The icon says, at a glance, how the agents are: resting, working, or one needs you.
 #[tauri::command]
 fn set_tray_state(app: tauri::AppHandle, state: String) {
@@ -1028,7 +1346,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
-            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install
+            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
+            docker_install, open_setup, setup_done, open_docker_terms
         ])
         .setup(|app| {
             // A menu bar app: no Dock icon, no app switcher entry.
@@ -1076,13 +1395,48 @@ pub fn run() {
             // Opened again while running, on macOS (Spotlight, Finder, Raycast): the panel opens.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = _event {
-                show_panel_top_right(_app);
+                match _app.get_webview_window("setup") {
+                    Some(win) => {
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                    None => show_panel_top_right(_app),
+                }
             }
         });
 }
 
 #[cfg(test)]
 mod tests {
+    /// Docker's own app passes the check the installer runs; anything else, such as this app, doesn't.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn knows_dockers_own_app() {
+        assert!(super::docker_signed(std::path::Path::new("/Applications/Docker.app")));
+        assert!(!super::docker_signed(std::path::Path::new("/System/Applications/Calculator.app")));
+    }
+
+    /// The engine's own pull, on a small image, saying how far it got. Needs Docker running.
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn pulls_through_the_engine() {
+        let socket = super::engine_socket().expect("Docker running");
+        let mut said = Vec::new();
+        super::pull_through_engine(&socket, "library/hello-world", "latest", None, &mut |words| said.push(words)).expect("pulled");
+        println!("said {said:?}");
+        assert!(super::pull_through_engine(&socket, "library/no-such-image-imd", "latest", None, &mut |_| {}).is_err());
+    }
+
+    #[test]
+    #[ignore]
+    fn reads_the_published_box_size() {
+        let size = tauri::async_runtime::block_on(super::published_size());
+        println!("published box {size:?} bytes");
+        assert!(size.is_some_and(|s| s > 100_000_000));
+    }
+
     #[test]
     fn reads_only_a_plain_ens_name_from_the_explorer() {
         assert!(super::explorer_path("/api/search?q=vitalik.eth").is_ok());

@@ -64,6 +64,7 @@ export async function mockApp(context, { fixtures, scenario, owner, scheme, zoom
             if (args.path.startsWith("/api/search?q=")) { const w = scenario.ens?.[args.path.slice(14)]; return { status: 200, body: { groups: w ? [{ key: "go", hits: [{ meta: "wallet", href: `/wallet/${w}` }] }] : [] } }; }
             return window.__fixtures.explorer?.[args.path] ?? { status: 404, body: null };
           case "update_check": return scenario.update ?? null;
+          case "docker_install": return new Promise(() => {});
           case "update_install": return new Promise(() => {});
           default: return null;
         }

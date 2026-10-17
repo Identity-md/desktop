@@ -34,22 +34,9 @@ delete (settings as { watch?: unknown }).watch;
 const save = () => { try { localStorage.setItem(STORE, JSON.stringify(settings)); } catch { /* kept for this run */ } };
 
 const state = {
-  view: "home" as "home" | "settings" | "setup",
-  /** Where Back goes from setting a box up: the view it was opened from. */
-  setupFrom: "home" as "home" | "settings",
-  /** Setting this computer's box up: how far it has got, the step under way, and what went wrong. */
-  setup: {
-    at: null as api.Setup | null,
-    /** The agent the box is paired to, as the network has it. */
-    token: null as string | null,
-    busy: null as null | "docker" | "pull" | "install" | "signin" | "pair" | "start",
-    pairing: null as { code: string; url: string } | null,
-    /** The page to register the agent at, when its token is not an ERC-8004 agent yet. */
-    register: null as string | null,
-    error: null as string | null,
-    /** What Docker or the worker said, behind the plain words. */
-    errorDetail: null as string | null,
-  },
+  view: "home" as "home" | "settings",
+  /** Where setup has got, while its window is open: the panel's row back to it. */
+  settingUp: null as string | null,
   box: null as Box | null,
   /** This computer's own agent, found from the box's device key. */
   localToken: settings.localToken as string | null,
@@ -673,149 +660,9 @@ function welcomeHtml(): string {
     </section>
     <section class="card welcome">
       <div class="welcome-title">Run an agent here</div>
-      <p>In a box that can't see this computer. Five steps.</p>
-      <div class="welcome-act"><button class="primary" data-action="setup" title="Set up (S)">Set up</button></div>
+      <p>${state.settingUp ? esc(state.settingUp) : "It works in its own sealed box, so it can't see your files or passwords."}</p>
+      <button class="primary wide" data-action="setup" title="${state.settingUp ? "Continue setup" : "Set up"} (S)">${state.settingUp ? "Continue setup" : "Set up"}</button>
     </section>`;
-}
-
-// ---------------------------------------------------------------------------------------------
-// Running an agent here: the box set up one step at a time, each done or the one button that does it.
-// ---------------------------------------------------------------------------------------------
-
-type SetupStep = "docker" | "pull" | "install" | "signin" | "pair" | "start";
-
-/** The step to take next, or none when the box is set up and running. */
-function nextStep(): SetupStep | null {
-  const at = state.setup.at;
-  if (!at) return null;
-  if (at.docker !== "running") return "docker";
-  if (!at.image) return "pull";
-  if (!at.worker) return "install";
-  if (!at.claude) return "signin";
-  if (!state.setup.token) return "pair";
-  return state.box?.state === "running" ? null : "start";
-}
-
-let setupTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Reads how far the box has got. Waiting on something outside the panel (Docker opening, a sign-in in the Terminal), it looks again every few seconds. */
-async function checkSetup(): Promise<void> {
-  if (setupTimer) clearTimeout(setupTimer);
-  const s = state.setup;
-  s.at = await api.boxSetupState().catch(() => s.at);
-  s.token = s.at?.device_key ? await api.deviceSeat(s.at.device_key).catch(() => s.token) : null;
-  if (s.busy === "docker" && s.at?.docker === "running") s.busy = null;
-  if (s.busy === "signin" && s.at?.claude) s.busy = null;
-  render();
-  if (state.view === "setup" && (s.busy === "docker" || s.busy === "signin")) setupTimer = setTimeout(() => void checkSetup(), 3000);
-}
-
-function openSetup(): void {
-  if (state.view !== "setup") state.setupFrom = state.view === "settings" ? "settings" : "home";
-  state.view = "setup";
-  state.setup.error = null;
-  render();
-  void checkSetup();
-}
-
-function leaveSetup(): void {
-  if (state.setup.busy === "pair") void api.boxPairCancel();
-  state.view = state.setupFrom;
-  render();
-}
-
-/** Takes the next step: opens Docker or its download, downloads the box, installs the worker, opens Claude's sign-in, pairs, starts. */
-async function setupStep(): Promise<void> {
-  const s = state.setup;
-  const step = nextStep();
-  if (!step || (s.busy && s.busy !== "docker" && s.busy !== "signin")) return;
-  s.error = null;
-  s.busy = step;
-  render();
-  try {
-    if (step === "docker" || step === "signin") {
-      await (step === "docker" ? api.dockerOpen() : api.boxSignIn());
-      return void checkSetup();
-    }
-    if (step === "pull") await api.boxPull();
-    if (step === "install") await api.boxInstall();
-    if (step === "pair") s.register = (await api.boxPair()).register;
-    if (step === "start") {
-      await api.boxStart(settings.runtime);
-      state.box = await api.boxState();
-      s.busy = null;
-      state.view = "home";
-      return void refresh(true);
-    }
-  } catch (error) {
-    s.errorDetail = String(error).replace(/^Error: /, "");
-    s.error = setupErrorWords(s.errorDetail);
-  }
-  s.busy = null;
-  s.pairing = null;
-  await checkSetup();
-}
-
-// the pairing code arrives while `imd pair` waits for the wallet: its page opens, as Connect's does
-void listen<{ code: string; url: string }>("box-pairing", (event) => {
-  state.setup.pairing = event.payload;
-  void api.openPairing(event.payload.url).catch(() => undefined);
-  render();
-});
-
-/** Docker's own first run, which the app cannot click through for anyone: what to do in it, in one breath. */
-const DOCKER_HELP = /Mac/.test(navigator.userAgent)
-  ? "Open Docker.dmg, drag Docker to Applications and open it. Accept the terms, use recommended settings and skip sign-in."
-  : /Windows/.test(navigator.userAgent)
-    ? "Run the installer, then open Docker Desktop. Accept the terms and skip sign-in."
-    : "Install Docker Desktop from its page, then open it. Accept the terms and skip sign-in.";
-
-const CHECK = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 4.5"/></svg>`;
-
-function setupHtml(): string {
-  const s = state.setup;
-  const at = s.at;
-  const next = nextStep();
-  const steps: Array<{ key: SetupStep; name: string; done: boolean; done_: string; todo: string; busy: string; act: string }> = [
-    { key: "docker", name: "Docker", done: at?.docker === "running", done_: "Running", todo: at?.docker === "stopped" ? "Installed, not running." : "Install it, then open it.", busy: at?.docker === "missing" ? "Waiting for Docker…" : "Opening Docker…", act: at?.docker === "stopped" ? "Open Docker" : "Get Docker" },
-    { key: "pull", name: "The box", done: Boolean(at?.image), done_: "Downloaded", todo: "A few hundred MB, once.", busy: "Downloading…", act: "Download" },
-    { key: "install", name: "The worker", done: Boolean(at?.worker), done_: "Installed", todo: "IMD and Claude Code.", busy: "Installing…", act: "Install" },
-    { key: "signin", name: "Claude", done: Boolean(at?.claude), done_: "Signed in", todo: "The account it works with.", busy: "In Terminal, type /login.", act: "Sign in" },
-    { key: "pair", name: "Your agent", done: Boolean(s.token), done_: s.token ? `Agent #${s.token}` : "", todo: "Approve with your wallet.", busy: "Approve in your browser.", act: "Pair" },
-  ];
-  const rows = steps.map((step, i) => {
-    const busy = s.busy === step.key;
-    const words = step.done ? step.done_ : busy ? step.busy : step.todo;
-    // numbered, in order; done, its number turns to a check
-    const number = `<span class="step-num" aria-hidden="true">${step.done ? CHECK : `<b>${i + 1}</b>`}</span>`;
-    const end = step.done ? ""
-      : busy ? `<span class="spinner"></span>`
-      : step.key === next ? `<button class="pill" data-action="step" title="${esc(step.act)} (Enter)">${esc(step.act)}</button>` : "";
-    const pairing = step.key === "pair" && busy && s.pairing
-      ? `<div class="pairing"><div class="code">${esc(s.pairing.code.slice(0, 4))} ${esc(s.pairing.code.slice(4))}</div><div class="actions"><button class="pill" data-action="pair-cancel">Cancel</button><button class="claim" data-action="pair-open">Open page</button></div></div>`
-      : "";
-    // while Docker downloads and installs, what its own screens will ask
-    const help = step.key === "docker" && busy && at?.docker === "missing" ? `<p class="step-help">${esc(DOCKER_HELP)}</p>` : "";
-    return `<div class="line step${step.done ? " done" : step.key === next ? " next" : ""}" id="step-${step.key}">
-        ${number}
-        <span class="step-lines"><span class="step-name">${esc(step.name)}</span><span class="sub">${esc(words)}</span></span>
-        ${end}
-      </div>${help}${pairing}`;
-  }).join("");
-  const register = s.register && s.token ? `<p class="footnote">Agent #${esc(s.token)} isn't registered as an agent yet. <button class="text-link" data-action="register">Register it</button>, then start.</p>` : "";
-  const start = next === "start" && s.token
-    ? `<button class="primary wide" data-action="step" title="Start (Enter)">${s.busy === "start" ? "Starting…" : `Start Agent #${esc(s.token)}`}</button>`
-    : !next && at ? `<p class="footnote">Agent #${esc(s.token ?? state.localToken ?? "")} runs here. It turns on and off from the list.</p>` : "";
-  return `<header class="settings-head">
-      <button class="back" data-action="leave-setup" title="Back (Esc)">‹ Back</button>
-      <div class="title">Run an agent here</div>
-      <span></span>
-    </header>
-    <p class="setup-intro">In a box that can't see this computer.</p>
-    ${at ? `<section class="card list">${rows}</section>` : `<section class="card list"><div class="line"><span class="sub">Looking at this computer…</span><span class="spinner"></span></div></section>`}
-    ${register}
-    ${start}
-    ${s.error ? `<div class="note bad" role="status" title="${esc(s.errorDetail ?? "")}">${esc(s.error)}</div>` : ""}`;
 }
 
 function noteHtml(): string {
@@ -848,8 +695,15 @@ function homeHtml(): string {
       <div><div class="title">IMD Agents</div>${empty ? "" : `<div class="summary">${esc(summary)}</div>`}</div>
       <button class="icon" data-action="settings" title="Settings (,)" aria-label="Settings">${GEAR}</button>
     </header>
-    ${empty ? welcomeHtml() : agentsHtml() + workHtml() + networkHtml()}
+    ${empty ? welcomeHtml() : settingUpHtml() + agentsHtml() + workHtml() + networkHtml()}
     ${noteHtml()}`;
+}
+
+/** Setup's window is open while agents show here: one row back to it. */
+function settingUpHtml(): string {
+  return state.settingUp
+    ? `<section class="card"><div class="line"><span>Setting up this computer<span class="sub">${esc(state.settingUp)}</span></span><button class="pill" data-action="setup" title="Continue setup (S)">Continue</button></div></section>`
+    : "";
 }
 
 function pauseHtml(): string {
@@ -872,7 +726,7 @@ function thisComputerHtml(): string {
   const here = state.box?.installed && state.box.state === "running" && state.localToken;
   return `<section class="card list spaced">${here
     ? `<div class="line"><span>Agent #${esc(state.localToken!)}<span class="sub">Runs on this computer</span></span><button class="pill" data-action="restart" title="Restart (U)">Restart</button></div>`
-    : `<div class="line"><span>Run an agent here<span class="sub">In a box that can't see this computer</span></span><button class="pill" data-action="setup">Set up</button></div>`}</section>`;
+    : `<div class="line"><span>Run an agent here<span class="sub">In its own sealed box, away from your files</span></span><button class="pill" data-action="setup">Set up</button></div>`}</section>`;
 }
 
 function settingsHtml(): string {
@@ -944,7 +798,7 @@ function remember(): void {
 }
 
 /** How deep each view sits, so the next slides in from the side it lives on. */
-const DEPTH = { home: 0, settings: 1, setup: 2 } as const;
+const DEPTH = { home: 0, settings: 1 } as const;
 let shownView = state.view;
 let drawn = false;
 let lastTray = "";
@@ -953,7 +807,7 @@ let growing: Animation | null = null;
 
 function render(): void {
   const from = drawn ? panel.offsetHeight : 0;
-  const html = state.view === "settings" ? settingsHtml() : state.view === "setup" ? setupHtml() : homeHtml();
+  const html = state.view === "settings" ? settingsHtml() : homeHtml();
   if (state.view !== shownView) {
     slide(html, DEPTH[state.view] > DEPTH[shownView]);
     shownView = state.view;
@@ -1120,6 +974,7 @@ function close(): void {
 }
 
 void listen<string>("update-available", (event) => { state.update = event.payload; render(); });
+void listen<string | null>("setup-progress", (event) => { state.settingUp = event.payload; render(); });
 
 void listen<boolean>("panel-shown", (event) => {
   playIn(event.payload === true);
@@ -1181,13 +1036,8 @@ app.addEventListener("click", (event) => {
   const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action === "settings") return openSettings();
   if (action === "home") { state.view = "home"; return render(); }
-  if (action === "setup") return openSetup();
+  if (action === "setup") return void api.openSetup();
   if (action === "update") return updateNow();
-  if (action === "leave-setup") return leaveSetup();
-  if (action === "step") return void setupStep();
-  if (action === "pair-open" && state.setup.pairing) return void api.openPairing(state.setup.pairing.url);
-  if (action === "pair-cancel") { void api.boxPairCancel(); return; }
-  if (action === "register" && state.setup.register) return void api.openPairing(state.setup.register);
   if (action === "rewards") return toggleRewards();
   if (action === "restart") return void restartLocal();
   if (action === "connect") return void connect();
@@ -1274,11 +1124,9 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape") {
     if (state.scrub !== null) return scrubTo(null);
-    if (state.view === "setup") return leaveSetup();
     if (state.view === "settings") { state.view = "home"; render(); } else close();
     return;
   }
-  if (state.view === "setup" && event.key === "Enter") return void setupStep();
   if (event.metaKey || event.ctrlKey) {
     if (event.key === "q") void api.quit();
     if (event.key === ",") openSettings();
@@ -1291,7 +1139,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "e") return toggleRewards();
   if (event.key === "u") return void restartLocal();
   if (event.key === "U") return updateNow();
-  if (event.key === "s" && !state.box?.installed) return openSetup();
+  if (event.key === "s" && !state.box?.installed) return void api.openSetup();
   if (event.key === "r") return void refresh(true);
   if (event.key === "Enter") {
     const row = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-agent]");

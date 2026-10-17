@@ -23,6 +23,7 @@ const scenarios = {
   welcome: { box: "no-docker", linked: [], watching: [] },
   "setup-docker": { box: "no-docker", linked: [], watching: [], setup: { docker: "missing", image: false, worker: false, claude: false, device_key: null }, clicks: ["[data-action=setup]"] },
   "setup-docker-wait": { box: "no-docker", linked: [], watching: [], setup: { docker: "missing", image: false, worker: false, claude: false, device_key: null }, clicks: ["[data-action=setup]", "[data-action=step]"] },
+  "setup-docker-open": { box: "no-docker", linked: [], watching: [], setup: { docker: "stopped", image: false, worker: false, claude: false, device_key: null }, clicks: ["[data-action=setup]", "[data-action=step]"] },
   "setup-error": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: false, worker: false, claude: false, device_key: null }, fail: { box_pull: 'Error response from daemon: Head "https://ghcr.io/v2/identity-md/worker-box/manifests/latest": denied' }, clicks: ["[data-action=setup]", "[data-action=step]"] },
   "setup-signin": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: true, worker: true, claude: false, device_key: "e000000000000000000000000000000000000000000000000000000000000000" }, clicks: ["[data-action=setup]"] },
   "setup-pair": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: true, worker: true, claude: true, device_key: "e000000000000000000000000000000000000000000000000000000000000000" }, clicks: ["[data-action=setup]", "[data-action=step]"] },

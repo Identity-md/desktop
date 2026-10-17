@@ -1,9 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The panel: switch opening at login. Everything else, sizing and hiding included, is the app's own commands.",
+  "description": "The panel and the setup window: switch opening at login. Everything else, sizing, hiding and the setup window included, is the app's own commands.",
   "windows": [
-    "panel"
+    "panel",
+    "setup"
   ],
   "permissions": [
     "core:default",

@@ -4,5 +4,6 @@ import { defineConfig } from "vite";
 export default defineConfig({
   clearScreen: false,
   server: { port: 1430, strictPort: true, watch: { ignored: ["**/src-tauri/**"] } },
-  build: { target: "esnext" },
+  // two pages: the panel, and the setup window
+  build: { target: "esnext", rollupOptions: { input: { main: "index.html", setup: "setup.html" } } },
 });

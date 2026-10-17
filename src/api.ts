@@ -92,6 +92,12 @@ export const boxSetupState = () => invoke<Setup>("box_setup_state");
 /** Docker Desktop: its download page if it is not installed, the app if it is not running. */
 export const dockerOpen = () => invoke<void>("docker_open");
 export const boxPull = () => invoke<void>("box_pull");
+/** Docker Desktop installed for this computer: downloaded, checked and installed by Docker's own installer on a Mac. */
+export const dockerInstall = () => invoke<void>("docker_install");
+/** The setup window: opened, or brought to the front; closed when setup is done, onto the panel. */
+export const openSetup = () => invoke<void>("open_setup");
+export const setupDone = () => invoke<void>("setup_done");
+export const openDockerTerms = () => invoke<void>("open_docker_terms");
 export const boxInstall = () => invoke<void>("box_install");
 export const boxSignIn = () => invoke<void>("box_sign_in");
 /** Pairs the box; its code arrives first as the `box-pairing` event. */

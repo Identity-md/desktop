@@ -374,7 +374,7 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 
 /* ── first run ──────────────────────────────────────────────────────── */
 .welcome { padding: 14px 14px 14px; }
-.welcome-act { display: flex; justify-content: flex-end; }
+
 .primary:disabled { opacity: 0.6; }
 .welcome-title { font-size: 15px; font-weight: 650; letter-spacing: -0.012em; }
 .welcome p { margin: 4px 0 12px; font-size: 12px; color: var(--ink-2); }
@@ -465,3 +465,14 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 }
 
 .step + .step::before { left: 48px; }
+
+/* The setup window: a plain window on the panel's own ground, the steps as the panel draws them, room to read. */
+body.setup-window { padding: 0; overflow: auto; background: var(--bg); }
+.setup-page { max-width: 420px; margin: 0 auto; padding: 28px 20px 24px; }
+.setup-page h1 { margin: 0 8px 4px; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+.setup-page .setup-intro { margin-bottom: 18px; font-size: 13px; }
+.setup-page .step-help .text-link { font-size: inherit; }
+.setup-done p { margin: 16px 8px 0; font-size: 13px; line-height: 1.45; color: var(--ink-2); }
+.setup-safe { list-style: none; margin: 0 8px 18px; padding: 0; display: grid; gap: 6px; font-size: 13px; color: var(--ink); }
+.setup-safe li { display: flex; align-items: center; gap: 8px; }
+.setup-safe svg { flex: none; color: var(--on); }
