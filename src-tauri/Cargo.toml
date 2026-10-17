@@ -36,3 +36,8 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# Docker's installer asks for the password from inside this app, so macOS names IMD Agents in the box.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSAppleScript", "NSAppleEventDescriptor", "NSDictionary", "NSString"] }

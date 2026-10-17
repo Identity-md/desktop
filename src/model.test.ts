@@ -124,7 +124,7 @@ describe("numbers", () => {
   });
 
   it("says a failed setup step in plain words, from what Docker said", () => {
-    expect(setupErrorWords('Error response from daemon: Head "https://ghcr.io/v2/identity-md/worker-box/manifests/latest": denied')).toBe("GitHub refused the box download. Try again in a few minutes.");
+    expect(setupErrorWords('Error response from daemon: Head "https://ghcr.io/v2/identity-md/box/manifests/latest": denied')).toBe("GitHub refused the box download. Try again in a few minutes.");
     expect(setupErrorWords('Error response from daemon: Get "https://ghcr.io/v2/": dial tcp: lookup ghcr.io: no such host')).toBe("This computer can't reach the internet right now. Check the connection, then try again.");
     expect(setupErrorWords("failed to register layer: write /usr/lib/x86_64-linux-gnu/libLLVM.so: no space left on device")).toMatch(/^Docker is out of disk space/);
     expect(setupErrorWords("Cannot connect to the Docker daemon at unix:///Users/me/.docker/run/docker.sock. Is the docker daemon running?")).toBe("Docker isn't running. Open Docker, then try again.");

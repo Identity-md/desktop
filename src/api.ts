@@ -98,6 +98,8 @@ export const dockerInstall = () => invoke<void>("docker_install");
 export const openSetup = () => invoke<void>("open_setup");
 export const setupDone = () => invoke<void>("setup_done");
 export const openDockerTerms = () => invoke<void>("open_docker_terms");
+export const fitSetup = (height: number) => invoke<void>("fit_setup", { height });
+export const openSetupHelp = () => invoke<void>("open_setup_help");
 export const boxInstall = () => invoke<void>("box_install");
 export const boxSignIn = () => invoke<void>("box_sign_in");
 /** Pairs the box; its code arrives first as the `box-pairing` event. */

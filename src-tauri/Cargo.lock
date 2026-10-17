@@ -1934,6 +1934,8 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "keyring",
+ "objc2",
+ "objc2-foundation",
  "p256",
  "rand_core 0.6.4",
  "reqwest 0.12.28",

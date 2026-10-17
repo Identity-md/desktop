@@ -24,8 +24,9 @@ const state = {
   /** Whether the box runs already: set up and started, there's nothing left to do. */
   running: false,
   busy: null as Step | null,
-  /** What the step under way is doing right now, in the words the app's Rust side sends. */
+  /** What the step under way is doing right now, in the words the app's Rust side sends, and since when. */
   words: {} as Partial<Record<Step, string>>,
+  since: {} as Partial<Record<Step, number>>,
   pairing: null as { code: string; url: string } | null,
   register: null as string | null,
   error: null as string | null,
@@ -47,7 +48,8 @@ function nextStep(): Step | null {
   return state.running ? null : "start";
 }
 
-const NAMES: Record<Exclude<Step, "start">, string> = { docker: "Docker", pull: "The box", install: "The worker", signin: "Claude", pair: "Your agent" };
+/** Each step by what it sets up, in words for someone who has never heard of a container or a worker. */
+const NAMES: Record<Exclude<Step, "start">, string> = { docker: "Install Docker", pull: "Install IMD Box", install: "Install IMD Agent", signin: "Connect Claude", pair: "Connect IMD Agent" };
 
 let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -74,11 +76,13 @@ async function step(): Promise<void> {
   state.error = null;
   state.busy = next;
   state.words = {};
+  state.since = { [next]: Date.now() };
   render();
   try {
     if (next === "docker") {
       await (state.at?.docker === "missing" ? api.dockerInstall() : api.dockerOpen());
       state.words.docker = mac || state.at?.docker === "stopped" ? "Starting Docker…" : "Waiting for Docker…";
+      state.since.docker = Date.now();
       return void check();
     }
     if (next === "signin") {
@@ -102,9 +106,25 @@ async function step(): Promise<void> {
 }
 
 void listen<{ step: Step; words: string }>("setup-step-progress", (event) => {
-  state.words[event.payload.step] = event.payload.words;
+  const { step, words } = event.payload;
+  // a new phase starts its clock again; a count that only moves on keeps it
+  if (state.words[step]?.replace(/[\d,]+/g, "#") !== words.replace(/[\d,]+/g, "#")) state.since[step] = Date.now();
+  state.words[step] = words;
   render();
 });
+
+/**
+ * How long a phase with no count of its own has been going, ticking, so a slow one plainly isn't stuck: an
+ * older Mac can take a minute over Docker's installer or the box's unpacking.
+ */
+function elapsed(step: Step): string {
+  const words = state.words[step] ?? "";
+  const since = state.since[step];
+  if (!since || /\d/.test(words)) return "";
+  const seconds = Math.floor((Date.now() - since) / 1000);
+  return seconds < 3 ? "" : ` · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+setInterval(() => { if (state.busy) render(); }, 1000);
 
 // the pairing code arrives while `imd pair` waits for the wallet: its page opens, and the code shows here
 void listen<{ code: string; url: string }>("box-pairing", (event) => {
@@ -122,17 +142,18 @@ const CHECK = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" strok
 function dockerHelp(missing: boolean): string {
   const words = state.words.docker ?? "";
   if (missing && !mac) return windows ? "Run the installer in Downloads. Docker opens once it's installed." : "Install Docker Desktop from its page, then open it.";
-  if (words.startsWith("Downloading") || words.startsWith("Starting the download") || words.startsWith("Checking")) return "Next, macOS asks for your password, for Docker's installer.";
-  if (words === "Installing Docker…") return "Type your Mac's password when macOS asks. Docker's installer needs it once.";
-  return "If Docker shows its terms, accept them. Its sign-in you can skip.";
+  if (words.startsWith("Downloading") || words.startsWith("Starting the download") || words.startsWith("Checking")) return "Next, a box from IMD Agents asks for your Mac's password, for Docker's installer.";
+  if (words.startsWith("Waiting for your password")) return "Type your Mac's password in the box from IMD Agents. Docker's installer needs it once.";
+  if (words.startsWith("Installing")) return "Docker's installer is putting Docker in Applications. On an older Mac this takes a minute or two.";
+  return "Docker starts by itself, which can take a minute. If it offers a sign-in, you can skip it.";
 }
 
 /** Docker's step in words, for each state it can be in: not here, here but not running, or under way. */
 function docker(at: api.Setup | null, busy: boolean): { todo: string; act: string; busy: string; help: string } {
   const missing = at?.docker === "missing";
   return {
-    todo: missing ? "Not on this computer yet." : "Installed, not running.",
-    act: missing ? (mac ? "Install Docker" : "Get Docker") : "Open Docker",
+    todo: missing ? "The free app that runs the sealed box." : "Installed, not running.",
+    act: missing ? (mac ? "Install" : "Get Docker") : "Open",
     busy: state.words.docker ?? (missing && mac ? "Starting the download…" : missing ? "Waiting for Docker…" : "Starting Docker…"),
     help: busy ? dockerHelp(missing) : missing && mac ? `Installs Docker Desktop, free for personal use. You accept <button class="text-link" data-action="docker-terms">Docker's terms</button>.` : "",
   };
@@ -144,15 +165,17 @@ function html(): string {
   const d = docker(at, state.busy === "docker");
   const steps: Array<{ key: Exclude<Step, "start">; done: boolean; done_: string; todo: string; busy: string; act: string; help?: string }> = [
     { key: "docker", done: at?.docker === "running", done_: "Running", todo: d.todo, busy: d.busy, act: d.act, help: d.help },
-    { key: "pull", done: Boolean(at?.image), done_: "Downloaded", todo: "A few hundred MB, once.", busy: state.words.pull ?? "Starting the download…", act: "Download" },
-    { key: "install", done: Boolean(at?.worker), done_: "Installed", todo: "IMD and Claude Code.", busy: state.words.install ?? "Installing…", act: "Install" },
-    { key: "signin", done: Boolean(at?.claude), done_: "Signed in", todo: "The Claude account it works with.", busy: "In Terminal, type /login.", act: "Sign in",
+    { key: "pull", done: Boolean(at?.image), done_: "Installed", todo: "The sealed box your agent works in. A few hundred MB.", busy: state.words.pull ?? "Starting the download…", act: "Install",
+      help: state.words.pull === "Unpacking…" ? "Docker is unpacking the box. On an older Mac this takes a few minutes." : undefined },
+    { key: "install", done: Boolean(at?.worker), done_: "Installed", todo: "It goes inside the sealed box.", busy: state.words.install ?? "Installing…", act: "Install" },
+    { key: "signin", done: Boolean(at?.claude), done_: "Connected", todo: "The AI your agent thinks with. Sign in once.", busy: "In Terminal, type /login.", act: "Connect",
       help: "A Terminal window opened inside the box. Sign in there, and this step finishes by itself." },
-    { key: "pair", done: Boolean(state.token), done_: state.token ? `Agent #${state.token}` : "", todo: "Approve with the wallet that holds your seat.", busy: "Approve in your browser.", act: "Pair" },
+    { key: "pair", done: Boolean(state.token), done_: state.token ? `Connected · Agent #${state.token}` : "", todo: "Approve with the wallet that holds your seat.", busy: "Approve in your browser.", act: "Connect" },
   ];
   const rows = steps.map((s, i) => {
     const busy = state.busy === s.key;
-    const words = s.done ? s.done_ : busy ? s.busy : s.todo;
+    const clock = busy ? elapsed(s.key) : "";
+    const words = s.done ? s.done_ : busy ? `${clock ? s.busy.replace(/…$/, "") : s.busy}${clock}` : s.todo;
     const number = `<span class="step-num" aria-hidden="true">${s.done ? CHECK : `<b>${i + 1}</b>`}</span>`;
     const end = s.done ? "" : busy ? `<span class="spinner"></span>` : s.key === next ? `<button class="pill" data-action="step" title="${esc(s.act)} (Enter)">${esc(s.act)}</button>` : "";
     // the line under the step that's next or under way: what happens, or what to do outside this window
@@ -172,7 +195,8 @@ function html(): string {
     : !next && at
       ? `<div class="setup-done"><p>Agent #${esc(state.token ?? "")} runs here. It's in your menu bar, where it turns on and off.</p><button class="primary wide" data-action="done" title="Done (Enter)">Done</button></div>`
       : "";
-  return `<h1>Run an agent here</h1>
+  return `<img class="setup-icon" src="/app-icon.png" width="64" height="64" alt="">
+    <h1>Run an agent here</h1>
     <p class="setup-intro">Your agent works in its own sealed box on this computer.</p>
     <ul class="setup-safe">
       <li>${LOCK}Your files, photos and passwords stay out of its sight</li>
@@ -182,12 +206,20 @@ function html(): string {
     ${at ? `<section class="card list">${rows}</section>` : `<section class="card list"><div class="line"><span class="sub">Looking at this computer…</span><span class="spinner"></span></div></section>`}
     ${register}
     ${finish}
-    ${state.error ? `<div class="note bad" role="status" title="${esc(state.errorDetail ?? "")}">${esc(state.error)}</div>` : ""}`;
+    ${state.error ? `<div class="note bad" role="status" title="${esc(state.errorDetail ?? "")}">${esc(state.error)}</div>` : ""}
+    ${!next && at ? "" : `<p class="setup-help">Stuck on a step? <button class="text-link" data-action="help" title="Get help (?)">Get help</button></p>`}`;
 }
 
 const root = document.getElementById("setup")!;
+let fitted = 0;
 function render(): void {
   morphdom(root, `<main id="setup" class="setup-page">${html()}</main>`, { onBeforeElUpdated: (from, to) => !from.isEqualNode(to) });
+  // the window fits the page: a step's new line grows it, and nothing leaves a blank foot
+  const height = Math.ceil(root.getBoundingClientRect().height);
+  if (Math.abs(height - fitted) > 1) {
+    fitted = height;
+    void api.fitSetup(height).catch(() => undefined);
+  }
 }
 
 root.addEventListener("click", (event) => {
@@ -195,12 +227,14 @@ root.addEventListener("click", (event) => {
   if (action === "step") return void step();
   if (action === "done") return void api.setupDone();
   if (action === "docker-terms") return void api.openDockerTerms();
+  if (action === "help") return void api.openSetupHelp();
   if (action === "pair-open" && state.pairing) return void api.openPairing(state.pairing.url);
   if (action === "pair-cancel") return void api.boxPairCancel();
   if (action === "register" && state.register) return void api.openPairing(state.register);
 });
 
 window.addEventListener("keydown", (event) => {
+  if (event.key === "?") return void api.openSetupHelp();
   if (event.key !== "Enter") return;
   if (!nextStep() && state.at) return void api.setupDone();
   void step();

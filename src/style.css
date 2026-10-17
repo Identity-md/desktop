@@ -468,7 +468,9 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 
 /* The setup window: a plain window on the panel's own ground, the steps as the panel draws them, room to read. */
 body.setup-window { padding: 0; overflow: auto; background: var(--bg); }
-.setup-page { max-width: 420px; margin: 0 auto; padding: 28px 20px 24px; }
+.setup-page { max-width: 420px; margin: 0 auto; padding: 22px 20px 20px; }
+.setup-icon { display: block; width: 64px; height: 64px; margin: 0 4px 10px; }
+.setup-help { margin: 16px 8px 0; font-size: 12px; color: var(--ink-2); }
 .setup-page h1 { margin: 0 8px 4px; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
 .setup-page .setup-intro { margin-bottom: 18px; font-size: 13px; }
 .setup-page .step-help .text-link { font-size: inherit; }

@@ -30,7 +30,7 @@ const EXPLORER: &str = "https://explorer.imd.fun";
 const KEY_SERVICE: &str = "fun.imd.agents";
 const KEY_ACCOUNT: &str = "app-key";
 
-/// The box, as the imd-worker-box repository builds and runs it.
+/// The box, as the IMD Box repository's ./box builds and runs it: the name it keeps on each machine.
 const BOX_IMAGE: &str = "imd-worker-box";
 const BOX_NAME: &str = "imd-worker";
 const BOX_VOLUME: &str = "imd-worker-home";
@@ -309,7 +309,7 @@ async fn unlink(relay_origin: String) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The box: the IMD worker in Docker on this computer, as imd-worker-box runs it.
+// The box: the IMD worker in Docker on this computer, as IMD Box runs it.
 // ---------------------------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
@@ -467,7 +467,7 @@ async fn box_state() -> BoxState {
 // ---------------------------------------------------------------------------------------------
 
 /// Where the box comes from: built for Apple Silicon and Intel by the box's own repository.
-const BOX_PUBLISHED: &str = "ghcr.io/identity-md/worker-box:latest";
+const BOX_PUBLISHED: &str = "ghcr.io/identity-md/box:latest";
 /// The one-off box that pairs, named so that a cancel can stop it.
 const BOX_PAIRING: &str = "imd-worker-pair";
 /// Docker Desktop's installer for this computer, straight from Docker, so Get Docker downloads it rather than
@@ -607,10 +607,10 @@ async fn docker_install(app: tauri::AppHandle) -> Result<(), String> {
     docker_open(app)
 }
 
-/// Whether an app is Docker's own: intact, and signed by Docker's team.
+/// Whether a disk image or an app is Docker's own: intact, and signed by Docker's team.
 #[cfg(target_os = "macos")]
 fn docker_signed(app: &Path) -> bool {
-    let intact = Command::new("codesign").args(["--verify", "--deep", "--strict"]).arg(app).status().is_ok_and(|status| status.success());
+    let intact = Command::new("codesign").args(["--verify", "--strict"]).arg(app).status().is_ok_and(|status| status.success());
     let signer = Command::new("codesign").arg("-dv").arg(app).output().map(|out| String::from_utf8_lossy(&out.stderr).to_string()).unwrap_or_default();
     intact && signer.lines().any(|line| line == format!("TeamIdentifier={DOCKER_TEAM}"))
 }
@@ -642,39 +642,29 @@ async fn download(app: &tauri::AppHandle, step: &'static str, url: &str, to: &Pa
 
 #[cfg(target_os = "macos")]
 fn install_docker_from(app: &tauri::AppHandle, dir: &Path, dmg: &Path) -> Result<(), String> {
-    progress(app, "docker", "Checking Docker's signature…");
+    // Docker signs its disk image, and that signature covers everything in it: checked in about a second,
+    // where checking the app inside read all two gigabytes of it, a minute or two on an older Mac
+    progress(app, "docker", "Checking it's really Docker…");
+    if !docker_signed(dmg) {
+        let _ = std::fs::remove_dir_all(dir);
+        return Err("That download isn't Docker's own signed installer, so nothing was installed.".into());
+    }
+    // its contents are checked by that signature already: opened without hdiutil's own slow pass over them
     let mount = dir.join("mount");
-    let attached = Command::new("hdiutil").args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"]).arg(&mount).arg(dmg).status();
+    let attached = Command::new("hdiutil").args(["attach", "-noverify", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint"]).arg(&mount).arg(dmg).status();
     if !attached.is_ok_and(|status| status.success()) {
         let _ = std::fs::remove_dir_all(dir);
         return Err("Docker's download didn't open. Try again.".into());
     }
     let installed = (|| {
         let docker = mount.join("Docker.app");
-        if !docker_signed(&docker) {
-            return Err("That download isn't Docker's own signed app, so it wasn't installed.".to_string());
-        }
         let user = std::env::var("USER").unwrap_or_default();
         if user.is_empty() || !user.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
             return Err("Couldn't tell which user to install Docker for.".into());
         }
-        progress(app, "docker", "Installing Docker…");
+        progress(app, "docker", "Waiting for your password…");
         let install = docker.join("Contents/MacOS/install");
-        let shell = format!("'{}' --accept-license --user={user}", install.display());
-        let script = format!(
-            "do shell script \"{}\" with prompt \"IMD Agents is installing Docker Desktop.\" with administrator privileges",
-            shell.replace('\\', "\\\\").replace('"', "\\\"")
-        );
-        let out = Command::new("osascript").args(["-e", &script]).output().map_err(|e| e.to_string())?;
-        if out.status.success() {
-            return Ok(());
-        }
-        let why = String::from_utf8_lossy(&out.stderr).to_string();
-        Err(if why.contains("-128") {
-            "Docker wasn't installed: the password was canceled.".to_string()
-        } else {
-            format!("Docker's installer stopped: {}", why.trim().lines().last().unwrap_or("no reason given"))
-        })
+        run_as_admin(app, &format!("'{}' --accept-license --user={user}", install.display()), "IMD Agents is installing Docker Desktop.", &dir.join("install"))
     })();
     if !Command::new("hdiutil").args(["detach", "-quiet"]).arg(&mount).status().is_ok_and(|status| status.success()) {
         let _ = Command::new("hdiutil").args(["detach", "-force", "-quiet"]).arg(&mount).status();
@@ -683,6 +673,66 @@ fn install_docker_from(app: &tauri::AppHandle, dir: &Path, dmg: &Path) -> Result
     installed?;
     progress(app, "docker", "Opening Docker…");
     let _ = Command::new("open").args(["-a", "Docker"]).status();
+    Ok(())
+}
+
+/// A command run as root after the macOS password box, asked from inside this app so the box names IMD Agents,
+/// with its icon, rather than "osascript". The script has to run on the main thread, which it holds only while
+/// the box is up: the command itself goes on in the background, and its exit code is waited for here.
+#[cfg(target_os = "macos")]
+fn run_as_admin(app: &tauri::AppHandle, shell: &str, prompt: &str, scratch: &Path) -> Result<(), String> {
+    use objc2::AnyThread;
+    use objc2_foundation::{NSAppleScript, NSString};
+    let status = scratch.with_extension("status");
+    let log = scratch.with_extension("log");
+    let _ = std::fs::remove_file(&status);
+    let quoted = |path: &Path| format!("'{}'", path.display());
+    let background = format!("({shell}; echo $? > {}) > {} 2>&1 &", quoted(&status), quoted(&log));
+    let source = format!(
+        "do shell script \"{}\" with prompt \"{prompt}\" with administrator privileges",
+        background.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    app.run_on_main_thread(move || {
+        let answer = match NSAppleScript::initWithSource(NSAppleScript::alloc(), &NSString::from_str(&source)) {
+            None => Err("Couldn't ask for the password.".to_string()),
+            Some(script) => {
+                let mut error = None;
+                unsafe { script.executeAndReturnError(Some(&mut error)) };
+                match error {
+                    None => Ok(()),
+                    Some(error) if format!("{error:?}").contains("-128") => Err("Docker wasn't installed: the password was canceled.".to_string()),
+                    Some(error) => Err(format!("The password box didn't open: {error:?}")),
+                }
+            }
+        };
+        let _ = tx.send(answer);
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv().map_err(|e| e.to_string())??;
+    // the installer runs as root now; done when it writes its exit code
+    let started = std::time::Instant::now();
+    app_progress_while_installing(app, &status, started)?;
+    let code = std::fs::read_to_string(&status).unwrap_or_default();
+    if code.trim() == "0" {
+        return Ok(());
+    }
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    Err(format!("Docker's installer stopped: {}", said.trim().lines().last().unwrap_or("no reason given")))
+}
+
+/// Waits for Docker's installer, saying so, for up to ten minutes.
+#[cfg(target_os = "macos")]
+fn app_progress_while_installing(app: &tauri::AppHandle, status: &Path, started: std::time::Instant) -> Result<(), String> {
+    progress(app, "docker", "Installing Docker…");
+    while !status.exists() {
+        if started.elapsed() > Duration::from_secs(10 * 60) {
+            return Err("Docker's installer took over ten minutes. Try again.".into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // written as it ends: a moment for the shell to finish writing it
+    std::thread::sleep(Duration::from_millis(200));
     Ok(())
 }
 
@@ -715,7 +765,7 @@ async fn box_pull(app: tauri::AppHandle) -> Result<(), String> {
             let total = published_size().await;
             let reporter = app.clone();
             Some(
-                tauri::async_runtime::spawn_blocking(move || pull_through_engine(&socket, "ghcr.io/identity-md/worker-box", "latest", total, &mut |words| progress(&reporter, "pull", words)))
+                tauri::async_runtime::spawn_blocking(move || pull_through_engine(&socket, "ghcr.io/identity-md/box", "latest", total, &mut |words| progress(&reporter, "pull", words)))
                     .await
                     .map_err(|e| e.to_string())?,
             )
@@ -748,17 +798,17 @@ async fn box_pull(app: tauri::AppHandle) -> Result<(), String> {
 /// toward. None when the registry doesn't answer; the download then counts megabytes alone.
 async fn published_size() -> Option<u64> {
     let client = http();
-    let token: serde_json::Value = client.get("https://ghcr.io/token?scope=repository:identity-md/worker-box:pull").send().await.ok()?.json().await.ok()?;
+    let token: serde_json::Value = client.get("https://ghcr.io/token?scope=repository:identity-md/box:pull").send().await.ok()?.json().await.ok()?;
     let token = token["token"].as_str()?.to_string();
     let index: serde_json::Value = client
-        .get("https://ghcr.io/v2/identity-md/worker-box/manifests/latest")
+        .get("https://ghcr.io/v2/identity-md/box/manifests/latest")
         .bearer_auth(&token)
         .header("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json")
         .send().await.ok()?.json().await.ok()?;
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
     let digest = index["manifests"].as_array()?.iter().find(|m| m["platform"]["os"] == "linux" && m["platform"]["architecture"] == arch)?["digest"].as_str()?.to_string();
     let manifest: serde_json::Value = client
-        .get(format!("https://ghcr.io/v2/identity-md/worker-box/manifests/{digest}"))
+        .get(format!("https://ghcr.io/v2/identity-md/box/manifests/{digest}"))
         .bearer_auth(&token)
         .header("Accept", "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json")
         .send().await.ok()?.json().await.ok()?;
@@ -1192,8 +1242,8 @@ fn open_setup(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     let win = tauri::WebviewWindowBuilder::new(&app, "setup", tauri::WebviewUrl::App("setup.html".into()))
-        .title("Run an agent here")
-        .inner_size(460.0, 640.0)
+        .title("IMD Agents")
+        .inner_size(460.0, 600.0)
         .resizable(false)
         .center()
         .build()
@@ -1214,6 +1264,20 @@ fn open_setup(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn open_docker_terms(app: tauri::AppHandle) -> Result<(), String> {
     app.opener().open_url("https://www.docker.com/legal/docker-subscription-service-agreement/", None::<&str>).map_err(|e| e.to_string())
+}
+
+/// The setup window fits what it holds, as the panel does: taller when a step adds a line, never a blank foot.
+#[tauri::command]
+fn fit_setup(app: tauri::AppHandle, height: f64) {
+    if let Some(win) = app.get_webview_window("setup") {
+        let _ = win.set_size(tauri::LogicalSize::new(460.0, height.clamp(360.0, 900.0)));
+    }
+}
+
+/// Help with setting an agent up, on imd.fun's page for the app.
+#[tauri::command]
+fn open_setup_help(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener().open_url("https://imd.fun/app/#help", None::<&str>).map_err(|e| e.to_string())
 }
 
 /// Setup finished: its window closes and the panel opens on the agent now running here.
@@ -1347,7 +1411,7 @@ pub fn run() {
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
-            docker_install, open_setup, setup_done, open_docker_terms
+            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help
         ])
         .setup(|app| {
             // A menu bar app: no Dock icon, no app switcher entry.
