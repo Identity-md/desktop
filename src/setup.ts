@@ -211,15 +211,27 @@ function html(): string {
 }
 
 const root = document.getElementById("setup")!;
-let fitted = 0;
+// the window fits the page: a step's new line grows it, and nothing leaves a blank foot. It goes by the room the
+// page got, not the size it asked for, so whatever the window keeps for itself is made up: on macOS 15 that was a line
+let asked = 0;
+let waiting = 0;
+function fit(): void {
+  // while it's still looking at this computer, the window keeps its first size rather than shrink and grow again
+  if (waiting || !state.at) return;
+  const lack = Math.ceil(root.getBoundingClientRect().height) - window.innerHeight;
+  if (Math.abs(lack) <= 1) return;
+  const height = Math.min(900, Math.max(360, (asked || window.innerHeight) + lack));
+  if (height === asked) return;
+  asked = height;
+  void api.fitSetup(height).catch(() => undefined);
+  // the resize measures again; a size the window can't take brings none, so stop waiting regardless
+  waiting = window.setTimeout(() => { waiting = 0; }, 500);
+}
+window.addEventListener("resize", () => { clearTimeout(waiting); waiting = 0; fit(); });
+
 function render(): void {
   morphdom(root, `<main id="setup" class="setup-page">${html()}</main>`, { onBeforeElUpdated: (from, to) => !from.isEqualNode(to) });
-  // the window fits the page: a step's new line grows it, and nothing leaves a blank foot
-  const height = Math.ceil(root.getBoundingClientRect().height);
-  if (Math.abs(height - fitted) > 1) {
-    fitted = height;
-    void api.fitSetup(height).catch(() => undefined);
-  }
+  fit();
 }
 
 root.addEventListener("click", (event) => {
