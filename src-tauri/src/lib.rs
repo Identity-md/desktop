@@ -1230,7 +1230,9 @@ async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
 /// app switcher, to come back to; closed, it is a menu bar app again.
 #[tauri::command]
 fn open_setup(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(panel) = app.get_webview_window("panel") {
+    let panel = app.get_webview_window("panel");
+    let screen = panel.as_ref().and_then(|p| p.current_monitor().ok().flatten()).or_else(|| app.primary_monitor().ok().flatten());
+    if let Some(panel) = &panel {
         let _ = panel.hide();
     }
     if let Some(win) = app.get_webview_window("setup") {
@@ -1245,9 +1247,22 @@ fn open_setup(app: tauri::AppHandle) -> Result<(), String> {
         .title("IMD Agents")
         .inner_size(460.0, 600.0)
         .resizable(false)
-        .center()
+        .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
+    // on a Mac it opens where the panel was, under the menu bar, its right edge on the panel's: what setup opens
+    // (Docker's installer, the password box, Terminal) comes up in the middle, beside it rather than over it
+    match screen.filter(|_| cfg!(target_os = "macos")) {
+        Some(screen) => {
+            let (area, scale) = (screen.work_area(), screen.scale_factor());
+            let x = area.position.x as f64 + area.size.width as f64 - (460.0 + 12.0) * scale;
+            let _ = win.set_position(PhysicalPosition::new(x, area.position.y as f64 + 6.0 * scale));
+        }
+        None => {
+            let _ = win.center();
+        }
+    }
+    let _ = win.show();
     let _ = win.set_focus();
     let handle = app.clone();
     win.on_window_event(move |event| {
