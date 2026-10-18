@@ -25,7 +25,7 @@ describe("an agent's state", () => {
 
   it("says what it is doing in words", () => {
     const working = agent(standing({ working: 1, running: [{ jobId: "j", objective: "o", nodeKey: "site_content_check", since: "2026-10-13T11:51:00Z" }] }));
-    expect(statusLine(phaseOf(working, NOW), working, NOW)).toBe("Working · Site content check · 9 min");
+    expect(statusLine(phaseOf(working, NOW), working, NOW)).toBe("Working on Site content check · 9 min");
     expect(statusLine({ kind: "held" }, null)).toBe("Paused · takes no new work");
     expect(stepTitle("audit_permissions")).toBe("Permissions audit");
   });

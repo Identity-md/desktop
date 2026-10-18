@@ -108,7 +108,7 @@ export function statusLine(phase: Phase, agent: Agent | null, now = new Date()):
     case "working": {
       const job = agent?.standing?.standing.running[0];
       if (!job) return phase.jobs === 1 ? "Working" : `Working on ${phase.jobs} jobs`;
-      return ["Working", stepTitle(job.nodeKey), elapsed(new Date(job.since), now)].join(" · ");
+      return [job.nodeKey ? `Working on ${stepTitle(job.nodeKey)}` : "Working", elapsed(new Date(job.since), now)].join(" · ");
     }
     case "ready": {
       const runtime = agent?.standing?.presence?.runtimes?.[0]?.id;

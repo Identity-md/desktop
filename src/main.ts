@@ -440,10 +440,10 @@ function agentsHtml(): string {
     const phase = phaseFor(agent);
     const open = state.openAgent === agent.tokenId;
     const label = labelOf(agent.tokenId);
-    // two lines: who it is, then how it is and what it did last; the tray holds the rest
+    // two lines: who it is, then what it's doing or did last; its dot says it's ready, and the tray holds the rest
     const status = state.sending.has(agent.tokenId)
       ? (agent.standing?.standing.pausedByOwnerAt ? "Pausing…" : "Resuming…")
-      : phase.kind === "ready" ? ["Ready", lastJob(agent)].filter(Boolean).join(" · ") : statusLine(phase, agent);
+      : phase.kind === "ready" ? lastJob(agent) : statusLine(phase, agent);
     return `<div class="row${open ? " open" : ""}" id="agent-${esc(agent.tokenId)}" data-agent="${esc(agent.tokenId)}" tabindex="0" aria-expanded="${open}" title="${open ? "Fold" : `What ${esc(nameOf(agent.tokenId))} is doing`}${i < 9 ? ` (⇧${i + 1})` : ""}">
       ${maskHtml(agent, phase)}
       <span class="lines">
@@ -458,13 +458,17 @@ function agentsHtml(): string {
 const firstLine = (text: string | undefined) => (text ?? "").split("\n")[0]!.trim();
 const RESULT: Record<string, string> = { accepted: "Accepted", rejected: "Rejected", failed: "Failed", pending: "Being judged" };
 
-/** What a resting agent did last: "Audit judging 2h ago", its result said only when it was not accepted. */
-function lastJob(agent: Agent): string | null {
-  const last = records.get(agent.tokenId)?.recent[0];
-  if (!last) return null;
+/** What a resting agent did last: "Last job 2h ago · Audit judging", its result said only when it was not accepted. */
+function lastJob(agent: Agent): string {
+  const record = records.get(agent.tokenId);
+  // until its jobs have loaded, the line holds its place with the word its dot already says
+  if (!record) return "Ready";
+  const last = record.recent[0];
+  if (!last) return "No jobs yet";
   const at = last.acceptedAt ?? last.submittedAt;
+  const when = at ? shortAgo(new Date(at)) : null;
   const result = last.status === "accepted" ? "" : ` ${(RESULT[last.status ?? "pending"] ?? last.status ?? "").toLowerCase()}`;
-  return `${stepTitle(last.nodeKey ?? null)}${result}${at ? ` ${shortAgo(new Date(at))} ago` : ""}`.replace(" now ago", " just now");
+  return [when ? `Last job ${when === "now" ? "just now" : `${when} ago`}` : "Last job", `${stepTitle(last.nodeKey ?? null)}${result}`].join(" · ");
 }
 
 /** What an agent is doing and has done: its jobs now, its last three, and how its work is judged. */
