@@ -1,7 +1,7 @@
 {
   "name": "imd-agents",
   "private": true,
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "description": "Every IMD agent you hold, on any machine, in your menu bar or tray.",
   "packageManager": "pnpm@11.18.0",

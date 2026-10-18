@@ -1,6 +1,6 @@
 [package]
 name = "imd-agents"
-version = "0.1.7"
+version = "0.1.8"
 description = "IMD Agents"
 edition = "2021"
 
