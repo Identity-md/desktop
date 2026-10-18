@@ -465,23 +465,58 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 
 /* The setup window: a plain window on the panel's own ground, the steps as the panel draws them, room to read. */
 body.setup-window { padding: 0; overflow: auto; background: var(--bg); }
-.setup-page { max-width: 420px; margin: 0 auto; padding: 22px 20px 20px; }
-.setup-icon { display: block; width: 64px; height: 64px; margin: 0 4px 10px; }
-.setup-help { margin: 16px 8px 0; font-size: 12px; color: var(--ink-2); }
-.setup-page h1 { margin: 0 8px 4px; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
-.setup-page .setup-intro { margin-bottom: 18px; font-size: 13px; }
+/* one height for every screen: the foot, with the one button, stays at the bottom and the rest changes above it */
+.setup-page { display: flex; flex-direction: column; max-width: 420px; min-height: 100vh; margin: 0 auto; padding: 22px 20px 20px; }
+.setup-foot { margin-top: auto; padding-top: 16px; }
+.setup-foot .primary.big { margin-top: 0; }
+.setup-foot .step-help { margin: 0 8px 12px; }
+.setup-foot .note { margin: 0 0 12px; }
+.setup-foot .pairing { margin: 0 0 16px; }
+.setup-foot .footnote { padding: 0 8px 12px; text-align: center; }
+.setup-help.empty { visibility: hidden; }
+/* the steps on the window's own ground: the circles carry the list */
+.steps .step { grid-template-columns: 26px 1fr; min-height: 62px; padding-right: 8px; padding-left: 8px; }
+.steps .step + .step::before { left: 46px; }
+.steps .step-num { width: 26px; height: 26px; font-size: 12px; }
+/* the first screen: what it is and why it's safe in the middle of the room, the seat it needs above Continue */
+.hero { margin: auto 0; text-align: center; }
+.hero + .setup-foot { margin-top: 0; }
+.hero .setup-icon { margin: 0 auto 14px; }
+.hero h1 { margin: 0 0 6px; }
+.hero .setup-intro { margin: 0 0 22px; }
+.hero .setup-safe { width: fit-content; margin: 0 auto; text-align: left; }
+.setup-needs { margin: 0 8px 12px; font-size: 14px; text-align: center; }
+.note.warn { color: var(--warn-ink); }
+.setup-icon { display: block; width: 72px; height: 72px; margin: 0 4px 10px; }
+.setup-help { margin: 16px 8px 0; font-size: 13px; color: var(--ink-2); text-align: center; }
+/* the setup window's type, larger than the panel's for the room it has: 24 titles, 15 names and the button, 14 lead lines, 13 the rest */
+.setup-page h1 { margin: 0 8px 4px; font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+.setup-page .setup-intro { margin-bottom: 18px; font-size: 14px; }
+.setup-page .step-name { font-size: 15px; }
+.setup-page .sub { font-size: 13px; }
+.setup-page .note { font-size: 13px; }
+.setup-page .footnote { font-size: 12px; }
 .setup-page .step-help .text-link { font-size: inherit; }
-.setup-safe { list-style: none; margin: 0 8px 18px; padding: 0; display: grid; gap: 6px; font-size: 13px; color: var(--ink); }
+.setup-safe { list-style: none; margin: 0 8px 18px; padding: 0; display: grid; gap: 8px; font-size: 14px; color: var(--ink); }
 .setup-safe li { display: flex; align-items: center; gap: 8px; }
 .setup-safe svg { flex: none; color: var(--on); }
+/* the agent itself, set up: its face and its state in the middle of the room above the button, its lamp beside it */
+.agent { margin: auto 0; text-align: center; }
+.agent + .setup-foot { margin-top: 0; }
+.agent h1 { margin: 0 0 4px; }
+.agent .setup-intro { margin: 0; }
+.mask.big { display: block; width: 80px; height: 80px; margin: 0 auto 14px; animation: pop 0.45s var(--spring) both; }
+.mask.big img { width: 80px; height: 80px; }
+.mask.big .mask-blank { width: 58px; height: 72px; margin: 4px 11px; border-radius: 24px; }
+.mask.big .dot { width: 16px; height: 16px; right: 2px; bottom: 3px; box-shadow: 0 0 0 3px var(--bg); }
 
 /* the one button of the setup window: the next step by name, and while it runs, its progress inside it */
-.primary.big { position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 44px; margin-top: 16px; overflow: hidden; border-radius: 12px; font-size: 14px; }
+.primary.big { position: relative; z-index: 1; display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; height: 44px; margin-top: 16px; overflow: hidden; border-radius: 12px; font-size: 15px; }
 .primary.big:disabled { cursor: default; opacity: 1; }
 .primary.big .fill { position: absolute; inset: 0 auto 0 0; background: color-mix(in srgb, var(--bg) 24%, transparent); transition: width 0.5s var(--ease); }
 .primary.big .label { position: relative; font-variant-numeric: tabular-nums; }
 .primary.big .spinner { position: relative; border-color: color-mix(in srgb, var(--bg) 30%, transparent); border-top-color: var(--bg); }
-.step-help { margin: 10px 8px 0; font-size: 12px; line-height: 1.5; color: var(--ink-2); text-align: center; text-wrap: pretty; }
+.step-help { margin: 10px 8px 0; font-size: 13px; line-height: 1.5; color: var(--ink-2); text-align: center; text-wrap: pretty; }
 .pairing { margin-top: 16px; text-align: center; }
 .pairing .code { margin: 0 0 8px; }
 .pairing .actions { justify-content: center; }

@@ -644,7 +644,7 @@ async fn download(app: &tauri::AppHandle, step: &'static str, url: &str, to: &Pa
 fn install_docker_from(app: &tauri::AppHandle, dir: &Path, dmg: &Path) -> Result<(), String> {
     // Docker signs its disk image, and that signature covers everything in it: checked in about a second,
     // where checking the app inside read all two gigabytes of it, a minute or two on an older Mac
-    progress(app, "docker", "Checking it's really Docker…");
+    progress(app, "docker", "Verifying Docker…");
     if !docker_signed(dmg) {
         let _ = std::fs::remove_dir_all(dir);
         return Err("That download isn't Docker's own signed installer, so nothing was installed.".into());
@@ -902,7 +902,7 @@ async fn box_install(app: tauri::AppHandle) -> Result<(), String> {
                 } else if line.starts_with("Installing the IMD worker") {
                     "Installing the IMD worker…"
                 } else if line.starts_with("Connecting the browser") {
-                    "Connecting the browser…"
+                    "Setting up its browser…"
                 } else {
                     continue;
                 };
@@ -1245,7 +1245,7 @@ fn open_setup(app: tauri::AppHandle) -> Result<(), String> {
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     let win = tauri::WebviewWindowBuilder::new(&app, "setup", tauri::WebviewUrl::App("setup.html".into()))
         .title("IMD Agents")
-        .inner_size(460.0, 600.0)
+        .inner_size(460.0, 556.0)
         .resizable(false)
         .visible(false)
         .build()
@@ -1281,11 +1281,11 @@ fn open_docker_terms(app: tauri::AppHandle) -> Result<(), String> {
     app.opener().open_url("https://www.docker.com/legal/docker-subscription-service-agreement/", None::<&str>).map_err(|e| e.to_string())
 }
 
-/// The setup window fits what it holds, as the panel does: taller when a step adds a line, never a blank foot.
+/// The setup window's height, asked by its page: it keeps one, and makes up whatever the window keeps for itself.
 #[tauri::command]
 fn fit_setup(app: tauri::AppHandle, height: f64) {
     if let Some(win) = app.get_webview_window("setup") {
-        let _ = win.set_size(tauri::LogicalSize::new(460.0, height.clamp(360.0, 900.0)));
+        let _ = win.set_size(tauri::LogicalSize::new(460.0, height.clamp(200.0, 900.0)));
     }
 }
 
@@ -1293,6 +1293,32 @@ fn fit_setup(app: tauri::AppHandle, height: f64) {
 #[tauri::command]
 fn open_setup_help(app: tauri::AppHandle) -> Result<(), String> {
     app.opener().open_url("https://imd.fun/app/#help", None::<&str>).map_err(|e| e.to_string())
+}
+
+/// The room left where Docker and the box will live, the home folder's disk, in bytes: setup's first screen says
+/// so only when it's short of what setup takes. None where it can't tell.
+#[tauri::command]
+async fn free_space() -> Option<u64> {
+    if !cfg!(unix) {
+        return None;
+    }
+    tauri::async_runtime::spawn_blocking(|| {
+        let home = std::env::var("HOME").ok()?;
+        let out = Command::new("df").args(["-Pk", &home]).output().ok()?;
+        let text = String::from_utf8(out.stdout).ok()?;
+        // POSIX df: a header, then the disk's line, its fourth column the 1024-byte blocks free
+        let kib: u64 = text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
+        Some(kib * 1024)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// imd.fun's page of agent seats: setup's first screen links it, for someone who doesn't hold one yet.
+#[tauri::command]
+fn open_seats(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener().open_url("https://imd.fun/seats/", None::<&str>).map_err(|e| e.to_string())
 }
 
 /// Setup finished: its window closes and the panel opens on the agent now running here.
@@ -1426,7 +1452,7 @@ pub fn run() {
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
-            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help
+            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, free_space
         ])
         .setup(|app| {
             // A menu bar app: no Dock icon, no app switcher entry.
