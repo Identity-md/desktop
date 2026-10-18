@@ -102,6 +102,8 @@ export const fitSetup = (height: number) => invoke<void>("fit_setup", { height }
 export const openSetupHelp = () => invoke<void>("open_setup_help");
 /** imd.fun's page of agent seats, for someone who doesn't hold one yet. */
 export const openSeats = () => invoke<void>("open_seats");
+/** Claude's plans: every paid one comes with Claude Code, which the box thinks with. */
+export const openClaudePlans = () => invoke<void>("open_claude_plans");
 /** Bytes free on the disk Docker and the box will use, or null where the app can't tell. */
 export const freeSpace = () => invoke<number | null>("free_space");
 export const boxInstall = () => invoke<void>("box_install");

@@ -1326,6 +1326,13 @@ async fn free_space() -> Option<u64> {
     .flatten()
 }
 
+/// Claude's plans: the box thinks with Claude Code, which comes with every paid plan, and setup's first screen
+/// links them for someone without one.
+#[tauri::command]
+fn open_claude_plans(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener().open_url("https://claude.com/pricing", None::<&str>).map_err(|e| e.to_string())
+}
+
 /// imd.fun's page of agent seats: setup's first screen links it, for someone who doesn't hold one yet.
 #[tauri::command]
 fn open_seats(app: tauri::AppHandle) -> Result<(), String> {
@@ -1463,7 +1470,7 @@ pub fn run() {
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
-            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, free_space
+            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space
         ])
         .setup(|app| {
             // A menu bar app: no Dock icon, no app switcher entry.

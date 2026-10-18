@@ -219,7 +219,8 @@ function introHtml(): string {
   const short = state.free !== null && state.free < NEEDED
     ? `<p class="note warn" role="status">${mac ? "This Mac" : "This computer"} has ${(state.free / 1e9).toFixed(1)} GB free. Setup needs about 5 GB.</p>`
     : "";
-  const seat = `<p class="setup-needs">You'll need an agent seat. <button class="text-link" data-action="seats" title="Agent seats on imd.fun (S)">Get one</button></p>`;
+  // the two things setup can't check for: Claude Code comes with every paid Claude plan, and Codex isn't in the box
+  const seat = `<p class="setup-needs">You'll need <button class="text-link" data-action="seats" title="Agent seats on imd.fun (S)">an agent seat</button> and <button class="text-link" data-action="claude-plans" title="Claude's plans (C)">a paid Claude plan</button>.</p>`;
   return `<div class="hero">
       <img class="setup-icon" src="/app-icon.png" width="72" height="72" alt="">
       <h1>Run an IMD Agent</h1>
@@ -350,6 +351,7 @@ root.addEventListener("click", (event) => {
   const action = (event.target as HTMLElement).closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action === "begin") return begin();
   if (action === "seats") return void api.openSeats();
+  if (action === "claude-plans") return void api.openClaudePlans();
   if (action === "step") return void step();
   if (action === "done") return void api.setupDone();
   if (action === "docker-terms") return void api.openDockerTerms();
@@ -362,6 +364,7 @@ root.addEventListener("click", (event) => {
 window.addEventListener("keydown", (event) => {
   if (event.key === "?") return void api.openSetupHelp();
   if (event.key === "s" && onIntro()) return void api.openSeats();
+  if (event.key === "c" && onIntro()) return void api.openClaudePlans();
   // while the wallet's page is out, Enter opens it again and Escape stops pairing
   if (state.busy === "pair" && state.pairing) {
     if (event.key === "Enter") return void api.openPairing(state.pairing.url);
