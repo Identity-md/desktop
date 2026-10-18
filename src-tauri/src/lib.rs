@@ -1435,11 +1435,48 @@ fn tray_icon(state: &str) -> &'static [u8] {
     }
 }
 
+// A menu bar panel on macOS is an NSPanel: one that takes the keyboard without making the app active, so it
+// opens over a full screen app instead of sending you back to the desktop.
+#[cfg(target_os = "macos")]
+tauri_nspanel::tauri_panel! {
+    panel!(TrayPanel {
+        config: {
+            can_become_key_window: true,
+            is_floating_panel: true
+        }
+    })
+}
+
+/// Turns the panel into a menu-like NSPanel: on every Space, full screen ones too, at the menu level.
+#[cfg(target_os = "macos")]
+fn float_over_full_screen(win: &tauri::WebviewWindow) {
+    use tauri_nspanel::{CollectionBehavior, StyleMask, WebviewWindowExt};
+    let Ok(panel) = win.to_panel::<TrayPanel<tauri::Wry>>() else { return };
+    // NSPopUpMenuWindowLevel
+    panel.set_level(101);
+    panel.set_collection_behavior(CollectionBehavior::new().can_join_all_spaces().stationary().ignores_cycle().full_screen_auxiliary().value());
+    let _ = panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
+}
+
 /// Shows the panel and tells the page, which plays it in from the side its icon is on.
 fn open_panel(win: &tauri::WebviewWindow, above: bool) {
     PANEL_ABOVE.store(above, Ordering::Relaxed);
-    let _ = win.show();
-    let _ = win.set_focus();
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::ManagerExt;
+        match win.app_handle().get_webview_panel("panel") {
+            Ok(panel) => panel.show_and_make_key(),
+            Err(_) => {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
     let _ = win.emit("panel-shown", above);
 }
 
@@ -1506,6 +1543,16 @@ fn toggle_panel(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, icon: tau
     open_panel(&win, above);
 }
 
+/// The panel plugin on macOS; elsewhere a plugin that does nothing.
+#[cfg(target_os = "macos")]
+fn tauri_plugin_nspanel_init() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_nspanel::init()
+}
+#[cfg(not(target_os = "macos"))]
+fn tauri_plugin_nspanel_init() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("nspanel").build()
+}
+
 /// What the login item passes, so a start at login stays in the tray while one by hand opens the panel.
 const AT_LOGIN: &str = "--at-login";
 
@@ -1517,6 +1564,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![AT_LOGIN])))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_nspanel_init())
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
@@ -1527,6 +1575,10 @@ pub fn run() {
             // A menu bar app: no Dock icon, no app switcher entry.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            #[cfg(target_os = "macos")]
+            if let Some(win) = app.get_webview_window("panel") {
+                float_over_full_screen(&win);
+            }
 
             let icon = Image::from_bytes(tray_icon("idle"))?;
             // A small menu too: a right-click on macOS and Windows, and the only way in on a Linux tray
