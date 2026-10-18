@@ -32,7 +32,7 @@ export const STATES = [
   { id: "agent", group: "Install IMD Agent", name: "Install IMD Agent", setup: box, about: "The box is in. The IMD worker goes inside it." },
   { id: "agent-installing", group: "Install IMD Agent", name: "Installing", setup: box, click: true, hang: ["box_install"], words: ["install", "Installing Claude Code…"], about: "Claude Code, the IMD worker, then its browser, each in turn, inside the box." },
   { id: "claude", group: "Connect Claude", name: "Connect Claude", setup: agent, about: "The AI the agent thinks with, signed in once." },
-  { id: "claude-waiting", group: "Connect Claude", name: "Waiting for sign-in", setup: agent, click: true, about: "A Terminal window opened inside the box, for /login." },
+  { id: "claude-waiting", group: "Connect Claude", name: "Waiting for sign-in", setup: agent, click: true, about: "Terminal opens Claude's sign-in inside the box. It says to choose No, exit when Claude asks about trusting the folder." },
   { id: "pair", group: "Connect IMD Agent", name: "Connect IMD Agent", setup: claude, about: "Pairs this box with an agent seat, approved by the wallet that holds it." },
   { id: "pair-code", group: "Connect IMD Agent", name: "Pairing code", setup: claude, click: true, about: "The pairing page opened in the browser. Enter opens it again, Esc cancels." },
   { id: "register", group: "Your agent", name: "Not registered yet", setup: claude, click: true, register: true, about: "Paired, but the seat isn't registered as an agent yet." },

@@ -932,12 +932,23 @@ fn box_sign_in() -> Result<(), String> {
     // Quoted, for the seccomp profile's path: a temporary folder can have a space in it on Windows.
     let quote = if cfg!(target_os = "windows") { '"' } else { '\'' };
     let flags = box_flags().iter().map(|flag| format!("{quote}{flag}{quote}")).collect::<Vec<_>>().join(" ");
-    let say = "Sign in to Claude for your IMD agent: type /login, follow it in your browser, then /exit.";
+    // what to answer, said before Claude Code asks: after the sign-in it asks whether to trust the box's home,
+    // and No ends the session with the sign-in kept. No apostrophes: it is echoed inside single quotes
+    let say = "Sign in to Claude for your IMD agent, in your browser. When it then asks whether you trust this folder, choose No, exit. Your sign-in stays in the box.";
     #[cfg(target_os = "macos")]
     {
         let line = format!("clear; echo '{say}'; echo; '{docker}' run -it --rm {flags} {BOX_IMAGE} claude; exit");
         let script = format!("tell application \"Terminal\"\n  activate\n  do script \"{}\"\nend tell", line.replace('\\', "\\\\").replace('"', "\\\""));
-        Command::new("osascript").args(["-e", &script]).status().map_err(|e| e.to_string())?;
+        let out = Command::new("osascript").args(["-e", &script]).output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            // -1743: the Mac's Automation prompt was answered Don't Allow, and Terminal never opens
+            let said = String::from_utf8_lossy(&out.stderr);
+            return Err(if said.contains("-1743") {
+                "Your Mac didn't let IMD Agents open Terminal. Allow it in System Settings, Privacy & Security, Automation, then try again.".into()
+            } else {
+                format!("Terminal didn't open: {}", said.trim())
+            });
+        }
     }
     #[cfg(target_os = "windows")]
     {

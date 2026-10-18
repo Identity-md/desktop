@@ -158,7 +158,8 @@ function dockerHelp(missing: boolean): string {
   // macOS's own box takes it, and gives the app leave to install, never the password
   if (words.startsWith("Waiting for your password")) return "Your Mac needs your password to install Docker. It goes to macOS, never to IMD Agents.";
   if (words.startsWith("Installing")) return "Docker's installer is putting Docker in Applications. On an older Mac this takes a minute or two.";
-  return "Docker starts by itself, which can take a minute. If it offers a sign-in, you can skip it.";
+  // Docker's first run asks two things the box doesn't need: an account, and the Mac's local network
+  return "Docker starts by itself. Skip its sign-in, and if your Mac asks about devices on your network, choose Don't Allow.";
 }
 
 /** Docker's step in words, for each state it can be in: not here, here but not running, or under way. */
@@ -194,7 +195,9 @@ function nextHelp(next: Step | null): string {
   const busy = state.busy === next;
   if (next === "docker") return docker(state.at, busy).help;
   if (next === "pull" && busy && state.words.pull === "Unpacking…") return "Docker is unpacking the box. On an older Mac this takes a few minutes.";
-  if (next === "signin" && busy) return "A Terminal window opened inside the box. Type /login there, and this step finishes by itself.";
+  // on a Mac, the sign-in opens in Terminal, which the Mac asks about the first time: the one prompt to allow
+  if (next === "signin" && mac) return busy ? "Choose Allow if your Mac asks, then sign in through the Terminal window. This step finishes by itself." : "If your Mac asks to let IMD Agents control Terminal, choose Allow. Claude's sign-in opens there.";
+  if (next === "signin" && busy) return "A terminal window opened inside the box. Sign in there, and this step finishes by itself.";
   return "";
 }
 
