@@ -548,9 +548,13 @@ function workHtml(): string {
   </div>${rewards}</section>`;
 }
 
+/** Coin art that didn't load: those coins draw their own colours instead, never a broken image. */
+const brokenArt = new Set<string>();
+
 /** A coin: its art, or, without any, colours of its own drawn from its address. */
 function coinHtml(reward: Earning, depth = 0, fresh = false, named = true): string {
-  const logo = reward.launch?.logo ? `https://api.imd.fun/artifacts/${encodeURIComponent(reward.launch.logo)}` : null;
+  const art = reward.launch?.logo ? `https://api.imd.fun/artifacts/${encodeURIComponent(reward.launch.logo)}` : null;
+  const logo = art && !brokenArt.has(art) ? art : null;
   const hue = Number.parseInt(reward.token.address.slice(2, 8), 16) % 360;
   const fill = logo ? "" : `background:linear-gradient(135deg,hsl(${hue} 70% 62%),hsl(${(hue + 48) % 360} 68% 46%));`;
   return `<span class="coin${fresh ? " new" : ""}" style="z-index:${9 - depth};--d:${depth};${fill}"${named ? ` title="${esc(reward.token.name)}"` : ""}>${logo ? `<img src="${esc(logo)}" alt="" draggable="false">` : esc(reward.token.symbol.slice(0, 1))}</span>`;
@@ -1023,6 +1027,15 @@ function toggleRewards(): void {
   state.rewardsOpen = !state.rewardsOpen;
   render();
 }
+
+// an image's error doesn't bubble: caught on its way down, a coin whose art fails redraws in its own colours
+app.addEventListener("error", (event) => {
+  const img = event.target;
+  if (!(img instanceof HTMLImageElement) || !img.closest(".coin")) return;
+  img.hidden = true;
+  brokenArt.add(img.getAttribute("src") ?? "");
+  render();
+}, true);
 
 app.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
