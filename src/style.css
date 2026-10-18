@@ -66,6 +66,11 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 }
 body[data-above="true"] .panel { transform-origin: 50% 100%; }
 #app { padding: 14px 10px 10px; }
+/* past the window's tallest, what's below scrolls, with no bar: a fade at the panel's foot says there is more */
+.scroll { height: 100%; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+.scroll::-webkit-scrollbar { display: none; }
+.panel::after { content: ""; position: absolute; right: 0; bottom: 0; left: 0; z-index: 2; height: 28px; background: linear-gradient(color-mix(in srgb, var(--bg) 0%, transparent), var(--bg)); opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+.panel.below::after { opacity: 1; }
 /* the view played out while the next slides in */
 .ghost { position: absolute; inset: 0 0 auto; padding: 14px 10px 10px; pointer-events: none; }
 
@@ -176,7 +181,12 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .tray-label { margin-bottom: 6px; font-size: 11px; color: var(--ink-3); }
 .tray-label:not(:first-child) { margin-top: 12px; }
 .care + .tray-label { margin-top: 0; }
-.job-now + .job-now { margin-top: 10px; }
+/* every job opens its page: the row lights under the pointer, its text stays where the tray's labels are */
+.job-now, .done { width: calc(100% + 16px); margin: 0 -8px; padding: 5px 8px; border-radius: 10px; text-align: left; transition: background-color 0.15s; }
+.job-now { display: block; }
+button.job-now:hover, button.done:hover { background: var(--card-hover); }
+.job-now:focus-visible, .done:focus-visible { outline-offset: -2px; }
+.job-now + .job-now { margin-top: 2px; }
 .job-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .job-head b { font-weight: 600; }
 .job-age { margin-left: auto; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
@@ -189,11 +199,9 @@ header { display: flex; align-items: center; justify-content: space-between; gap
   color: var(--ink-2);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
-  user-select: text;
-  -webkit-user-select: text;
 }
 .idle { margin: 0; font-size: 12px; color: var(--ink-2); }
-.done { display: grid; grid-template-columns: 8px 1fr; gap: 10px; align-items: start; padding: 4px 0; }
+.done { display: grid; grid-template-columns: 8px 1fr; gap: 10px; align-items: start; }
 .mark { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--off); }
 .mark.accepted { background: var(--on); }
 .mark.rejected, .mark.failed { background: var(--danger); }
@@ -209,9 +217,15 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .care-row + .care-row { margin-top: 6px; }
 .care-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .care-row.warn .care-text, .care-row.bad .care-text { color: var(--ink); }
+.care-row.control .care-text { font-size: 13px; color: var(--ink); }
 .care-row.warn .care-text::before, .care-row.bad .care-text::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 7px 1px 0; border-radius: 50%; background: var(--warn); }
 .care-row.bad .care-text::before { background: var(--danger); }
 .care-row .pill:disabled { opacity: 0.6; }
+/* under a care line, why and the fix, in line with its words after the dot */
+.care-fix { margin: 2px 0 0 13px; font-size: 12px; line-height: 1.4; color: var(--ink-2); text-wrap: pretty; }
+.command { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0 2px 13px; padding: 5px 6px 5px 10px; border-radius: 8px; background: var(--bg); box-shadow: 0 0 0 0.5px var(--line); }
+.command code { min-width: 0; font: 12px/1.3 ui-monospace, "SF Mono", Menlo, Consolas, monospace; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.command .link { margin-right: 0; }
 .tray-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 0.5px solid var(--line); font-size: 11px; color: var(--ink-2); }
 .facts { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .link { flex: none; padding: 2px 6px; margin-right: -6px; border-radius: 6px; font-size: 11px; font-weight: 600; color: var(--ink-2); transition: background-color 0.15s, color 0.15s; }
@@ -292,9 +306,10 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 .pulse { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--on); }
 
 /* the swarm's ticker: what just happened, one line at a time */
-.line.swarm { min-height: 40px; }
-.ticker { position: relative; height: 32px; margin-top: -6px; overflow: hidden; }
-.tick { position: absolute; inset: 0 8px; display: flex; align-items: center; gap: 8px; padding: 0 6px; border-radius: 8px; font-size: 12px; text-align: left; color: var(--ink-2); transition: background-color 0.15s; }
+/* the swarm's last line is a row like the rewards' above it: as tall, ruled off the same way, lit edge to edge */
+.ticker { position: relative; height: 44px; overflow: hidden; }
+.swarm + .ticker::before { content: ""; position: absolute; z-index: 1; top: 0; right: 0; left: 14px; height: 0.5px; background: var(--line); }
+.tick { position: absolute; inset: 0; display: flex; align-items: center; gap: 8px; padding: 0 14px; font-size: 13px; text-align: left; color: var(--ink-2); transition: background-color 0.15s; }
 .tick:hover { background: var(--card-hover); }
 .tick:hover .tick-text { color: var(--ink); }
 .tick b { font-weight: 600; color: var(--ink); }
@@ -406,7 +421,9 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 /* ── settings ───────────────────────────────────────────────────────── */
 .group-label { padding: 14px 8px 6px; font-size: 12px; color: var(--ink-2); }
 .card.list { margin-top: 0; }
-.list .line { min-height: 42px; }
+/* every row keeps the same room above and below its words, one line or two; a field's row stays compact */
+.list .line { min-height: 42px; padding-block: 11px; }
+.list form.line { padding-block: 6px; }
 .wallet .address { font-variant-numeric: tabular-nums; }
 .wallet .line-value { color: var(--ink-2); }
 .remove { display: grid; place-items: center; width: 22px; height: 22px; margin-right: -4px; border-radius: 6px; color: var(--ink-3); transition: background-color 0.15s, color 0.15s; }
@@ -424,7 +441,27 @@ header { display: flex; align-items: center; justify-content: space-between; gap
   -webkit-user-select: text;
 }
 .inline-input::placeholder { color: var(--ink-3); }
-.name-field .inline-input { text-align: right; }
+/* an agent in Settings: its face, its name to change in place, where it runs */
+.agent-line { justify-content: flex-start; }
+.face { display: grid; place-items: center; width: 28px; height: 32px; flex: none; }
+.face img { display: block; width: 28px; height: 28px; filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.2)); }
+.face .mask-blank { width: 22px; height: 28px; margin: 0; border-radius: 9px; background: var(--card-hover); }
+.agent-line-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+/* the name reads as the row's title, and turns into a field under the pointer and while it is changed */
+.name-input { margin: -2px -6px 0; padding: 2px 6px; border-radius: 6px; font-weight: 600; transition: background-color 0.15s, box-shadow 0.15s; }
+.name-input::placeholder { color: var(--ink); }
+.name-input:hover { background: var(--card-hover); }
+.name-input:focus { background: var(--bg); box-shadow: 0 0 0 0.5px var(--line); }
+.name-input:focus::placeholder { color: var(--ink-3); }
+/* Watching: a line in from Settings, then one line for each wallet and seat */
+.line.opens { transition: background-color 0.15s; }
+.line.opens:hover { background: var(--card-hover); }
+.line.opens .line-value { color: var(--ink-2); }
+.settings-head + .card.list { margin-top: 10px; }
+.watched { display: flex; flex-direction: column; min-width: 0; }
+.watched .address { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.remove-link:hover { color: var(--danger); }
+.list form.line .pill { margin-right: -6px; }
 .footnote { margin: 0; padding: 6px 14px 0; font-size: 11px; line-height: 1.45; color: var(--ink-3); }
 .sub { display: block; font-size: 11px; color: var(--ink-2); }
 .linking { padding: 12px 14px; }

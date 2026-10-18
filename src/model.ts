@@ -344,6 +344,42 @@ export function jailWords(standing: Standing | null): string | null {
 }
 
 /**
+ * Whether an agent took a job since the last read: a job on its list that wasn't there before. An agent
+ * not read before has nothing to compare, so a newly watched one never counts.
+ */
+export function tookJob(before: Map<string, string[]> | null, now: Map<string, string[]>): boolean {
+  if (!before) return false;
+  return [...now].some(([tokenId, jobs]) => before.has(tokenId) && jobs.some((job) => !before.get(tokenId)!.includes(job)));
+}
+
+/**
+ * What was typed to watch, in pieces: wallets, ENS names and seat numbers, in any mix, apart by commas
+ * or spaces ("14,25", "14, 25", "14 25", "#14"), each once; and the first piece that is none of them.
+ */
+export function watchParts(value: string): { parts: string[]; odd: string | null } {
+  const pieces = value.toLowerCase().split(/[\s,]+/).map((part) => part.replace(/^#/, "")).filter(Boolean);
+  const parts = [...new Set(pieces.map((part) => (/^\d+$/.test(part) ? String(Number(part)) : part)))];
+  const odd = parts.find((part) => !/^[1-9]\d{0,5}$/.test(part) && !/^0x[0-9a-f]{40}$/.test(part) && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(part)) ?? null;
+  return { parts, odd };
+}
+
+/**
+ * Why an agent's sandbox won't start, and the one command that fixes it on its machine, from the
+ * worker's own words: the explorer's notice reads them the same way. `imd sandbox` installs what is
+ * missing and lifts the kernel's restriction for bubblewrap alone, so it answers most of them.
+ */
+export function jailFix(detail: string): { why: string; command: string | null } {
+  if (/predates the jail/.test(detail)) return { why: "Its Claude Code is too old for the sandbox these jobs run in.", command: "claude update" };
+  if (/needs (bwrap|socat)/.test(detail)) return { why: "Its machine is missing the sandbox these jobs run in.", command: "sudo imd sandbox" };
+  if (/apparmor_restrict_unprivileged_userns|unprivileged_userns_clone|RTM_NEWADDR|new namespace|setting up uid map|nested userns/.test(detail)) {
+    return { why: "Its machine blocks the sandbox these jobs run in.", command: "sudo imd sandbox" };
+  }
+  if (/hides \/proc|mount proc/.test(detail)) return { why: "Its worker runs in a container, where the sandbox these jobs run in can't start. Run it on the machine itself or in a VM.", command: null };
+  if (/Windows/.test(detail)) return { why: "The sandbox these jobs run in doesn't work on Windows. Run the worker under WSL.", command: null };
+  return { why: "The sandbox these jobs run in won't start on its machine.", command: "imd update" };
+}
+
+/**
  * A failed setup step in plain words: what happened and what to do, from what Docker or the worker said.
  * A failure it does not know keeps Docker's own most telling line, the error and not its "Run 'docker run
  * --help'" after it.

@@ -4,7 +4,7 @@ import { disable as autostartOff, enable as autostartOn, isEnabled as autostartI
 import morphdom from "morphdom";
 import * as api from "./api";
 import { faceFor, loadFace } from "./masks";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailWords, judgedRate, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
 
 // ---------------------------------------------------------------------------------------------
 // What the app remembers between runs: wallets, the network it signs for, names. Nothing secret:
@@ -14,34 +14,44 @@ import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, curre
 type Settings = {
   /** Wallets whose agents show, added by address. Watching needs no signature. */
   watching: string[];
+  /** Agents watched by their seat number alone, apart from any wallet. */
+  seats: string[];
   /** Wallets that let this computer pause and resume their agents, approved once in the browser. */
   wallets: string[];
   /** The control plane's origin the link was made with, which every signed action names. */
   relayOrigin: string | null;
   names: Record<string, string>;
+  /** The ENS name each wallet was added by, to show it by. */
+  ens: Record<string, string>;
   /** What this computer's box runs on. */
   runtime: string;
   /** This computer's agent, once learned from the box: it stays this computer's while the box is off. */
   localToken: string | null;
+  /** The wallet that holds it, so its agents show from the first moment the app opens. */
+  localOwner: string | null;
+  /** How many agents showed last time, for the rows held in their place while the first read is out. */
+  shown: number;
+  /** A sound when an agent takes a job, and another when one is accepted. Off until it is turned on. */
+  sounds: boolean;
 };
 
 const STORE = "imd-agents:settings";
 const stored = (() => { try { return JSON.parse(localStorage.getItem(STORE) ?? "{}"); } catch { return {}; } })();
-const settings: Settings = Object.assign({ watching: [], wallets: [], relayOrigin: null, names: {}, runtime: "claude", localToken: null }, stored);
+const settings: Settings = Object.assign({ watching: [], seats: [], wallets: [], relayOrigin: null, names: {}, ens: {}, runtime: "claude", localToken: null, localOwner: null, shown: 0, sounds: false }, stored);
 // Watching used to take one wallet.
 if (typeof stored.watch === "string" && !settings.watching.includes(stored.watch)) settings.watching.push(stored.watch);
 delete (settings as { watch?: unknown }).watch;
 const save = () => { try { localStorage.setItem(STORE, JSON.stringify(settings)); } catch { /* kept for this run */ } };
 
 const state = {
-  view: "home" as "home" | "settings",
+  view: "home" as "home" | "settings" | "watching",
   /** Where setup has got, while its window is open: the panel's row back to it. */
   settingUp: null as string | null,
   box: null as Box | null,
   /** This computer's own agent, found from the box's device key. */
   localToken: settings.localToken as string | null,
   /** The wallet that holds this computer's agent: watched without asking. */
-  localOwner: null as string | null,
+  localOwner: settings.localOwner as string | null,
   agents: [] as Agent[],
   /** How many agents each watched wallet holds. */
   holdings: new Map<string, number>(),
@@ -68,6 +78,8 @@ const state = {
   note: null as { text: string; bad: boolean } | null,
   sending: new Set<string>(),
   openAtLogin: false,
+  /** A fix just copied, which its button says for a moment. */
+  copied: null as string | null,
   loaded: false,
 };
 
@@ -98,7 +110,13 @@ let lastHistory = 0;
 let lastRewards = 0;
 let lastSwarm = 0;
 let lastRelease = 0;
+/** Each seat watched by its number: its holder, and whether it was up when its record was last read. */
+const seatInfo = new Map<string, { owner: string; online: boolean }>();
 let reading = false;
+/** A full read asked for while one was out, as after watching something new: it runs as soon as that one ends. */
+let again = false;
+/** Each agent's jobs at the last read, to hear one taken. */
+let lastRunning: Map<string, string[]> | null = null;
 /** This app's own version, under Quit in Settings. It updates itself, so this says which it is on. */
 let appVersion = "";
 /** What each agent had accepted at the last read, and what it has accepted since, to fly in. */
@@ -108,24 +126,48 @@ const gains: Array<{ tokenId: string; by: number }> = [];
 let coolUntil = 0;
 
 async function refresh(full = false): Promise<void> {
+  if (reading && full) again = true;
   if (reading || Date.now() < coolUntil) return;
   reading = true;
+  let took = false;
   try {
+    // the swarm and the worker's releases wait on nothing here, so they are asked beside the rest
+    const swarmRead = full || (document.hasFocus() && Date.now() - lastSwarm > 45_000) ? (lastSwarm = Date.now(), api.swarm().catch(() => null)) : null;
+    // the releases, to know an agent left behind: every half hour, well inside GitHub's limit
+    const releaseRead = Date.now() - lastRelease > 30 * 60_000 ? (lastRelease = Date.now(), api.workerReleases().catch(() => null)) : null;
     const box = await api.boxState().catch(() => null);
     if (box && !(state.box?.state === "starting" || state.box?.state === "stopping") ) state.box = box;
     if (box?.deviceKey) {
       const token = await api.deviceSeat(box.deviceKey);
-      if (token && token !== state.localToken) { state.localToken = token; settings.localToken = token; save(); }
+      if (token && token !== state.localToken) { state.localToken = token; state.localOwner = null; settings.localToken = token; save(); }
     }
     // Without a box there is no computer's own agent to show apart.
-    if (box && !box.installed) state.localToken = null;
-    if (state.localToken && !state.localOwner) state.localOwner = (await api.seatRecord(state.localToken, 0))?.owner?.toLowerCase() ?? null;
+    if (box && !box.installed) {
+      state.localToken = null;
+      state.localOwner = null;
+      if (settings.localOwner) { settings.localOwner = null; save(); }
+    }
+    if (state.localToken && !state.localOwner) {
+      state.localOwner = (await api.seatRecord(state.localToken, 0))?.owner?.toLowerCase() ?? null;
+      if (state.localOwner && state.localOwner !== settings.localOwner) { settings.localOwner = state.localOwner; save(); }
+    }
 
+    // every watched wallet's seats, and a holder for each seat watched by its number, side by side
+    const [held] = await Promise.all([
+      Promise.all(watched().map(async (wallet) => ({ wallet, tokens: await api.walletSeats(wallet) }))),
+      Promise.all(settings.seats.filter((tokenId) => !seatInfo.has(tokenId)).map(async (tokenId) => {
+        const record = await api.seatRecord(tokenId, 0).catch(() => null);
+        if (record) seatInfo.set(tokenId, { owner: record.owner?.toLowerCase() ?? "", online: record.online ?? false });
+      })),
+    ]);
+    if (prune()) save();
     const seats: Array<{ tokenId: string; wallet: string; online: boolean }> = [];
-    for (const wallet of watched()) {
-      for (const seat of await api.walletSeats(wallet)) {
-        if (!seats.some((s) => s.tokenId === seat.tokenId)) seats.push({ tokenId: seat.tokenId, wallet, online: seat.device?.online ?? false });
-      }
+    for (const { wallet, tokens } of held) {
+      for (const seat of tokens) if (!seats.some((s) => s.tokenId === seat.tokenId)) seats.push({ tokenId: seat.tokenId, wallet, online: seat.device?.online ?? false });
+    }
+    for (const tokenId of settings.seats) {
+      const info = seatInfo.get(tokenId);
+      if (info && !seats.some((s) => s.tokenId === tokenId)) seats.push({ tokenId, wallet: info.owner, online: info.online });
     }
     if (state.localToken && !seats.some((s) => s.tokenId === state.localToken)) {
       seats.unshift({ tokenId: state.localToken, wallet: state.localOwner ?? "", online: state.box?.state === "running" });
@@ -136,56 +178,63 @@ async function refresh(full = false): Promise<void> {
     const reads = await Promise.all(seats.map((seat) => api.get<Agent["standing"]>(`/seats/${seat.tokenId}/standing?queue=0`)));
     if (reads.some((read) => read.status === 429)) coolUntil = Date.now() + 60_000;
     const standings = reads.map((read, i) => (read.status === 200 ? read.body : before.get(seats[i]!.tokenId) ?? null));
+    const running = new Map(seats.map((seat, i) => [seat.tokenId, (standings[i]?.standing.running ?? []).map((job) => job.jobId)]));
+    if (tookJob(lastRunning, running)) took = true;
+    lastRunning = running;
+
+    // each agent's record, its two weeks for the chart, and the rewards, read side by side
+    const loads: Array<Promise<void>> = [];
     if (full || Date.now() - lastRecords > 60_000) {
       lastRecords = Date.now();
-      const read = await Promise.all(seats.map((seat) => api.seatRecord(seat.tokenId)));
-      records = new Map(seats.flatMap((seat, i) => {
-        const record = read[i];
-        if (!record) return records.has(seat.tokenId) ? [[seat.tokenId, records.get(seat.tokenId)!] as const] : [];
-        const premium = record.runtimes?.[0]?.premiumModel;
-        return [[seat.tokenId, {
-          today: acceptedToday(record.work ?? []),
-          accepted: record.accepted ?? 0,
-          rejected: record.rejected ?? 0,
-          failed: record.failed ?? 0,
-          model: premium ? [modelName(premium.model), premium.effort].filter(Boolean).join(" ") : null,
-          recent: (record.work ?? []).slice(0, 3),
-        }] as const];
+      loads.push(Promise.all(seats.map((seat) => api.seatRecord(seat.tokenId))).then((read) => {
+        records = new Map(seats.flatMap((seat, i) => {
+          const record = read[i];
+          if (!record) return records.has(seat.tokenId) ? [[seat.tokenId, records.get(seat.tokenId)!] as const] : [];
+          // a seat watched by its number keeps its holder and whether it is up as fresh as its record
+          if (seatInfo.has(seat.tokenId)) seatInfo.set(seat.tokenId, { owner: record.owner?.toLowerCase() ?? "", online: record.online ?? false });
+          const premium = record.runtimes?.[0]?.premiumModel;
+          return [[seat.tokenId, {
+            today: acceptedToday(record.work ?? []),
+            accepted: record.accepted ?? 0,
+            rejected: record.rejected ?? 0,
+            failed: record.failed ?? 0,
+            model: premium ? [modelName(premium.model), premium.effort].filter(Boolean).join(" ") : null,
+            recent: (record.work ?? []).slice(0, 3),
+          }] as const];
+        }));
       }));
     }
     // two weeks of work per agent, for the sparkline: the past does not change, so every ten minutes
     if (full || Date.now() - lastHistory > 10 * 60_000) {
       lastHistory = Date.now();
-      const read = await Promise.all(seats.map((seat) => api.seatRecord(seat.tokenId, HISTORY_ROWS)));
-      seats.forEach((seat, i) => {
-        const work = read[i]?.work;
-        if (work) history.set(seat.tokenId, { rows: work.map((row) => ({ submittedAt: row.submittedAt, acceptedAt: row.acceptedAt })), capped: work.length >= HISTORY_ROWS });
-      });
+      loads.push(Promise.all(seats.map((seat) => api.seatRecord(seat.tokenId, HISTORY_ROWS))).then((read) => {
+        seats.forEach((seat, i) => {
+          const work = read[i]?.work;
+          if (work) history.set(seat.tokenId, { rows: work.map((row) => ({ submittedAt: row.submittedAt, acceptedAt: row.acceptedAt })), capped: work.length >= HISTORY_ROWS });
+        });
+      }));
     }
+    if (full || Date.now() - lastRewards > 120_000) {
+      lastRewards = Date.now();
+      loads.push((async () => {
+        const all = await Promise.all(watched().map(async (wallet) => (await api.earnings(wallet)).map((e) => ({ ...e, wallet }))));
+        state.rewards = all.flat().sort((a, b) => b.at.localeCompare(a.at));
+        // what is ready to claim is the explorer's to say: it reads the launch chains, the plane does not
+        const rewarded = [...new Set(state.rewards.map((r) => r.wallet))];
+        const ready = await Promise.all(rewarded.map((wallet) => api.readyToClaim(wallet, state.rewards.filter((r) => r.wallet === wallet)).catch(() => null)));
+        rewarded.forEach((wallet, i) => { if (ready[i]) state.worth.set(wallet, ready[i]!); });
+      })());
+    }
+    await Promise.all(loads);
     state.agents = seats
       .map((seat, i) => ({ ...seat, standing: standings[i] ?? null, today: records.get(seat.tokenId)?.today ?? null, accepted: records.get(seat.tokenId)?.accepted ?? null }))
       .sort((a, b) => (a.tokenId === state.localToken ? -1 : b.tokenId === state.localToken ? 1 : Number(a.tokenId) - Number(b.tokenId)));
+    if (state.agents.length !== settings.shown) { settings.shown = state.agents.length; save(); }
 
-    if (full || Date.now() - lastRewards > 120_000) {
-      lastRewards = Date.now();
-      const all = await Promise.all(watched().map(async (wallet) => (await api.earnings(wallet)).map((e) => ({ ...e, wallet }))));
-      state.rewards = all.flat().sort((a, b) => b.at.localeCompare(a.at));
-      // what is ready to claim is the explorer's to say: it reads the launch chains, the plane does not
-      const rewarded = [...new Set(state.rewards.map((r) => r.wallet))];
-      const ready = await Promise.all(rewarded.map((wallet) => api.readyToClaim(wallet, state.rewards.filter((r) => r.wallet === wallet)).catch(() => null)));
-      rewarded.forEach((wallet, i) => { if (ready[i]) state.worth.set(wallet, ready[i]!); });
-    }
-    // the worker's releases, to know an agent left behind: every half hour, well inside GitHub's limit
-    if (Date.now() - lastRelease > 30 * 60_000) {
-      lastRelease = Date.now();
-      const answer = await api.workerReleases().catch(() => null);
-      if (answer?.status === 200 && Array.isArray(answer.body)) state.release = currentWorker(answer.body) ?? state.release;
-    }
+    const answer = await releaseRead;
+    if (answer?.status === 200 && Array.isArray(answer.body)) state.release = currentWorker(answer.body) ?? state.release;
     // the whole swarm, while someone is looking
-    if (full || (document.hasFocus() && Date.now() - lastSwarm > 45_000)) {
-      lastSwarm = Date.now();
-      state.swarm = (await api.swarm()) ?? state.swarm;
-    }
+    if (swarmRead) state.swarm = (await swarmRead) ?? state.swarm;
     state.loaded = true;
     for (const agent of state.agents) void loadFace(agent.tokenId, render);
     // work accepted since the last read, by whom: drawn flying in once the numbers are
@@ -202,6 +251,9 @@ async function refresh(full = false): Promise<void> {
   if (state.restartWhenIdle && local && phaseFor(local).kind !== "working") void restartLocal();
   const landed = gains.splice(0);
   if (!document.hidden && !closing && state.view === "home") landed.forEach((gain, i) => setTimeout(() => fly(gain.tokenId, gain.by), i * 260));
+  // heard whether or not the panel is open: work accepted over work taken, once a read
+  if (settings.sounds && (landed.length || took)) void api.playSound(landed.length ? "paid" : "taken").catch(() => undefined);
+  if (again) { again = false; void refresh(true); }
 }
 
 /** Every agent's accepted work per day, the last two weeks, today's as fresh as the minute. */
@@ -246,7 +298,7 @@ async function restartLocal(): Promise<void> {
   state.box = { ...state.box, state: "starting" };
   render();
   try {
-    await api.boxRestart();
+    await api.boxRestart(settings.runtime);
   } catch (error) {
     state.note = { text: String(error), bad: true };
   }
@@ -290,7 +342,7 @@ async function toggle(agent: Agent): Promise<void> {
     if (error === "app_not_linked") {
       settings.wallets = [];
       save();
-      state.note = { text: "This computer can no longer pause and resume. Allow it again in Settings.", bad: true };
+      state.note = { text: "Your wallet is no longer connected here. Connect it again in Settings.", bad: true };
     } else {
       state.note = {
         text: error === "not_token_owner" ? `That wallet no longer holds ${nameOf(agent.tokenId)}.`
@@ -303,40 +355,93 @@ async function toggle(agent: Agent): Promise<void> {
   render();
 }
 
-/** Watching a wallet: its address, or an ENS name the explorer turns into one. Nothing signed. */
-async function watch(value: string): Promise<void> {
-  const typed = value.trim().toLowerCase();
-  let wallet = typed;
-  if (!/^0x[0-9a-f]{40}$/.test(typed)) {
-    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(typed)) {
-      state.note = { text: "Paste a wallet address, 0x and 40 letters and numbers, or an ENS name.", bad: true };
-      return render();
-    }
-    state.resolving = true;
+/**
+ * Watching: wallets by address or ENS name, and agents by seat number, in any mix and any separation:
+ * "14 25 56", "14, 25", "taylor.eth 0x…". Nothing signed. Says whether everything typed was found.
+ */
+async function watch(value: string): Promise<boolean> {
+  const { parts, odd } = watchParts(value);
+  if (!parts.length) return false;
+  if (odd) {
+    state.note = { text: `${odd.length > 24 ? `${odd.slice(0, 24)}…` : odd} isn't a wallet, an ENS name or a seat number.`, bad: true };
     render();
-    const found = await api.ensWallet(typed).catch(() => null);
-    state.resolving = false;
-    if (!found) {
-      state.note = { text: `No wallet found for ${typed}. Paste its 0x address instead.`, bad: true };
-      return render();
-    }
-    wallet = found;
+    return false;
   }
-  if (!settings.watching.includes(wallet)) settings.watching.push(wallet);
-  save();
+  state.resolving = true;
   state.note = null;
   render();
+  const found = await Promise.all(parts.map(async (part): Promise<{ wallet?: string; seat?: string; missing?: string }> => {
+    if (/^\d+$/.test(part)) {
+      const seat = part;
+      // a seat the network knows has run an agent: one that never paired has nothing to show
+      const record = await api.seatRecord(seat, 0).catch(() => null);
+      if (record) seatInfo.set(seat, { owner: record.owner?.toLowerCase() ?? "", online: record.online ?? false });
+      return record ? { seat } : { missing: `#${seat}` };
+    }
+    if (part.startsWith("0x")) return { wallet: part };
+    const wallet = await api.ensWallet(part).catch(() => null);
+    if (wallet) settings.ens[wallet] = part;
+    return wallet ? { wallet } : { missing: part };
+  }));
+  state.resolving = false;
+  // what already shows is said, not added twice: a wallet watched, a seat listed, or a seat a watched wallet
+  // holds. Wallets go first, so a seat that one typed beside it holds counts as shown.
+  const already: Array<{ label: string; through?: string }> = [];
+  const by = (wallet: string) => settings.ens[wallet] ?? short(wallet);
+  for (const { wallet } of found) {
+    if (!wallet) continue;
+    if (watched().includes(wallet)) already.push({ label: by(wallet) });
+    else settings.watching.push(wallet);
+  }
+  for (const { seat } of found) {
+    if (!seat) continue;
+    const holder = seatInfo.get(seat)?.owner;
+    if (holder && watched().includes(holder)) already.push({ label: `#${seat}`, through: holder });
+    else if (settings.seats.includes(seat)) already.push({ label: `#${seat}` });
+    else settings.seats.push(seat);
+  }
+  prune();
+  save();
+  const missing = found.flatMap((f) => (f.missing ? [f.missing] : []));
+  const list = (labels: string[]) => (labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : labels[0]!);
+  state.note = missing.length > 1 ? { text: `Nothing found for ${list(missing)}.`, bad: true }
+    : missing.length ? (missing[0]!.startsWith("#") ? { text: `${missing[0]} hasn't run an agent yet, so there's nothing to watch.`, bad: true } : { text: `No wallet found for ${missing[0]}. Paste its 0x address instead.`, bad: true })
+    : already.length > 1 ? { text: `${list(already.map((a) => a.label))} already show here.`, bad: false }
+    : already.length ? { text: already[0]!.through ? `${already[0]!.label} already shows here: ${by(already[0]!.through)} holds it.` : `${already[0]!.label} is already here.`, bad: false }
+    : null;
+  render();
   void refresh(true);
+  return !missing.length;
+}
+
+/** A seat watched by its number that a watched wallet holds shows through the wallet: its own line goes. */
+function prune(): boolean {
+  const kept = settings.seats.filter((tokenId) => {
+    const holder = seatInfo.get(tokenId)?.owner;
+    return !holder || !watched().includes(holder);
+  });
+  if (kept.length === settings.seats.length) return false;
+  settings.seats = kept;
+  return true;
 }
 
 function unwatch(wallet: string): void {
   settings.watching = settings.watching.filter((w) => w !== wallet);
+  delete settings.ens[wallet];
   save();
   render();
   void refresh(true);
 }
 
-/** Allowing pause and resume: a code, the approval page in the browser, and this panel watching the code. */
+function unwatchSeat(tokenId: string): void {
+  settings.seats = settings.seats.filter((t) => t !== tokenId);
+  seatInfo.delete(tokenId);
+  save();
+  render();
+  void refresh(true);
+}
+
+/** Connecting a wallet to pause and resume: a code, the approval page in the browser, and this panel watching the code. */
 async function connect(): Promise<void> {
   state.view = "settings";
   if (state.linking) return void api.linkReopen(state.linking.code);
@@ -355,7 +460,7 @@ async function connect(): Promise<void> {
         if (!settings.wallets.includes(wallet)) settings.wallets.push(wallet);
         save();
         state.linking = null;
-        state.note = { text: `${short(wallet)} can now pause and resume from here.`, bad: false };
+        state.note = { text: `Connected ${settings.ens[wallet] ?? short(wallet)}.`, bad: false };
         await refresh(true);
         return;
       }
@@ -374,11 +479,30 @@ async function disconnect(): Promise<void> {
     await api.unlink(settings.relayOrigin ?? "https://api.imd.fun");
     settings.wallets = [];
     save();
-    state.note = { text: "Pause and resume is off, and this computer's key is deleted.", bad: false };
+    state.note = { text: "Disconnected. Its agents no longer pause and resume from here.", bad: false };
   } catch (error) {
     state.note = { text: String(error), bad: true };
   }
   render();
+}
+
+/** A fix's command onto the clipboard, to run on the agent's own machine; its button says so for a moment. */
+function copyFix(command: string): void {
+  const done = () => {
+    state.copied = command;
+    render();
+    setTimeout(() => { if (state.copied === command) { state.copied = null; render(); } }, 1600);
+  };
+  navigator.clipboard.writeText(command).then(done, () => {
+    // where the clipboard's own way is refused, the older one: the text selected and copied
+    const field = document.createElement("textarea");
+    field.value = command;
+    document.body.append(field);
+    field.select();
+    const copied = document.execCommand("copy");
+    field.remove();
+    if (copied) done();
+  });
 }
 
 /** Claiming happens on the explorer, where the wallet signs: the one with the newest reward. */
@@ -393,6 +517,8 @@ function claim(): void {
 // ---------------------------------------------------------------------------------------------
 
 const panel = document.querySelector<HTMLDivElement>("#panel")!;
+/** What scrolls inside the panel, once it is as tall as its window may be. */
+const scroller = document.querySelector<HTMLDivElement>("#scroll")!;
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const reduced = matchMedia("(prefers-reduced-motion: reduce)");
 /** Settles without passing its mark, as a critically damped spring does: most motion. */
@@ -434,7 +560,9 @@ function switchHtml(agent: Agent, phase: Phase, index: number): string {
 
 function agentsHtml(): string {
   if (!state.agents.length) {
-    return state.loaded ? "" : `<div class="rows"><div class="row skeleton"><span class="mask"><span class="mask-blank"></span></span><span class="lines"><span class="bar"></span><span class="bar short"></span></span></div></div>`;
+    // while the first read is out, as many rows as showed last time hold their places
+    const held = Math.min(Math.max(settings.shown, 1), 6);
+    return state.loaded ? "" : `<div class="rows">${`<div class="row skeleton"><span class="mask"><span class="mask-blank"></span></span><span class="lines"><span class="bar"></span><span class="bar short"></span></span></div>`.repeat(held)}</div>`;
   }
   return `<div class="rows">${state.agents.map((agent, i) => {
     const phase = phaseFor(agent);
@@ -450,7 +578,7 @@ function agentsHtml(): string {
         <span class="name"><b>${esc(label || `Agent #${agent.tokenId}`)}</b>${label ? `<span class="label">#${esc(agent.tokenId)}</span>` : ""}${outdated(agent) ? `<span class="tag warn" title="${esc(`Runs worker ${agent.standing?.presence?.daemonVersion ?? ""}; the newest is ${state.release?.newest ?? ""}`)}">Outdated</span>` : ""}${jailWords(agent.standing) ? `<span class="tag warn" title="No oracle, research or contract jobs">Fewer jobs</span>` : ""}</span>
         <span class="status${phase.kind === "working" ? " shimmer" : ""}">${esc(status)}</span>
       </span>
-      <span class="row-end">${switchHtml(agent, phase, i)}<span class="chevron" aria-hidden="true">${CHEVRON}</span></span>
+      <span class="row-end"><span class="chevron" aria-hidden="true">${CHEVRON}</span></span>
     </div>${open ? agentTrayHtml(agent) : ""}`;
   }).join("")}</div>`;
 }
@@ -475,20 +603,23 @@ function lastJob(agent: Agent): string {
 function agentTrayHtml(agent: Agent): string {
   const record = records.get(agent.tokenId);
   const now = new Date();
-  const doing = (agent.standing?.standing.running ?? []).map((job) => `<div class="job-now">
-      <div class="job-head"><span class="pulse" aria-hidden="true"></span><b>${esc(stepTitle(job.nodeKey))}</b><span class="job-age">${esc(elapsed(new Date(job.since), now))}</span></div>
-      <p class="objective">${esc(firstLine(job.objective))}</p>
-    </div>`).join("");
+  // every job opens its page on the explorer; the newest, on J
+  const newest = newestJob(agent);
+  const doing = (agent.standing?.standing.running ?? []).map((job) => `<button class="job-now" data-explorer="/jobs/${esc(job.jobId)}" title="Open this job on the explorer${job.jobId === newest ? " (J)" : ""}">
+      <span class="job-head"><span class="pulse" aria-hidden="true"></span><b>${esc(stepTitle(job.nodeKey))}</b><span class="job-age">${esc(elapsed(new Date(job.since), now))}</span></span>
+      <span class="objective">${esc(firstLine(job.objective))}</span>
+    </button>`).join("");
   const done = (record?.recent ?? []).map((row) => {
     const result = row.status ?? "pending";
     const at = row.acceptedAt ?? row.submittedAt;
-    return `<div class="done" title="${esc(firstLine(row.objective))}">
-      <span class="mark ${esc(result)}" aria-hidden="true"></span>
+    const lines = `<span class="mark ${esc(result)}" aria-hidden="true"></span>
       <span class="done-lines">
         <span class="done-head"><b>${esc(stepTitle(row.nodeKey ?? null))}</b><span class="done-age">${esc(RESULT[result] ?? result)}${at ? ` · ${esc(shortAgo(new Date(at), now))}` : ""}</span></span>
         <span class="done-objective">${esc(firstLine(row.objective))}</span>
-      </span>
-    </div>`;
+      </span>`;
+    return row.jobId
+      ? `<button class="done" data-explorer="/jobs/${esc(row.jobId)}" title="Open this job on the explorer${row.jobId === newest ? " (J)" : ""}">${lines}</button>`
+      : `<div class="done">${lines}</div>`;
   }).join("");
   const rate = record ? judgedRate(record.accepted, record.rejected, record.failed) : null;
   const facts = [rate !== null ? `${rate}% of judged` : null, record?.model].filter(Boolean).join(" · ");
@@ -501,12 +632,18 @@ function agentTrayHtml(agent: Agent): string {
     ? `<button class="pill" data-action="restart" title="Restart this computer's agent (U)" ${state.restartWhenIdle ? "disabled" : ""}>${state.restartWhenIdle ? "Restarts after this job" : phaseFor(agent).kind === "working" ? "Restart after this job" : behind ? "Update" : "Restart"}</button>`
     : "";
   const behindText = behind ? `${behindWords(agent.standing!.presence!.daemonVersion!, state.release!.order)}.${local ? "" : " Restart it to update."}` : "";
+  // its switch, in its tray rather than on its row: this computer's box on and off, or another agent paused
+  // and resumed through its connected wallet; 1 to 9 still flip it from anywhere
+  const toggle = switchHtml(agent, phaseFor(agent), state.agents.indexOf(agent));
+  const here = agent.tokenId === state.localToken && state.box?.installed;
   const care = [
+    // one label for both, since on means it takes jobs either way; under it, what off does to this one
+    toggle ? `<div class="care-row control"><span class="care-text">Take jobs<span class="sub">${here ? "Off stops it on this computer" : "Off pauses it after its current job"}</span></span>${toggle}</div>` : "",
     failing ? `<div class="care-row bad"><span class="care-text" title="${esc(failing)}">Its last job failed: ${esc(failing)}</span>${local && !behind ? restart : ""}</div>` : "",
     behind ? `<div class="care-row warn"><span class="care-text">${esc(behindText)}</span>${restart}</div>` : "",
-    // the worker's own words say why and what fixes it; on this computer, a restart starts the box with its sandbox
-    jailed ? `<div class="care-row warn"><span class="care-text" title="${esc(jailed)}">No oracle, research or contract jobs</span>${local && !behind && !failing ? restart : ""}</div>` : "",
-    local && !behind && !failing && !jailed ? `<div class="care-row"><span class="care-text">Runs on this computer</span>${restart}</div>` : "",
+    // why, in plain words, and the fix: on this computer a restart starts the box with its sandbox; elsewhere,
+    // the one command to run on its machine
+    jailed ? `<div class="care-row warn"><span class="care-text" title="${esc(jailed)}">No oracle, research or contract jobs</span>${local && !behind && !failing ? restart : ""}</div>${jailFixHtml(jailed, Boolean(local))}` : "",
   ].join("");
   return `<div class="agent-tray" id="tray-${esc(agent.tokenId)}">
     ${care ? `<div class="care">${care}</div>` : ""}
@@ -514,6 +651,22 @@ function agentTrayHtml(agent: Agent): string {
     ${done ? `<div class="tray-label">Lately</div>${done}` : ""}
     <div class="tray-foot"><span class="facts" title="${esc(record ? `${record.accepted} accepted, ${record.rejected} rejected, ${record.failed} failed` : "")}">${esc(facts)}</span><button class="link" data-explorer="/agents/${esc(agent.tokenId)}" title="Open on the explorer (O)">Explorer ›</button></div>
   </div>`;
+}
+
+/** Why a jailed agent takes fewer jobs and what fixes it: Restart here, or a command for its machine to copy. */
+function jailFixHtml(detail: string, local: boolean): string {
+  const fix = jailFix(detail);
+  // this computer's box: one started by an older IMD Agents ran without the sandbox's settings, and Restart starts it with them
+  if (local) return `<p class="care-fix">${/new namespace|uid map|nested userns|RTM_NEWADDR|mount proc|hides \/proc/.test(detail) ? "Its box started without the sandbox these jobs run in. Restart starts it with one." : esc(fix.why)}</p>`;
+  if (!fix.command) return `<p class="care-fix">${esc(fix.why)}</p>`;
+  const copied = state.copied === fix.command;
+  return `<p class="care-fix">${esc(fix.why)} Run this there, then restart its worker:</p>
+    <div class="command"><code>${esc(fix.command)}</code><button class="link" data-copy="${esc(fix.command)}" title="Copy (⌘C)">${copied ? "Copied" : "Copy"}</button></div>`;
+}
+
+/** An agent's newest job: the one it is on, or else the last it did. */
+function newestJob(agent: Agent): string | null {
+  return agent.standing?.standing.running?.[0]?.jobId ?? records.get(agent.tokenId)?.recent[0]?.jobId ?? null;
 }
 
 /** A day on the chart in words: the last bar is today, the others their date. */
@@ -663,8 +816,8 @@ function networkHtml(): string {
 function welcomeHtml(): string {
   return `<section class="card welcome">
       <div class="welcome-title">Watch your agents</div>
-      <p>Paste the wallet that holds them, or its ENS name.</p>
-      <form data-form="watch"><input data-field="add" placeholder="0x… or name.eth" spellcheck="false" autocomplete="off" aria-label="Wallet address or ENS name (W)"><button class="primary" type="submit" title="Watch (Enter)" ${state.resolving ? "disabled" : ""}>${state.resolving ? "Finding…" : "Watch"}</button></form>
+      <p>Paste the wallet that holds them, its ENS name, or their seat numbers.</p>
+      <form data-form="watch"><input data-field="add" placeholder="0x…, name.eth or 14 25 56" spellcheck="false" autocomplete="off" aria-label="Wallet address, ENS name or seat numbers (W)"><button class="primary" type="submit" title="Watch (Enter)" ${state.resolving ? "disabled" : ""}>${state.resolving ? "Finding…" : "Watch"}</button></form>
     </section>
     <section class="card welcome">
       <div class="welcome-title">Run an agent here</div>
@@ -698,7 +851,9 @@ function headerLine(): string {
 
 function homeHtml(): string {
   const summary = state.agents.length ? headerLine() : state.loaded ? "No agents yet" : "Reading…";
-  const empty = !watched().length && !state.box?.installed;
+  // the two ways in only once it is known there is nothing to show: until then, the rows hold their places
+  const known = state.loaded || state.box !== null;
+  const empty = known && !watched().length && !settings.seats.length && !state.box?.installed;
   return `<header>
       <div><div class="title">IMD Agents</div>${empty ? "" : `<div class="summary">${esc(summary)}</div>`}</div>
       <button class="icon" data-action="settings" title="Settings (,)" aria-label="Settings">${GEAR}</button>
@@ -714,27 +869,94 @@ function settingUpHtml(): string {
     : "";
 }
 
-function pauseHtml(): string {
+/**
+ * The wallet that lets this computer pause and resume its agents, as a dapp's wallet connects: Connect
+ * approves it once in the browser, the code shows while it does, and Disconnect lets it go.
+ */
+function walletHtml(): string {
+  if (!state.agents.length && !settings.wallets.length && !state.linking) return "";
   if (state.linking) {
     const code = state.linking.code;
-    return `<div class="linking">
+    return `<section class="card list spaced"><div class="linking">
       <div class="linking-head"><span class="spinner"></span>Approve in your browser</div>
       <div class="code">${esc(code.slice(0, 4))} ${esc(code.slice(4))}</div>
       <div class="actions"><button class="pill" data-action="cancel">Cancel</button><button class="claim" data-action="reopen">Open page</button></div>
-    </div>`;
+    </div></section>`;
   }
-  if (settings.wallets.length) {
-    return `<div class="line"><span>Pause and resume<span class="sub">${esc(settings.wallets.map(short).join(", "))}</span></span><button class="pill danger" data-action="disconnect">Turn off</button></div>`;
-  }
-  return `<div class="line"><span>Pause and resume</span><button class="pill" data-action="connect" title="Allow (L)">Allow</button></div>`;
+  // named for what it does, as Open at login is, so no heading is needed above it
+  const connected = settings.wallets.map((wallet) => settings.ens[wallet] ?? short(wallet)).join(", ");
+  return `<section class="card list spaced"><div class="line"><span>Pause and resume<span class="sub">${esc(connected ? `Connected to ${connected}` : "Connect your agents' wallet")}</span></span>${connected
+    ? `<button class="pill" data-action="disconnect" title="Disconnect">Disconnect</button>`
+    : `<button class="pill" data-action="connect" title="Connect (L)">Connect</button>`}</div></section>`;
 }
 
-/** Settings' line for this computer: its agent and Restart, or setting one up. */
-function thisComputerHtml(): string {
-  const here = state.box?.installed && state.box.state === "running" && state.localToken;
-  return `<section class="card list spaced">${here
-    ? `<div class="line"><span>Agent #${esc(state.localToken!)}<span class="sub">Runs on this computer</span></span><button class="pill" data-action="restart" title="Restart (U)">Restart</button></div>`
-    : `<div class="line"><span>Run an agent here<span class="sub">In its own sealed box, away from your files</span></span><button class="pill" data-action="setup">Set up</button></div>`}</section>`;
+/**
+ * Settings' agents, one row each: its face, its name to change in place, and where it runs. Then setting
+ * one up here, and the way into what shows: the agents above come from it. Restart stays in the agent's
+ * own tray, beside what it fixes.
+ */
+function agentSettingsHtml(): string {
+  const rows = state.agents.map((agent) => {
+    const local = agent.tokenId === state.localToken && state.box?.installed;
+    const face = faceFor(agent.tokenId, "on");
+    // its number shows in its title until it has a name of its own
+    const named = Boolean(labelOf(agent.tokenId));
+    return `<div class="line agent-line" id="named-${esc(agent.tokenId)}">
+      <span class="face">${face ? `<img src="${esc(face)}" alt="" draggable="false">` : `<span class="mask-blank"></span>`}</span>
+      <span class="agent-line-text">
+        <input class="inline-input name-input" data-name="${esc(agent.tokenId)}" value="${esc(settings.names[agent.tokenId] ?? "")}" placeholder="${esc(`Agent #${agent.tokenId}`)}" maxlength="40" spellcheck="false" autocomplete="off" title="Rename" aria-label="${esc(`Name for agent #${agent.tokenId}`)}">
+        <span class="sub">${esc([named ? `#${agent.tokenId}` : "", local ? "On this computer" : "On another computer"].filter(Boolean).join(" · "))}</span>
+      </span>
+    </div>`;
+  }).join("");
+  const setUp = state.box?.installed ? "" : `<div class="line"><span>Run an agent here<span class="sub">In its own sealed box, away from your files</span></span><button class="pill" data-action="setup" title="Set up (S)">Set up</button></div>`;
+  return `<section class="card list">${rows}${setUp}${watchingLineHtml()}</section>`;
+}
+
+/** The Agents card's last line, into Watching: how many wallets and seats show here. */
+function watchingLineHtml(): string {
+  const wallets = watched().length;
+  const seats = settings.seats.length;
+  const count = [wallets ? `${wallets} wallet${wallets === 1 ? "" : "s"}` : "", seats ? `${seats} seat${seats === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ") || "Nothing yet";
+  return `<button class="line opens" data-action="watching" title="Wallets and seats you watch (W)"><span>Watching</span><span class="line-value">${esc(count)}<span class="chev">${CHEVRON}</span></span></button>`;
+}
+
+/**
+ * Everything that shows here, a line each: every wallet, by the ENS name it was added by if any, with how
+ * many agents it holds, and every seat watched by its number. Each that can go has Remove; one that can't
+ * says why. Then the field that adds more.
+ */
+function watchingHtml(): string {
+  const kept = (wallet: string) => (wallet === state.localOwner ? "Holds this computer's agent" : linked(wallet) ? "Pauses and resumes from here" : null);
+  // the ones that stay first, this computer's wallet at the top; the rest in the order they were added
+  const wallets = [...watched()].sort((a, b) => Number(Boolean(kept(b))) - Number(Boolean(kept(a)))).map((wallet) => {
+    const count = state.holdings.get(wallet);
+    const why = kept(wallet);
+    const name = settings.ens[wallet];
+    const about = [name ? short(wallet) : null, count === undefined ? null : `${count} agent${count === 1 ? "" : "s"}`, why].filter(Boolean).join(" · ");
+    return `<div class="line" id="watched-${esc(wallet)}">
+      <span class="watched"><span class="address" title="${esc(wallet)}">${esc(name ?? short(wallet))}</span>${about ? `<span class="sub">${esc(about)}</span>` : ""}</span>
+      ${why ? "" : `<button class="link remove-link" data-remove="${esc(wallet)}" title="Stop watching ${esc(name ?? short(wallet))}">Remove</button>`}
+    </div>`;
+  }).join("");
+  const seats = settings.seats.map((tokenId) => {
+    const holder = seatInfo.get(tokenId)?.owner;
+    return `<div class="line" id="watched-seat-${esc(tokenId)}">
+      <span class="watched"><span>${esc(labelOf(tokenId) || `Agent #${tokenId}`)}</span><span class="sub">${esc([labelOf(tokenId) ? `#${tokenId}` : null, holder ? `Held by ${short(holder)}` : "Watched by its seat number"].filter(Boolean).join(" · "))}</span></span>
+      <button class="link remove-link" data-remove-seat="${esc(tokenId)}" title="Stop watching #${esc(tokenId)}">Remove</button>
+    </div>`;
+  }).join("");
+  return `<header class="settings-head">
+      <button class="back" data-action="settings" title="Back (Esc)">‹ Back</button>
+      <div class="title">Watching</div>
+      <span></span>
+    </header>
+    ${wallets || seats ? `<section class="card list">${wallets}${seats}</section>` : ""}
+    <section class="card list spaced">
+      <form class="line" data-form="watch"><input class="inline-input" data-field="add" placeholder="0x…, name.eth or 14 25 56" spellcheck="false" autocomplete="off" aria-label="Wallets, ENS names or seat numbers to watch (W)"><button class="pill" type="submit" title="Add (Enter)" ${state.resolving ? "disabled" : ""}>${state.resolving ? "Finding…" : "Add"}</button></form>
+    </section>
+    <p class="footnote">Wallets, ENS names or seat numbers, in any mix. Watching needs no signature.</p>
+    ${noteHtml()}`;
 }
 
 function settingsHtml(): string {
@@ -743,27 +965,11 @@ function settingsHtml(): string {
       <div class="title">Settings</div>
       <span></span>
     </header>
-    <div class="group-label">Wallets</div>
-    <section class="card list">
-      ${watched().map((wallet) => {
-        const count = state.holdings.get(wallet);
-        const removable = settings.watching.includes(wallet) && !linked(wallet) && wallet !== state.localOwner;
-        return `<div class="line wallet" id="wallet-${esc(wallet)}">
-          <span class="address" title="${esc(wallet)}">${esc(short(wallet))}</span>
-          <span class="line-value">${count === undefined ? "" : `${count} agent${count === 1 ? "" : "s"}`}${removable ? `<button class="remove" data-remove="${esc(wallet)}" title="Stop watching ${esc(short(wallet))}" aria-label="Stop watching ${esc(short(wallet))}">×</button>` : ""}</span>
-        </div>`;
-      }).join("")}
-      <form class="line" data-form="watch"><input class="inline-input" data-field="add" placeholder="Add a wallet: 0x… or name.eth" spellcheck="false" autocomplete="off" aria-label="Wallet address or ENS name to watch (W)"></form>
-    </section>
-    <section class="card list spaced">${pauseHtml()}</section>
-    ${thisComputerHtml()}
-    ${state.linking || settings.wallets.length ? "" : `<p class="footnote">Sign once in your browser. Watching needs no signature.</p>`}
-    ${state.agents.length ? `<div class="group-label">Names</div>
-    <section class="card list">
-      ${state.agents.map((a) => `<label class="line name-field"><span class="line-label">#${esc(a.tokenId)}</span><input class="inline-input" data-name="${esc(a.tokenId)}" placeholder="${esc(`Agent #${a.tokenId}`)}" value="${esc(settings.names[a.tokenId] ?? "")}" spellcheck="false"></label>`).join("")}
-    </section>` : ""}
+    ${agentSettingsHtml()}
+    ${walletHtml()}
     <section class="card list spaced">
       <label class="line"><span>Open at login</span><button class="switch${state.openAtLogin ? " on" : ""}" role="switch" aria-checked="${state.openAtLogin}" data-action="login"><span></span></button></label>
+      <label class="line"><span>Sounds<span class="sub">When a job is taken or accepted</span></span><button class="switch${settings.sounds ? " on" : ""}" role="switch" aria-checked="${settings.sounds}" data-action="sounds" title="Sounds"><span></span></button></label>
       ${state.update ? `<div class="line"><span>Update to ${esc(state.update)}<span class="sub">It restarts on the new version</span></span><button class="pill" data-action="update" title="Update (⇧U)" ${state.updating ? "disabled" : ""}>${state.updating ? "Updating…" : "Update"}</button></div>` : ""}
       <div class="line"><span>Quit IMD Agents${appVersion ? `<span class="sub">Version ${esc(appVersion)}</span>` : ""}</span><button class="pill" data-action="quit" title="Quit (⌘Q)">Quit</button></div>
     </section>
@@ -806,7 +1012,7 @@ function remember(): void {
 }
 
 /** How deep each view sits, so the next slides in from the side it lives on. */
-const DEPTH = { home: 0, settings: 1 } as const;
+const DEPTH = { home: 0, settings: 1, watching: 2 } as const;
 let shownView = state.view;
 let drawn = false;
 let lastTray = "";
@@ -815,8 +1021,11 @@ let growing: Animation | null = null;
 
 function render(): void {
   const from = drawn ? panel.offsetHeight : 0;
-  const html = state.view === "settings" ? settingsHtml() : homeHtml();
+  // a note belongs to the view it was said on
+  if (state.view !== shownView) state.note = null;
+  const html = state.view === "watching" ? watchingHtml() : state.view === "settings" ? settingsHtml() : homeHtml();
   if (state.view !== shownView) {
+    scroller.scrollTop = 0;
     slide(html, DEPTH[state.view] > DEPTH[shownView]);
     shownView = state.view;
   } else {
@@ -832,6 +1041,7 @@ function render(): void {
     void api.setTrayState(tray).catch(() => undefined);
   }
   resize(from);
+  edge();
 }
 
 /** What changed changes in place: a status line's new words fade up, new rows settle into the list. */
@@ -931,6 +1141,7 @@ function resize(from: number): void {
   anim.onfinish = () => {
     if (growing === anim) growing = null;
     fit(to);
+    edge();
   };
 }
 
@@ -1014,9 +1225,10 @@ function updateNow(): void {
   });
 }
 
-/** W: the field that takes a wallet, on the welcome or in Settings. */
+/** W: the field that takes a wallet, on the welcome or on Watching. */
 function focusWatch(): void {
-  if (state.view === "home" && !app.querySelector("[data-field=add]")) openSettings();
+  // on the welcome the field is there; anywhere else it is on Watching
+  if (!app.querySelector("[data-field=add]")) { state.view = "watching"; render(); }
   app.querySelector<HTMLInputElement>("[data-field=add]")?.focus();
 }
 
@@ -1024,13 +1236,35 @@ function focusWatch(): void {
 function toggleAgent(tokenId: string): void {
   state.openAgent = state.openAgent === tokenId ? null : tokenId;
   render();
+  if (state.openAgent) reveal(document.getElementById(`agent-${tokenId}`), document.getElementById(`tray-${tokenId}`));
 }
 
 function toggleRewards(): void {
   if (!state.rewards.length) return;
   state.rewardsOpen = !state.rewardsOpen;
   render();
+  if (state.rewardsOpen) reveal(app.querySelector(".rewards-head"), app.querySelector(".rewards-head + .tray"));
 }
+
+/**
+ * A tray just opened that runs past the panel's foot scrolls into view once the panel has grown, as far
+ * as it can without its head going out the top.
+ */
+function reveal(head: HTMLElement | null, tray: HTMLElement | null): void {
+  if (!head || !tray) return;
+  void (growing?.finished ?? Promise.resolve()).catch(() => undefined).then(() => {
+    const box = panel.getBoundingClientRect();
+    const below = tray.getBoundingClientRect().bottom - box.bottom + 10;
+    if (below <= 0) return;
+    scroller.scrollBy({ top: Math.min(below, head.getBoundingClientRect().top - box.top - 8), behavior: reduced.matches ? "auto" : "smooth" });
+  });
+}
+
+/** The fade at the panel's foot, while there is more below. */
+function edge(): void {
+  panel.classList.toggle("below", scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 2);
+}
+scroller.addEventListener("scroll", edge, { passive: true });
 
 // an image's error doesn't bubble: caught on its way down, a coin whose art fails redraws in its own colours
 app.addEventListener("error", (event) => {
@@ -1052,6 +1286,7 @@ app.addEventListener("click", (event) => {
   }
   const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action === "settings") return openSettings();
+  if (action === "watching") { state.view = "watching"; return render(); }
   if (action === "home") { state.view = "home"; return render(); }
   if (action === "setup") return void api.openSetup();
   if (action === "update") return updateNow();
@@ -1062,6 +1297,14 @@ app.addEventListener("click", (event) => {
   if (action === "cancel") { state.linking = null; return render(); }
   if (action === "disconnect") return void disconnect();
   if (action === "quit") return void api.quit();
+  if (action === "sounds") {
+    event.preventDefault();
+    settings.sounds = !settings.sounds;
+    save();
+    // turned on, it plays once, so you know what you'll hear
+    if (settings.sounds) void api.playSound("paid").catch(() => undefined);
+    return render();
+  }
   if (action === "login") {
     event.preventDefault();
     const next = !state.openAtLogin;
@@ -1070,6 +1313,10 @@ app.addEventListener("click", (event) => {
   }
   const remove = target.closest<HTMLElement>("[data-remove]")?.dataset.remove;
   if (remove) return unwatch(remove);
+  const removeSeat = target.closest<HTMLElement>("[data-remove-seat]")?.dataset.removeSeat;
+  if (removeSeat) return unwatchSeat(removeSeat);
+  const copy = target.closest<HTMLElement>("[data-copy]")?.dataset.copy;
+  if (copy) return copyFix(copy);
   const wallet = target.closest<HTMLElement>("[data-claim]")?.dataset.claim;
   if (wallet) return void api.openExplorer(`/wallet/${wallet}/earned`);
   const token = target.closest<HTMLElement>("[data-token]")?.dataset.token;
@@ -1118,7 +1365,8 @@ app.addEventListener("focusout", (event) => { if ((event.target as HTMLElement).
 app.addEventListener("submit", (event) => {
   event.preventDefault();
   const input = (event.target as HTMLElement).querySelector<HTMLInputElement>("[data-field=add]");
-  if (input) void watch(input.value);
+  // everything typed was found: the field empties for the next
+  if (input) void watch(input.value).then((all) => { if (all) input.value = ""; });
 });
 
 app.addEventListener("change", (event) => {
@@ -1131,7 +1379,8 @@ app.addEventListener("change", (event) => {
 
 window.addEventListener("keydown", (event) => {
   if ((event.target as HTMLElement).tagName === "INPUT") {
-    if (event.key === "Escape") (event.target as HTMLElement).blur();
+    // a name is kept as it is left: Enter keeps it too
+    if (event.key === "Escape" || (event.key === "Enter" && (event.target as HTMLElement).dataset.name)) (event.target as HTMLElement).blur();
     return;
   }
   if ((event.target as HTMLElement).classList?.contains("spark") && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
@@ -1141,12 +1390,18 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape") {
     if (state.scrub !== null) return scrubTo(null);
-    if (state.view === "settings") { state.view = "home"; render(); } else close();
+    if (state.view === "watching") openSettings();
+    else if (state.view === "settings") { state.view = "home"; render(); } else close();
     return;
   }
   if (event.metaKey || event.ctrlKey) {
     if (event.key === "q") void api.quit();
     if (event.key === ",") openSettings();
+    // with nothing selected, ⌘C takes the open agent's fix, for its machine
+    if (event.key === "c" && !String(getSelection() ?? "")) {
+      const fix = app.querySelector<HTMLElement>("[data-copy]")?.dataset.copy;
+      if (fix) copyFix(fix);
+    }
     return;
   }
   if (event.key === ",") return state.view === "settings" ? (state.view = "home", render()) : openSettings();
@@ -1166,6 +1421,13 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "o") {
     const tokenId = state.openAgent ?? (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-agent]")?.dataset.agent;
     if (tokenId) void api.openExplorer(`/agents/${tokenId}`);
+    return;
+  }
+  if (event.key === "j") {
+    const tokenId = state.openAgent ?? (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-agent]")?.dataset.agent;
+    const agent = state.agents.find((a) => a.tokenId === tokenId);
+    const job = agent ? newestJob(agent) : null;
+    if (job) void api.openExplorer(`/jobs/${job}`);
     return;
   }
   // ⇧1 to ⇧9: that agent's tray

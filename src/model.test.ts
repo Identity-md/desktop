@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { tookJob, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -121,6 +121,40 @@ describe("numbers", () => {
     expect(jailWords(standing({}, { jail: null }))).toBeNull();
     expect(jailWords(standing())).toBeNull();
     expect(jailWords(null)).toBeNull();
+  });
+
+  it("hears a job taken only when one appears on an agent read before", () => {
+    const before = new Map([["12", []], ["22", ["a"]]]);
+    expect(tookJob(null, new Map([["12", ["x"]]]))).toBe(false);
+    expect(tookJob(before, new Map([["12", []], ["22", ["a"]]]))).toBe(false);
+    expect(tookJob(before, new Map([["12", ["b"]], ["22", ["a"]]]))).toBe(true);
+    expect(tookJob(before, new Map([["12", []], ["22", []]]))).toBe(false);
+    expect(tookJob(before, new Map([["12", []], ["56", ["c"]]]))).toBe(false);
+  });
+
+  it("reads wallets, ENS names and seat numbers to watch, however they are apart", () => {
+    const seats = { parts: ["14", "24", "56"], odd: null };
+    expect(watchParts("14,24,56")).toEqual(seats);
+    expect(watchParts("14, 24, 56")).toEqual(seats);
+    expect(watchParts("14 24 56")).toEqual(seats);
+    expect(watchParts(" #14\n24,,56 014 ")).toEqual(seats);
+    expect(watchParts("0xFE35e15bE885750D9b2363cbB6aBDd57AC9C4c40 taylor.eth 12")).toEqual({ parts: ["0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40", "taylor.eth", "12"], odd: null });
+    expect(watchParts("14 25 vitalik").odd).toBe("vitalik");
+    expect(watchParts("0").odd).toBe("0");
+    expect(watchParts("  ").parts).toEqual([]);
+  });
+
+  it("names the command that fixes an agent's sandbox on its machine, from what the fleet's workers said", () => {
+    const fix = (detail: string) => jailFix(detail).command;
+    expect(fix("Claude's sandbox needs socat: run sudo imd sandbox once (it installs bubblewrap and socat), or install them yourself")).toBe("sudo imd sandbox");
+    expect(fix("apparmor_restrict_unprivileged_userns is 1, so Claude's sandbox cannot start. Run sudo imd sandbox once")).toBe("sudo imd sandbox");
+    expect(fix("bubblewrap cannot start here: bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.")).toBe("sudo imd sandbox");
+    expect(fix("bubblewrap cannot start here: bwrap: Creating new namespace failed: Permission denied")).toBe("sudo imd sandbox");
+    expect(fix("Claude 2.1.280 predates the jail's settings; 2.1.299 or newer is needed")).toBe("claude update");
+    expect(fix("bubblewrap cannot start here: bwrap: Can't mount proc on /newroot/proc: Operation not permitted The worker runs in a container that hides /proc; run it on the host or a VM.")).toBeNull();
+    expect(fix("claude's sandbox cannot jail reads on Windows; run the worker under WSL")).toBeNull();
+    expect(fix("codex sandbox did not hold the jail (exit 1): bwrap: execvp codex-linux-sandbox: No such file or directory")).toBe("imd update");
+    expect(jailFix("claude's sandbox cannot jail reads on Windows").why).toMatch(/WSL/);
   });
 
   it("says a failed setup step in plain words, from what Docker said", () => {

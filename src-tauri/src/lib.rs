@@ -1037,27 +1037,41 @@ async fn box_pair_cancel() {
     let _ = tauri::async_runtime::spawn_blocking(|| run_docker(&["rm", "-f", BOX_PAIRING], Duration::from_secs(30))).await;
 }
 
-/// Starts the box exactly as `./box start` does: nothing of this computer mounted, every capability
-/// dropped but the few the firewall needs before it hands over to the worker's own user.
+/// What the box's worker can run on.
+const RUNTIMES: [&str; 4] = ["claude", "codex", "claude,grok", "codex,grok"];
+
+/// Makes the box and starts it, exactly as `./box start` does: nothing of this computer mounted, every
+/// capability dropped but the few the firewall needs before it hands over to the worker's own user.
+fn run_box(runtime: &str) -> Result<(), String> {
+    let _ = run_docker(&["rm", "-f", BOX_NAME], Duration::from_secs(30));
+    let mut args: Vec<String> = ["run", "-d", "--name", BOX_NAME, "--restart", "unless-stopped"].iter().map(|s| s.to_string()).collect();
+    args.extend(box_flags());
+    args.extend([BOX_IMAGE, "imd", "start", "--runtime", runtime, "--auto-update"].iter().map(|s| s.to_string()));
+    match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(120)) {
+        Some((true, _)) => Ok(()),
+        Some((false, why)) => Err(docker_failure(why, "could not start")),
+        None => Err("Docker is not installed".into()),
+    }
+}
+
+/// Whether a box was made with the flags this app gives one, read from `docker inspect` as its security
+/// options and how many paths of /proc it masks: a seccomp profile of its own, and none masked. One made
+/// by an older IMD Agents has neither, and its worker's read jail cannot start.
+fn sealed(inspect: &str) -> bool {
+    let (options, masked) = inspect.trim().rsplit_once(' ').unwrap_or(("", ""));
+    options.contains("seccomp=") && masked == "0"
+}
+
+/// Starts the box, made new each time, so it always has the flags above.
 #[tauri::command]
 async fn box_start(runtime: String) -> Result<(), String> {
-    if !["claude", "codex", "claude,grok", "codex,grok"].contains(&runtime.as_str()) {
+    if !RUNTIMES.contains(&runtime.as_str()) {
         return Err("unknown runtime".into());
     }
     let _busy = Busy::new();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _ = run_docker(&["rm", "-f", BOX_NAME], Duration::from_secs(30));
-        let mut args: Vec<String> = ["run", "-d", "--name", BOX_NAME, "--restart", "unless-stopped"].iter().map(|s| s.to_string()).collect();
-        args.extend(box_flags());
-        args.extend([BOX_IMAGE, "imd", "start", "--runtime", &runtime, "--auto-update"].iter().map(|s| s.to_string()));
-        match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(120)) {
-            Some((true, _)) => Ok(()),
-            Some((false, why)) => Err(docker_failure(why, "could not start")),
-            None => Err("Docker is not installed".into()),
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || run_box(&runtime))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Stops the box: the job it holds goes back to the network, as `./box stop` does.
@@ -1075,14 +1089,29 @@ async fn box_stop() -> Result<(), String> {
 }
 
 /// Restarts this computer's agent: the same box, started again. It runs with `--auto-update`, so a
-/// restart is also how it takes the newest worker.
+/// restart is also how it takes the newest worker. A box made without the sandbox's flags, as an older
+/// IMD Agents made them, is made again with them, so Restart is also what lets its read jail start.
 #[tauri::command]
-async fn box_restart() -> Result<(), String> {
+async fn box_restart(runtime: String) -> Result<(), String> {
+    if !RUNTIMES.contains(&runtime.as_str()) {
+        return Err("unknown runtime".into());
+    }
     let _busy = Busy::new();
-    tauri::async_runtime::spawn_blocking(|| match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
-        Some((true, _)) => Ok(()),
-        Some((false, why)) => Err(why),
-        None => Err("Docker is not installed".into()),
+    tauri::async_runtime::spawn_blocking(move || {
+        let made = run_docker(&["inspect", "--format", "{{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}}", BOX_NAME], Duration::from_secs(10));
+        match made {
+            None => Err("Docker is not installed".into()),
+            Some((true, out)) if sealed(&out) => match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
+                Some((true, _)) => Ok(()),
+                Some((false, why)) => Err(why),
+                None => Err("Docker is not installed".into()),
+            },
+            // made without the sandbox's flags, or gone: the worker stops as a restart stops it, and the box is made again
+            _ => {
+                let _ = run_docker(&["stop", "--time", "30", BOX_NAME], Duration::from_secs(60));
+                run_box(&runtime)
+            }
+        }
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1333,6 +1362,28 @@ fn open_claude_plans(app: tauri::AppHandle) -> Result<(), String> {
     app.opener().open_url("https://claude.com/pricing", None::<&str>).map_err(|e| e.to_string())
 }
 
+/// A short sound for what an agent just did, when Sounds is on: `taken` as it starts a job, `paid` as one
+/// is accepted. The Mac's own sounds, played as Finder plays them; on other systems, none yet.
+#[tauri::command]
+fn play_sound(kind: String) {
+    #[cfg(target_os = "macos")]
+    {
+        let name = match kind.as_str() {
+            "taken" => "Pop",
+            "paid" => "Glass",
+            _ => return,
+        };
+        if let Ok(mut child) = Command::new("/usr/bin/afplay").args(["-v", "0.7", &format!("/System/Library/Sounds/{name}.aiff")]).spawn() {
+            // waited on, so no finished player is left behind
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = kind;
+}
+
 /// imd.fun's page of agent seats: setup's first screen links it, for someone who doesn't hold one yet.
 #[tauri::command]
 fn open_seats(app: tauri::AppHandle) -> Result<(), String> {
@@ -1470,7 +1521,7 @@ pub fn run() {
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
-            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space
+            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound
         ])
         .setup(|app| {
             // A menu bar app: no Dock icon, no app switcher entry.
@@ -1612,6 +1663,15 @@ mod tests {
         assert!(unshare_outright, "unshare is allowed without CAP_SYS_ADMIN");
         assert_eq!(&flags[..2], ["--cap-drop", "ALL"]);
         assert_eq!(flags.last().unwrap(), &format!("{BOX_VOLUME}:/home/imd"));
+    }
+
+    #[test]
+    fn a_box_without_the_sandbox_flags_is_told_apart() {
+        // as `docker inspect` prints them: one made by this app, one by IMD Agents 0.1.0, one with /proc masked
+        assert!(super::sealed(r#"["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0"#));
+        assert!(!super::sealed(r#"["no-new-privileges:true"] 12"#));
+        assert!(!super::sealed(r#"["no-new-privileges:true","seccomp={}"] 12"#));
+        assert!(!super::sealed(""));
     }
 
     #[test]

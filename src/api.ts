@@ -21,6 +21,8 @@ export async function walletSeats(wallet: string): Promise<PairWallet["tokens"]>
 
 export type SeatRecord = {
   owner: string | null;
+  /** Whether a device of the seat is up, as the network last saw it. */
+  online?: boolean;
   accepted: number;
   rejected?: number;
   failed?: number;
@@ -84,7 +86,7 @@ export const boxState = async (): Promise<Box> => {
 };
 export const boxStart = (runtime: string) => invoke<void>("box_start", { runtime });
 export const boxStop = () => invoke<void>("box_stop");
-export const boxRestart = () => invoke<void>("box_restart");
+export const boxRestart = (runtime: string) => invoke<void>("box_restart", { runtime });
 
 /** How far setting this computer's box up has got. */
 export type Setup = { docker: "missing" | "stopped" | "running"; image: boolean; worker: boolean; claude: boolean; device_key: string | null };
@@ -102,6 +104,8 @@ export const fitSetup = (height: number) => invoke<void>("fit_setup", { height }
 export const openSetupHelp = () => invoke<void>("open_setup_help");
 /** imd.fun's page of agent seats, for someone who doesn't hold one yet. */
 export const openSeats = () => invoke<void>("open_seats");
+/** The sound for an agent taking a job, or for one accepted. */
+export const playSound = (kind: "taken" | "paid") => invoke<void>("play_sound", { kind });
 /** Claude's plans: every paid one comes with Claude Code, which the box thinks with. */
 export const openClaudePlans = () => invoke<void>("open_claude_plans");
 /** Bytes free on the disk Docker and the box will use, or null where the app can't tell. */
