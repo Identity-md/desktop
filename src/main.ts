@@ -33,11 +33,14 @@ type Settings = {
   shown: number;
   /** A sound when an agent takes a job, and another when one is accepted. Off until it is turned on. */
   sounds: boolean;
+  /** Light, dark, or the computer's own. */
+  theme: api.Theme;
 };
 
 const STORE = "imd-agents:settings";
 const stored = (() => { try { return JSON.parse(localStorage.getItem(STORE) ?? "{}"); } catch { return {}; } })();
-const settings: Settings = Object.assign({ watching: [], seats: [], wallets: [], relayOrigin: null, names: {}, ens: {}, runtime: "claude", localToken: null, localOwner: null, shown: 0, sounds: false }, stored);
+const settings: Settings = Object.assign({ watching: [], seats: [], wallets: [], relayOrigin: null, names: {}, ens: {}, runtime: "claude", localToken: null, localOwner: null, shown: 0, sounds: false, theme: "system" }, stored);
+if (settings.theme !== "system") void api.setTheme(settings.theme).catch(() => undefined);
 // Watching used to take one wallet.
 if (typeof stored.watch === "string" && !settings.watching.includes(stored.watch)) settings.watching.push(stored.watch);
 delete (settings as { watch?: unknown }).watch;
@@ -107,6 +110,8 @@ let records = new Map<string, AgentRecord>();
 const history = new Map<string, { rows: WorkRow[]; capped: boolean }>();
 let lastRecords = 0;
 let lastHistory = 0;
+/** The device key whose seat was last asked: the same key on the same box is the same seat. */
+let lastDeviceKey: string | null = null;
 let lastRewards = 0;
 let lastSwarm = 0;
 let lastRelease = 0;
@@ -139,7 +144,8 @@ async function refresh(full = false): Promise<void> {
     const releaseRead = Date.now() - lastRelease > 30 * 60_000 ? (lastRelease = Date.now(), api.workerReleases().catch(() => null)) : null;
     const box = await api.boxState().catch(() => null);
     if (box && !(state.box?.state === "starting" || state.box?.state === "stopping") ) state.box = box;
-    if (box?.deviceKey) {
+    if (box?.deviceKey && (full || box.deviceKey !== lastDeviceKey || !state.localToken)) {
+      lastDeviceKey = box.deviceKey;
       const token = await api.deviceSeat(box.deviceKey);
       if (token && token !== state.localToken) { state.localToken = token; state.localOwner = null; settings.localToken = token; save(); }
     }
@@ -186,9 +192,23 @@ async function refresh(full = false): Promise<void> {
 
     // each agent's record, its two weeks for the chart, and the rewards, read side by side
     const loads: Array<Promise<void>> = [];
-    if (full || Date.now() - lastRecords > 60_000) {
+    // two weeks of work per agent, for the sparkline: the past does not change, so every ten minutes. Due
+    // with the record, it is the same read with more rows, so it is read once.
+    const historyDue = full || Date.now() - lastHistory > 10 * 60_000;
+    const historyRead = historyDue ? (lastHistory = Date.now(), Promise.all(seats.map((seat) => api.seatRecord(seat.tokenId, HISTORY_ROWS)))) : null;
+    if (historyRead) {
+      loads.push(historyRead.then((read) => {
+        seats.forEach((seat, i) => {
+          const work = read[i]?.work;
+          if (work) history.set(seat.tokenId, { rows: work.map((row) => ({ submittedAt: row.submittedAt, acceptedAt: row.acceptedAt })), capped: work.length >= HISTORY_ROWS });
+        });
+      }));
+    }
+    // closed, the records only feed the sounds: a minute with them on or the panel open, five otherwise
+    const looking = document.hasFocus();
+    if (full || Date.now() - lastRecords > (looking || settings.sounds ? 60_000 : 300_000)) {
       lastRecords = Date.now();
-      loads.push(Promise.all(seats.map((seat) => api.seatRecord(seat.tokenId))).then((read) => {
+      loads.push((historyRead ?? Promise.all(seats.map((seat) => api.seatRecord(seat.tokenId)))).then((read) => {
         records = new Map(seats.flatMap((seat, i) => {
           const record = read[i];
           if (!record) return records.has(seat.tokenId) ? [[seat.tokenId, records.get(seat.tokenId)!] as const] : [];
@@ -206,17 +226,7 @@ async function refresh(full = false): Promise<void> {
         }));
       }));
     }
-    // two weeks of work per agent, for the sparkline: the past does not change, so every ten minutes
-    if (full || Date.now() - lastHistory > 10 * 60_000) {
-      lastHistory = Date.now();
-      loads.push(Promise.all(seats.map((seat) => api.seatRecord(seat.tokenId, HISTORY_ROWS))).then((read) => {
-        seats.forEach((seat, i) => {
-          const work = read[i]?.work;
-          if (work) history.set(seat.tokenId, { rows: work.map((row) => ({ submittedAt: row.submittedAt, acceptedAt: row.acceptedAt })), capped: work.length >= HISTORY_ROWS });
-        });
-      }));
-    }
-    if (full || Date.now() - lastRewards > 120_000) {
+    if (full || Date.now() - lastRewards > (looking ? 120_000 : 600_000)) {
       lastRewards = Date.now();
       loads.push((async () => {
         const all = await Promise.all(watched().map(async (wallet) => (await api.earnings(wallet)).map((e) => ({ ...e, wallet }))));
@@ -977,11 +987,21 @@ function settingsHtml(): string {
     ${walletHtml()}
     <section class="card list spaced">
       <label class="line"><span>Open at login</span><button class="switch${state.openAtLogin ? " on" : ""}" role="switch" aria-checked="${state.openAtLogin}" data-action="login"><span></span></button></label>
+      <div class="line"><span>Appearance</span><span class="choices" role="radiogroup" title="Appearance (A)">${THEMES.map(([theme, name]) => `<button role="radio" aria-checked="${settings.theme === theme}" class="${settings.theme === theme ? "on" : ""}" data-action="theme" data-theme="${theme}">${name}</button>`).join("")}</span></div>
       <label class="line"><span>Sounds<span class="sub">When a job is taken or accepted</span></span><button class="switch${settings.sounds ? " on" : ""}" role="switch" aria-checked="${settings.sounds}" data-action="sounds" title="Sounds"><span></span></button></label>
       ${state.update ? `<div class="line"><span>Update to ${esc(state.update)}<span class="sub">It restarts on the new version</span></span><button class="pill" data-action="update" title="Update (⇧U)" ${state.updating ? "disabled" : ""}>${state.updating ? "Updating…" : "Update"}</button></div>` : ""}
       <div class="line"><span>Quit IMD Agents${appVersion ? `<span class="sub">Version ${esc(appVersion)}</span>` : ""}</span><button class="pill" data-action="quit" title="Quit (⌘Q)">Quit</button></div>
     </section>
     ${noteHtml()}`;
+}
+
+const THEMES: Array<[api.Theme, string]> = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
+
+function setTheme(theme: api.Theme): void {
+  settings.theme = theme;
+  save();
+  void api.setTheme(theme).catch(() => undefined);
+  render();
 }
 
 const GEAR = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>`;
@@ -1309,6 +1329,7 @@ app.addEventListener("click", (event) => {
   if (action === "cancel") { state.linking = null; return render(); }
   if (action === "disconnect") return void disconnect();
   if (action === "quit") return void api.quit();
+  if (action === "theme") return setTheme(target.closest<HTMLElement>("[data-theme]")!.dataset.theme as api.Theme);
   if (action === "sounds") {
     event.preventDefault();
     settings.sounds = !settings.sounds;
@@ -1425,6 +1446,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "U") return updateNow();
   if (event.key === "s" && !state.box?.installed) return void api.openSetup();
   if (event.key === "r") return void refresh(true);
+  if (event.key === "a" && state.view === "settings") return setTheme(THEMES[(THEMES.findIndex(([t]) => t === settings.theme) + 1) % THEMES.length]![0]);
   if (event.key === "Enter") {
     const row = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>("[data-agent]");
     if (row?.dataset.agent) toggleAgent(row.dataset.agent);

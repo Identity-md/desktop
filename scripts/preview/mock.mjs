@@ -25,6 +25,11 @@ export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
     const hit = window.__fixtures.api[path];
     if (!hit) return { status: 404, body: null };
     const body = structuredClone(hit.body);
+    // two weeks' rows keep only their times: the newest hundred get theirs back, as the plane sends them
+    if (path.includes("?work=500&") && body?.work) {
+      const full = new Map((window.__fixtures.api[path.replace("work=500", "work=100")]?.body?.work ?? []).map((row) => [row.submittedAt, row]));
+      body.work = body.work.map((row) => full.get(row.submittedAt) ?? row);
+    }
     if (scenario.held && path === `/seats/${scenario.held}/standing?queue=0` && body?.standing) { body.standing.pausedByOwnerAt = new Date().toISOString(); body.standing.working = 0; body.standing.running = []; }
     // an agent on an older worker: `outdated: "22"`
     if (scenario.outdated && path === `/seats/${scenario.outdated}/standing?queue=0` && body?.presence) body.presence.daemonVersion = "0.1.0+aca0ff06";

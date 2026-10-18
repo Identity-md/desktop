@@ -44,12 +44,18 @@ fn explorer_base() -> String {
     std::env::var("IMD_EXPLORER").ok().filter(|v| v.starts_with("http")).unwrap_or_else(|| EXPLORER.into())
 }
 
+/// One client for the app's life, so reads reuse their connections instead of shaking hands each time.
 fn http() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .user_agent(concat!("imd-agents/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .expect("http client")
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .user_agent(concat!("imd-agents/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("http client")
+        })
+        .clone()
 }
 
 /// For downloads of hundreds of megabytes: a time limit on connecting, none on the whole transfer.
@@ -57,6 +63,9 @@ fn http_long() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .user_agent(concat!("imd-agents/", env!("CARGO_PKG_VERSION")))
+        // the bytes as sent, so progress counts against the size the server gives
+        .no_gzip()
+        .no_brotli()
         .build()
         .expect("http client")
 }
@@ -437,21 +446,41 @@ struct BoxState {
     device_key: Option<String>,
 }
 
+/// The running box's id and its worker's device key, once read.
+static DEVICE_KEY: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
 #[tauri::command]
 async fn box_state() -> BoxState {
     tauri::async_runtime::spawn_blocking(|| {
         if docker().is_none() {
             return BoxState { state: "no-docker", installed: false, device_key: None };
         }
-        if !engine_listening() || !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
+        if !engine_listening() {
+            return BoxState { state: "docker-down", installed: true, device_key: None };
+        }
+        // The box answering means the engine does: Docker's own check only when there is no box to ask.
+        let inspected = run_docker(&["inspect", "-f", "{{.Id}} {{.State.Running}}", BOX_NAME], Duration::from_secs(10));
+        if !inspected.as_ref().is_some_and(|(ok, _)| *ok) && !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
             return BoxState { state: "docker-down", installed: true, device_key: None };
         }
         let installed = run_docker(&["image", "inspect", "--format", "{{.Id}}", BOX_IMAGE], Duration::from_secs(10)).is_some_and(|(ok, _)| ok);
-        let running = run_docker(&["inspect", "-f", "{{.State.Running}}", BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, out)| ok && out == "true");
+        let (container, running) = match &inspected {
+            Some((true, out)) => out.split_once(' ').map(|(id, up)| (id.to_string(), up == "true")).unwrap_or_default(),
+            _ => (String::new(), false),
+        };
+        // The worker's key is the box's for its life: asked once per box, not on every look.
         let device_key = if running {
-            run_docker(&["exec", "-u", "imd", BOX_NAME, "imd", "whoami"], Duration::from_secs(20))
-                .filter(|(ok, out)| *ok && out.len() == 64 && out.chars().all(|c| c.is_ascii_hexdigit()))
-                .map(|(_, out)| out)
+            let mut known = DEVICE_KEY.lock().unwrap_or_else(|e| e.into_inner());
+            match known.as_ref() {
+                Some((id, key)) if *id == container => Some(key.clone()),
+                _ => {
+                    let key = run_docker(&["exec", "-u", "imd", BOX_NAME, "imd", "whoami"], Duration::from_secs(20))
+                        .filter(|(ok, out)| *ok && out.len() == 64 && out.chars().all(|c| c.is_ascii_hexdigit()))
+                        .map(|(_, out)| out);
+                    *known = key.clone().map(|key| (container, key));
+                    key
+                }
+            }
         } else {
             None
         };
@@ -884,6 +913,8 @@ fn pull_through_engine(socket: &Path, image: &str, tag: &str, total: Option<u64>
 /// Installs the worker and Claude Code into the box's volume, as `./box setup` does before its shell.
 #[tauri::command]
 async fn box_install(app: tauri::AppHandle) -> Result<(), String> {
+    // installing or pairing may give the worker a new key: read it fresh
+    *DEVICE_KEY.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, Read};
@@ -980,6 +1011,8 @@ struct Paired {
 /// handed to the panel as soon as it prints them, then its answer once the wallet has signed.
 #[tauri::command]
 async fn box_pair(app: tauri::AppHandle) -> Result<Paired, String> {
+    // installing or pairing may give the worker a new key: read it fresh
+    *DEVICE_KEY.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::BufRead;
@@ -1363,6 +1396,16 @@ fn open_claude_plans(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// A short sound for what an agent just did, when Sounds is on: `taken` as it starts a job, `paid` as one
+/// Light, dark, or the computer's own: every window of the app, its pages following through their color scheme.
+#[tauri::command]
+fn set_theme(app: tauri::AppHandle, theme: String) {
+    app.set_theme(match theme.as_str() {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    });
+}
+
 /// is accepted. The Mac's own sounds, played as Finder plays them; on other systems, none yet.
 #[tauri::command]
 fn play_sound(kind: String) {
@@ -1569,7 +1612,7 @@ pub fn run() {
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
-            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound
+            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound, set_theme
         ])
         .setup(|app| {
             // A menu bar app: no Dock icon, no app switcher entry.
@@ -1634,6 +1677,18 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// The plane's reads come compressed and reuse one connection. Needs the network.
+    #[test]
+    #[ignore]
+    fn reads_compressed() {
+        tauri::async_runtime::block_on(async {
+            let response = super::http().get(format!("{}/swarm", super::api_base())).send().await.expect("swarm");
+            assert!(response.content_length().is_none(), "body was decoded from a compressed one");
+            let body: serde_json::Value = response.json().await.expect("json");
+            assert!(body.is_object());
+        });
+    }
+
     /// Docker's own app passes the check the installer runs; anything else, such as this app, doesn't.
     #[cfg(target_os = "macos")]
     #[test]

@@ -106,6 +106,9 @@ export const openSetupHelp = () => invoke<void>("open_setup_help");
 export const openSeats = () => invoke<void>("open_seats");
 /** The sound for an agent taking a job, or for one accepted. */
 export const playSound = (kind: "taken" | "paid") => invoke<void>("play_sound", { kind });
+/** The app's look: light, dark, or the computer's own. */
+export const setTheme = (theme: Theme) => invoke<void>("set_theme", { theme });
+export type Theme = "system" | "light" | "dark";
 /** Claude's plans: every paid one comes with Claude Code, which the box thinks with. */
 export const openClaudePlans = () => invoke<void>("open_claude_plans");
 /** Bytes free on the disk Docker and the box will use, or null where the app can't tell. */
