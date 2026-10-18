@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IMD Agents</title>
+  </head>
+  <body>
+    <div id="panel" class="panel"><div id="scroll" class="scroll"><div id="app"></div></div></div>
+    <!-- the panel in the state named by ?state=: the stand-in goes first, then the panel's own script, then the clicks that get there -->
+    <script type="module">
+      import { installMock } from "./mock.mjs";
+      import { panelStates } from "./panel-states.js";
+      const params = new URLSearchParams(location.search);
+      const theme = params.get("theme") === "dark" ? "dark" : "light";
+      const fixtures = await fetch("./fixtures.json").then((r) => r.json());
+      const states = panelStates(fixtures);
+      const state = states.find((s) => s.id === params.get("state")) ?? states[0];
+      installMock({ fixtures, scenario: state.scenario, owner: fixtures.wallet, scheme: theme });
+
+      // the panel sizes its window as the app's does: here the review page sizes the frame
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (cmd, args, options) => {
+        if (cmd === "fit_panel") { parent.postMessage({ fit: args.height }, location.origin); return null; }
+        return invoke(cmd, args, options);
+      };
+      // it stays open while the review page has the focus, as a menu would not
+      window.addEventListener("blur", (event) => event.stopImmediatePropagation(), true);
+      document.addEventListener("pointerdown", (event) => { if (!document.getElementById("panel").contains(event.target)) event.stopImmediatePropagation(); }, true);
+
+      // the panel follows the Mac's appearance; here it takes the one the review page shows, again whenever Vite swaps the styles
+      const force = () => {
+        document.documentElement.style.colorScheme = theme;
+        for (const sheet of document.styleSheets) {
+          let rules;
+          try { rules = sheet.cssRules; } catch { continue; }
+          for (const rule of rules) {
+            if (rule instanceof CSSMediaRule && rule.conditionText.includes("prefers-color-scheme")) rule.media.mediaText = rule.conditionText.includes("dark") === (theme === "dark") ? "all" : "not all";
+          }
+        }
+      };
+      new MutationObserver(force).observe(document.head, { childList: true, subtree: true, characterData: true });
+
+      await import("/src/main.ts");
+      force();
+      // then what someone would press to get there
+      const until = (selector) => new Promise((done) => {
+        const look = () => { const el = document.querySelector(selector); if (el) done(el); else setTimeout(look, 50); };
+        look();
+      });
+      await new Promise((done) => setTimeout(done, 900));
+      for (const selector of state.scenario.clicks ?? []) {
+        (await until(selector)).click();
+        await new Promise((done) => setTimeout(done, 700));
+      }
+    </script>
+  </body>
+</html>

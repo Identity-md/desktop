@@ -6,7 +6,8 @@ export async function mockApp(context, { fixtures, scenario, owner, scheme, zoom
 
 /** The stand-in itself, run before the page's own scripts: by Playwright through mockApp, or by a page that imports it. */
 export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
-  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: {}, runtime: "claude", localToken: scenario.box === "no-docker" ? null : "12" }));
+  // seats watched by number, names given, and what the last run learned: `seats: ["22"]`, `names: { "22": "Mac mini" }`, `localOwner`, `shown`
+  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, seats: scenario.seats ?? [], wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: scenario.names ?? {}, runtime: "claude", localToken: scenario.box === "no-docker" ? null : "12", localOwner: scenario.localOwner ?? null, shown: scenario.shown ?? 0 }));
   // what the panel showed when it last closed: `seen: { today, accepted, usd }`
   if (scenario.seen) localStorage.setItem("imd-agents:seen", JSON.stringify(scenario.seen)); else localStorage.removeItem("imd-agents:seen");
   // a desktop behind the panel, so its shadow shows
@@ -26,7 +27,7 @@ export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
     // an agent on an older worker: `outdated: "22"`
     if (scenario.outdated && path === `/seats/${scenario.outdated}/standing?queue=0` && body?.presence) body.presence.daemonVersion = "0.1.0+aca0ff06";
     // agents whose read jail does not hold: `jailed: ["12"]`
-    if (scenario.jailed && body?.presence && scenario.jailed.some((t) => path === `/seats/${t}/standing?queue=0`)) body.presence.jail = { ok: false, detail: "Claude's sandbox needs bwrap and socat: run sudo imd sandbox once (it installs bubblewrap and socat), or install them yourself" };
+    if (scenario.jailed && body?.presence && scenario.jailed.some((t) => path === `/seats/${t}/standing?queue=0`)) body.presence.jail = { ok: false, detail: scenario.jailDetail ?? "Claude's sandbox needs bwrap and socat: run sudo imd sandbox once (it installs bubblewrap and socat), or install them yourself" };
     // an agent at work: `working: { tokenId, nodeKey, objective, minutes }`
     const w = window.__working ?? scenario.working;
     if (w && path === `/seats/${w.tokenId}/standing?queue=0` && body?.standing) {
@@ -45,6 +46,8 @@ export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
     invoke: async (cmd, args) => {
       // a step that fails as Docker would: `fail: { box_pull: "what Docker said" }`
       if (scenario.fail?.[cmd]) throw scenario.fail[cmd];
+      // a slow first read, to see what the panel shows while it is out: `slow: 60000`
+      if (scenario.slow && (cmd === "box_state" || cmd === "api_get")) await new Promise((done) => setTimeout(done, scenario.slow));
       switch (cmd) {
         case "api_get": return answer(args.path);
         case "agent_svg": return fixtures.svg[args.tokenId] ?? null;

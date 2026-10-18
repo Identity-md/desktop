@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Panel review</title>
+    <link rel="icon" href="/app-icon.png" />
+    <script>
+      // the theme before first paint: the one last picked here, else the Mac's
+      (() => {
+        let picked = null;
+        try { picked = localStorage.getItem("panel-review:theme"); } catch {}
+        document.documentElement.dataset.theme = picked ?? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      })();
+    </script>
+    <style>
+      :root {
+        --ground: #ececf0;
+        --ink: #1d1d1f;
+        --ink-2: #5c5c62;
+        --hover: rgba(0, 0, 0, 0.05);
+        --pick: #1d1d1f;
+        --pick-ink: #fff;
+        --bar: #e8e8ea;
+        --bar-ink: #4b4b50;
+        --zoom: #cdcdd1;
+        --frame: 0 0 0 0.5px rgba(0, 0, 0, 0.2), 0 24px 48px -16px rgba(30, 30, 40, 0.35);
+        color-scheme: light;
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      :root[data-theme="dark"] {
+        --ground: #0e0e10;
+        --ink: #f5f5f7;
+        --ink-2: #a1a1a6;
+        --hover: rgba(255, 255, 255, 0.07);
+        --pick: #f5f5f7;
+        --pick-ink: #1d1d1f;
+        --bar: #2b2b2e;
+        --bar-ink: #d6d6da;
+        --zoom: #4a4a4f;
+        --frame: 0 0 0 0.5px rgba(255, 255, 255, 0.16), 0 24px 48px -16px rgba(0, 0, 0, 0.8);
+        color-scheme: dark;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; color: var(--ink); background: var(--ground); }
+      button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+      .review { display: grid; grid-template-columns: 220px 404px; gap: 56px; justify-content: center; padding: 40px 16px 64px; }
+
+      .states h1 { margin: 0 10px 4px; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+      .lede { margin: 0 10px 8px; color: var(--ink-2); text-wrap: pretty; }
+      .group { margin: 16px 10px 4px; font-size: 12px; color: var(--ink-2); }
+      .state { display: block; width: 100%; padding: 5px 10px; border-radius: 7px; text-align: left; }
+      .state[aria-current="true"] { color: var(--pick-ink); background: var(--pick); }
+      @media (hover: hover) and (pointer: fine) { .state:not([aria-current="true"]):hover { background: var(--hover); } }
+
+      .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; min-height: 60px; margin-bottom: 20px; }
+      .head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+      .count { margin-left: 6px; font-weight: 400; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+      .about { margin: 4px 0 0; color: var(--ink-2); text-wrap: pretty; }
+      .controls { display: flex; flex: none; margin: -6px -6px 0 0; }
+      .controls button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--ink-2); transition: color 0.15s ease; }
+      @media (hover: hover) and (pointer: fine) { .controls button:hover { color: var(--ink); } }
+      .controls button:active { transform: scale(0.94); }
+      .controls button:disabled { opacity: 0.35; }
+
+      .window { width: 404px; border-radius: 14px; overflow: hidden; }
+      iframe { display: block; width: 404px; height: 600px; border: 0; }
+      .size { margin: 12px 0 0; font-size: 12px; text-align: center; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+      @media (max-width: 800px) {
+        .review { grid-template-columns: minmax(0, 404px); gap: 32px; }
+        .states { order: 2; }
+        .window, iframe { width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="review">
+      <aside class="states">
+        <h1>Panel</h1>
+        <p class="lede">The real panel with your wallet's public data, the app stood in for. Click, type and rename in it; copy and style changes show as they're saved.</p>
+        <nav id="list" aria-label="States"></nav>
+      </aside>
+      <main>
+        <div class="head">
+          <div>
+            <h2><span id="name"></span><span class="count" id="count"></span></h2>
+            <p class="about" id="about"></p>
+          </div>
+          <div class="controls">
+            <button id="prev" title="Previous (←)" aria-label="Previous"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg></button>
+            <button id="next" title="Next (→)" aria-label="Next"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg></button>
+            <button id="replay" title="Play again (R)" aria-label="Play again"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8a5 5 0 1 0 1.6-3.7"/><path d="M3 2.5v2.6h2.6"/></svg></button>
+            <button id="theme" aria-label="Switch light and dark"></button>
+          </div>
+        </div>
+        <div class="window"><iframe id="frame" title="The panel"></iframe></div>
+        <p class="size" id="size">404 × 600</p>
+      </main>
+    </div>
+    <script type="module">
+      import { panelStates } from "./panel-states.js";
+      const STATES = panelStates(await fetch("./fixtures.json").then((r) => r.json()));
+
+      const $ = (id) => document.getElementById(id);
+      const frame = $("frame");
+      const SUN = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg>`;
+      const MOON = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1Z"/></svg>`;
+
+      // the list: each state under the step it belongs to
+      let group = null;
+      $("list").innerHTML = STATES.map((s, i) => {
+        const head = s.group !== group ? `<div class="group">${s.group}</div>` : "";
+        group = s.group;
+        return `${head}<button class="state" data-i="${i}">${s.name}</button>`;
+      }).join("");
+      const rows = [...document.querySelectorAll(".state")];
+
+      let index = Math.max(0, STATES.findIndex((s) => s.id === location.hash.slice(1)));
+      const theme = () => document.documentElement.dataset.theme;
+
+      function show(i) {
+        index = Math.min(STATES.length - 1, Math.max(0, i));
+        const s = STATES[index];
+        history.replaceState(null, "", `#${s.id}`);
+        rows.forEach((row, j) => row.setAttribute("aria-current", String(j === index)));
+        $("name").textContent = s.group === s.name || s.group === "Panel" ? s.name : `${s.group}: ${s.name}`;
+        $("count").textContent = `${index + 1} of ${STATES.length}`;
+        $("about").textContent = s.about;
+        $("prev").disabled = index === 0;
+        $("next").disabled = index === STATES.length - 1;
+        // a fresh page each time, so each state plays from its start
+        frame.src = `panel-state.html?state=${s.id}&theme=${theme()}&at=${Date.now()}`;
+      }
+
+      function flip() {
+        const next = theme() === "dark" ? "light" : "dark";
+        document.documentElement.dataset.theme = next;
+        try { localStorage.setItem("panel-review:theme", next); } catch {}
+        drawTheme();
+        show(index);
+      }
+      const drawTheme = () => {
+        const button = $("theme");
+        button.innerHTML = theme() === "dark" ? SUN : MOON;
+        button.title = `${theme() === "dark" ? "Light" : "Dark"} (T)`;
+      };
+
+      // the window fits its page, as the app's does
+      window.addEventListener("message", (event) => {
+        if (event.origin !== location.origin || !event.data?.fit) return;
+        frame.style.height = `${event.data.fit}px`;
+        $("size").textContent = `404 × ${event.data.fit}`;
+      });
+
+      function key(event) {
+        // typing in the panel, a name or a wallet, is the panel's
+        if (event.metaKey || event.ctrlKey || event.altKey || event.target.closest?.("input, textarea")) return;
+        if (event.key === "ArrowLeft" || event.key === "ArrowUp") { event.preventDefault(); show(index - 1); }
+        else if (event.key === "ArrowRight" || event.key === "ArrowDown") { event.preventDefault(); show(index + 1); }
+        else if (event.key === "r") show(index);
+        else if (event.key === "t") flip();
+      }
+      window.addEventListener("keydown", key);
+      // a link to a state, or back and forward, shows it
+      window.addEventListener("hashchange", () => {
+        const i = STATES.findIndex((s) => s.id === location.hash.slice(1));
+        if (i >= 0 && i !== index) show(i);
+      });
+      // the same keys work with the panel focused, after a click inside it
+      frame.addEventListener("load", () => frame.contentWindow.addEventListener("keydown", key));
+
+      $("list").addEventListener("click", (event) => {
+        const row = event.target.closest(".state");
+        if (row) show(Number(row.dataset.i));
+      });
+      $("prev").addEventListener("click", () => show(index - 1));
+      $("next").addEventListener("click", () => show(index + 1));
+      $("replay").addEventListener("click", () => show(index));
+      $("theme").addEventListener("click", flip);
+      drawTheme();
+      show(index);
+    </script>
+  </body>
+</html>

@@ -3,37 +3,12 @@
 import { readFileSync, mkdirSync } from "node:fs";
 import { chromium } from "playwright-core";
 import { mockApp } from "./mock.mjs";
+import { panelStates } from "./panel-states.js";
 const fixtures = JSON.parse(readFileSync(new URL("./fixtures.json", import.meta.url), "utf8"));
 const out = new URL("./shots/", import.meta.url).pathname;
 mkdirSync(out, { recursive: true });
 const owner = fixtures.wallet;
-const other = fixtures.wallets?.[1] ?? null;
-
-// `linked` may pause and resume; `watching` only shows
-const scenarios = {
-  connected: { box: "running", linked: [owner], watching: [] },
-  watching: { box: "running", linked: [], watching: [owner] },
-  rewards: { box: "running", linked: [], watching: [owner], clicks: ["[data-action=rewards]"] },
-  agent: { box: "running", linked: [owner], watching: [], clicks: ["#agent-22 .lines"] },
-  outdated: { box: "running", linked: [owner], watching: [], outdated: "22", clicks: ["#agent-22 .lines"] },
-  restart: { box: "running", linked: [owner], watching: [], clicks: ["#agent-12 .lines"] },
-  jailed: { box: "running", linked: [owner], watching: [], jailed: ["12", "22"], clicks: ["#agent-12 .lines"] },
-  "jailed-other": { box: "running", linked: [owner], watching: [], jailed: ["12", "22"], clicks: ["#agent-22 .lines"] },
-  held: { box: "running", linked: [owner], watching: [], held: "22" },
-  welcome: { box: "no-docker", linked: [], watching: [] },
-  "setup-docker": { box: "no-docker", linked: [], watching: [], setup: { docker: "missing", image: false, worker: false, claude: false, device_key: null }, clicks: ["[data-action=setup]"] },
-  "setup-docker-wait": { box: "no-docker", linked: [], watching: [], setup: { docker: "missing", image: false, worker: false, claude: false, device_key: null }, clicks: ["[data-action=setup]", "[data-action=step]"] },
-  "setup-docker-open": { box: "no-docker", linked: [], watching: [], setup: { docker: "stopped", image: false, worker: false, claude: false, device_key: null }, clicks: ["[data-action=setup]", "[data-action=step]"] },
-  "setup-error": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: false, worker: false, claude: false, device_key: null }, fail: { box_pull: 'Error response from daemon: Head "https://ghcr.io/v2/identity-md/worker-box/manifests/latest": denied' }, clicks: ["[data-action=setup]", "[data-action=step]"] },
-  "setup-signin": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: true, worker: true, claude: false, device_key: "e000000000000000000000000000000000000000000000000000000000000000" }, clicks: ["[data-action=setup]"] },
-  "setup-pair": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: true, worker: true, claude: true, device_key: "e000000000000000000000000000000000000000000000000000000000000000" }, clicks: ["[data-action=setup]", "[data-action=step]"] },
-  "setup-start": { box: "no-docker", linked: [], watching: [], setup: { docker: "running", image: true, worker: true, claude: true, device_key: "d5e40d01".padEnd(64, "0") }, clicks: ["[data-action=setup]"] },
-  linking: { box: "running", linked: [], watching: [owner], clicks: ["[data-action=settings]", "[data-action=connect]"] },
-  settings: { box: "running", linked: [owner], watching: other ? [other] : [], clicks: ["[data-action=settings]"] },
-  "settings-update": { box: "running", linked: [owner], watching: [], update: "0.1.4", clicks: ["[data-action=settings]"] },
-  "settings-watching": { box: "running", linked: [], watching: [owner], clicks: ["[data-action=settings]"] },
-  off: { box: "stopped", linked: [owner], watching: [] },
-};
+const scenarios = Object.fromEntries(panelStates(fixtures).map((state) => [state.id, state.scenario]));
 const only = process.argv[2] ? new Set(process.argv[2].split(",")) : null;
 
 const browser = await chromium.launch({ channel: "chrome", headless: true });

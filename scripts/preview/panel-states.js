@@ -1,0 +1,34 @@
+// Every state of the panel worth seeing, for capture.mjs to shoot and panel-review.html to page through. Each
+// is a scenario for the stand-in (mock.mjs) with the real public data in fixtures.json, and the clicks that
+// get there. `linked` wallets may pause and resume; `watching` ones only show.
+
+/** The states, from the wallet the fixtures were read for and a second one it watches. */
+export function panelStates(fixtures) {
+  const owner = fixtures.wallet;
+  const other = fixtures.wallets?.[1] ?? null;
+  const tray = (tokenId) => [`#agent-${tokenId} .lines`];
+  const settings = ["[data-action=settings]"];
+  return [
+    { id: "connected", group: "Panel", name: "Your agents", about: "This computer's agent first, then the rest its wallet holds. Each row opens its tray, which holds its switch.", scenario: { box: "running", linked: [owner], watching: [] } },
+    { id: "opening", group: "Panel", name: "Opening", about: "The first read still out. The rows hold their places, as many as showed last time: never the welcome.", scenario: { box: "running", linked: [], watching: [], localOwner: owner, shown: 2, slow: 600_000 } },
+    { id: "watching", group: "Panel", name: "Watching only", about: "A wallet watched by its address: its agents show, with no switches.", scenario: { box: "running", linked: [], watching: [owner] } },
+    { id: "working", group: "Panel", name: "At work", about: "An agent on a job: its row says what and for how long. In its tray, the job opens its page.", scenario: { box: "running", linked: [owner], watching: [], working: { tokenId: "22", nodeKey: "research_report", objective: "Map every launchpad on Base by volume this month", minutes: 12 }, clicks: tray("22") } },
+    { id: "rewards", group: "Panel", name: "Rewards open", about: "The newest coins ready to claim, each opening its token on the explorer.", scenario: { box: "running", linked: [], watching: [owner], clicks: ["[data-action=rewards]"] } },
+    { id: "held", group: "Panel", name: "Paused by its holder", about: "An agent its wallet paused: it takes no work until resumed.", scenario: { box: "running", linked: [owner], watching: [], held: "22" } },
+    { id: "off", group: "Panel", name: "This computer's agent off", about: "The box stopped: its row says so, and the switch in its tray (or 1) turns it back on.", scenario: { box: "stopped", linked: [owner], watching: [] } },
+    { id: "agent", group: "An agent", name: "What it did lately", about: "Its tray: Take jobs, the switch that pauses it through the connected wallet once its current job is done; what it's on now; its last three jobs, each opening its page (J the newest); how its work is judged.", scenario: { box: "running", linked: [owner], watching: [], clicks: tray("22") } },
+    { id: "restart", group: "An agent", name: "This computer's", about: "Take jobs: the switch that starts and stops its box on this computer. Restart shows when something needs it, and U does it any time.", scenario: { box: "running", linked: [owner], watching: [], clicks: tray("12") } },
+    { id: "outdated", group: "An agent", name: "On an older worker", about: "An agent behind the current worker release, and how it catches up.", scenario: { box: "running", linked: [owner], watching: [], outdated: "22", clicks: tray("22") } },
+    { id: "jailed", group: "An agent", name: "Fewer jobs: this computer", about: "This computer's box started without its sandbox, as an older IMD Agents started it: Restart fixes it.", scenario: { box: "running", linked: [owner], watching: [], jailed: ["12", "22"], jailDetail: "bubblewrap cannot start here: bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.", clicks: tray("12") } },
+    { id: "jailed-other", group: "An agent", name: "Fewer jobs: tools missing", about: "Another machine is missing bubblewrap and socat: the one command that fixes it, to copy (⌘C).", scenario: { box: "running", linked: [owner], watching: [], jailed: ["12", "22"], clicks: tray("22") } },
+    { id: "jailed-kernel", group: "An agent", name: "Fewer jobs: kernel blocks it", about: "Another machine's kernel restricts user namespaces, as Ubuntu 24.04's does: the same command fixes it.", scenario: { box: "running", linked: [owner], watching: [], jailed: ["22"], jailDetail: "apparmor_restrict_unprivileged_userns is 1, so Claude's sandbox cannot start. Run sudo imd sandbox once", clicks: tray("22") } },
+    { id: "settings", group: "Settings", name: "Settings", about: "The agents, one row each: its face, its name to rename in place, where it runs. The last row opens what's watched. Then the wallet that pauses and resumes them, then the app.", scenario: { box: "running", linked: [owner], watching: other ? [other] : [], clicks: settings } },
+    { id: "settings-named", group: "Settings", name: "An agent named", about: "A name of its own: its number moves under it. Click a name to change it, Enter keeps it.", scenario: { box: "running", linked: [owner], watching: [], names: { 22: "Mac mini" }, clicks: settings } },
+    { id: "watching-screen", group: "Settings", name: "Watching", about: "Every wallet and seat that shows here, a line each, with Remove; this computer's wallet stays, and says why. Add takes wallets, ENS names and seat numbers. Type 22: its wallet already shows it.", scenario: { box: "running", linked: [owner], watching: other ? [other] : [], clicks: [...settings, "[data-action=watching]"] } },
+    { id: "settings-seat", group: "Settings", name: "A seat watched alone", about: "An agent watched by its seat number, its wallet not watched: a line of its own, with Remove. Add its wallet and the seat's line goes, shown through the wallet.", scenario: { box: "no-docker", linked: [], watching: other ? [other] : [], seats: ["22"], clicks: [...settings, "[data-action=watching]"] } },
+    { id: "settings-watching", group: "Settings", name: "Wallet not connected", about: "Watching a wallet only shows its agents. Connect it, approved once in the browser, and its agents pause and resume from here.", scenario: { box: "running", linked: [], watching: [owner], clicks: settings } },
+    { id: "linking", group: "Settings", name: "Connecting the wallet", about: "The code, while the wallet approves in the browser.", scenario: { box: "running", linked: [], watching: [owner], clicks: [...settings, "[data-action=connect]"] } },
+    { id: "settings-update", group: "Settings", name: "An update ready", about: "A newer IMD Agents: Update installs it and restarts.", scenario: { box: "running", linked: [owner], watching: [], update: "0.1.11", clicks: settings } },
+    { id: "welcome", group: "Welcome", name: "Nothing yet", about: "The two ways in: watch by wallet, ENS name or seat numbers (try 12 22), or run an agent here.", scenario: { box: "no-docker", linked: [], watching: [] } },
+  ];
+}
