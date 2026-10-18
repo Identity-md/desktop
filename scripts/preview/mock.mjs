@@ -17,6 +17,8 @@ export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
     if (zoom !== 1) Object.assign(document.body.style, { transform: `scale(${zoom})`, transformOrigin: "0 0" });
   });
   window.__fixtures = fixtures;
+  // the job lands 2.5 s in, and the page reads again as R does
+  if (scenario.lands) setTimeout(() => { window.__landed = true; window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" })); }, 2500);
   const deviceKey = "d5e40d01".padEnd(64, "0");
   const answer = (path) => {
     if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: "active", tokenId: "12" } } };
@@ -34,7 +36,11 @@ export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
       body.standing.working = 1;
       body.standing.running = [{ jobId: "film-job", objective: w.objective, nodeKey: w.nodeKey, since: new Date(Date.now() - w.minutes * 60_000).toISOString() }];
     }
-    if (scenario.box !== "running" && scenario.box !== "stopped" && path.startsWith("/pair/wallet/")) return { status: 200, body: { tokens: [] } };
+    // a job accepted a moment after opening: `lands: { tokenId: "22", by: 1 }`, counted once the page asks again
+    if (window.__landed && path === `/seats/${scenario.lands.tokenId}?work=100&reviews=0&collaborators=0` && body) body.accepted = (body.accepted ?? 0) + (scenario.lands.by ?? 1);
+    // without a box, a wallet has seats only when it is watched or linked: the welcome stays empty
+    const asked = [...(scenario.watching ?? []), ...(scenario.linked ?? [])].map((w) => `/pair/wallet/${w}`);
+    if (scenario.box !== "running" && scenario.box !== "stopped" && path.startsWith("/pair/wallet/") && !asked.includes(path)) return { status: 200, body: { tokens: [] } };
     return { status: hit.status, body };
   };
   const box = { state: scenario.box, installed: scenario.box !== "no-docker", device_key: scenario.box === "running" ? deviceKey : null };

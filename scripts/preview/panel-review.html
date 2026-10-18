@@ -157,6 +157,8 @@
       function key(event) {
         // typing in the panel, a name or a wallet, is the panel's
         if (event.metaKey || event.ctrlKey || event.altKey || event.target.closest?.("input, textarea")) return;
+        // a key a state sends the panel itself, as the landed job's R, is the panel's
+        if (!event.isTrusted) return;
         if (event.key === "ArrowLeft" || event.key === "ArrowUp") { event.preventDefault(); show(index - 1); }
         else if (event.key === "ArrowRight" || event.key === "ArrowDown") { event.preventDefault(); show(index + 1); }
         else if (event.key === "r") show(index);

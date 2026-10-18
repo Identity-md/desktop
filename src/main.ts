@@ -130,6 +130,8 @@ async function refresh(full = false): Promise<void> {
   if (reading || Date.now() < coolUntil) return;
   reading = true;
   let took = false;
+  // the numbers as they stand, for a job that lands to fly into
+  const before = totals();
   try {
     // the swarm and the worker's releases wait on nothing here, so they are asked beside the rest
     const swarmRead = full || (document.hasFocus() && Date.now() - lastSwarm > 45_000) ? (lastSwarm = Date.now(), api.swarm().catch(() => null)) : null;
@@ -246,11 +248,17 @@ async function refresh(full = false): Promise<void> {
   } finally {
     reading = false;
   }
+  const landed = gains.splice(0);
+  const flying = landed.length > 0 && !document.hidden && !closing && state.view === "home" && !reduced.matches;
+  // the counts stay where they stood until the last +1 lands in them, and roll then
+  if (flying && before) {
+    landing = before;
+    setTimeout(() => { landing = null; render(); }, LANDS + (landed.length - 1) * 260);
+  }
   render();
   const local = state.agents.find((a) => a.tokenId === state.localToken);
   if (state.restartWhenIdle && local && phaseFor(local).kind !== "working") void restartLocal();
-  const landed = gains.splice(0);
-  if (!document.hidden && !closing && state.view === "home") landed.forEach((gain, i) => setTimeout(() => fly(gain.tokenId, gain.by), i * 260));
+  if (flying) landed.forEach((gain, i) => setTimeout(() => fly(gain.tokenId, gain.by), i * 260));
   // heard whether or not the panel is open: work accepted over work taken, once a read
   if (settings.sounds && (landed.length || took)) void api.playSound(landed.length ? "paid" : "taken").catch(() => undefined);
   if (again) { again = false; void refresh(true); }
@@ -688,7 +696,7 @@ function workHtml(): string {
   const rewards = state.rewards.length ? rewardsHtml() : "";
   if (!known.length) return rewards ? `<section class="card">${rewards}</section>` : "";
   const now = totals()!;
-  const shown = revealing && openedFrom ? openedFrom : now;
+  const shown = revealing && openedFrom ? openedFrom : landing ?? now;
   const gain = openedFrom && !revealing ? now.accepted - openedFrom.accepted : 0;
   const since = upSince(state.agents, state.agents.map(phaseFor));
   const days = workDays();
@@ -991,6 +999,10 @@ let seen: Totals | null = (() => { try { return JSON.parse(localStorage.getItem(
 let openedFrom: Totals | null = null;
 /** The first moment of an opening, drawn at the old numbers so the new ones can roll in. */
 let revealing = false;
+/** The numbers before a job landed, held while its +1 is on its way to them. */
+let landing: Totals | null = null;
+/** How long a +1 takes from the face that did the job to the count. */
+const LANDS = 820;
 
 function totals(): Totals | null {
   const known = state.agents.filter((a) => a.accepted !== null);
@@ -1105,7 +1117,7 @@ function fly(tokenId: string, by: number): void {
   });
   chip.animate(frames, { duration: 900, easing: "cubic-bezier(0.35, 0.1, 0.25, 1)" }).onfinish = () => chip.remove();
   mask.animate([{ transform: "none" }, { transform: "translateY(-5px) scale(1.06)" }, { transform: "none" }], { duration: 420, easing: "cubic-bezier(0.34, 1.56, 0.64, 1)" });
-  count.animate([{ transform: "none" }, { transform: "scale(1.12)" }, { transform: "none" }], { duration: 380, delay: 820, easing: "cubic-bezier(0.34, 1.56, 0.64, 1)" });
+  count.animate([{ transform: "none" }, { transform: "scale(1.12)" }, { transform: "none" }], { duration: 380, delay: LANDS, easing: "cubic-bezier(0.34, 1.56, 0.64, 1)" });
 }
 
 /** Settings and back: the next view slides in from the side it lives on while the last plays out. */
