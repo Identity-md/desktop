@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Run an IMD Agent</title>
+  </head>
+  <body class="setup-window">
+    <main id="setup" class="setup-page"></main>
+    <!-- the setup page in the state named by ?state=: the stand-in goes first, then the page's own script -->
+    <script type="module">
+      import { stage } from "./setup-states.js";
+      const params = new URLSearchParams(location.search);
+      stage(params.get("state"), params.get("theme"));
+    </script>
+    <script type="module" src="/src/setup.ts"></script>
+  </body>
+</html>
