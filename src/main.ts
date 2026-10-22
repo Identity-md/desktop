@@ -1,9 +1,10 @@
 import "./style.css";
 import { listen } from "@tauri-apps/api/event";
-import { disable as autostartOff, enable as autostartOn, isEnabled as autostartIsOn } from "@tauri-apps/plugin-autostart";
+import { isEnabled as autostartIsOn } from "@tauri-apps/plugin-autostart";
 import morphdom from "morphdom";
 import * as api from "./api";
 import { faceFor, loadFace } from "./masks";
+import { ctrl, shift } from "./platform";
 import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
 
 // ---------------------------------------------------------------------------------------------
@@ -590,7 +591,7 @@ function agentsHtml(): string {
     const status = state.sending.has(agent.tokenId)
       ? (agent.standing?.standing.pausedByOwnerAt ? "Pausing…" : "Resuming…")
       : phase.kind === "ready" ? lastJob(agent) : statusLine(phase, agent);
-    return `<div class="row${open ? " open" : ""}" id="agent-${esc(agent.tokenId)}" data-agent="${esc(agent.tokenId)}" tabindex="0" aria-expanded="${open}" title="${open ? "Fold" : `What ${esc(nameOf(agent.tokenId))} is doing`}${i < 9 ? ` (⇧${i + 1})` : ""}">
+    return `<div class="row${open ? " open" : ""}" id="agent-${esc(agent.tokenId)}" data-agent="${esc(agent.tokenId)}" tabindex="0" aria-expanded="${open}" title="${open ? "Fold" : `What ${esc(nameOf(agent.tokenId))} is doing`}${i < 9 ? ` (${shift(String(i + 1))})` : ""}">
       ${maskHtml(agent, phase)}
       <span class="lines">
         <span class="name"><b>${esc(label || `Agent #${agent.tokenId}`)}</b>${label ? `<span class="label">#${esc(agent.tokenId)}</span>` : ""}${outdated(agent) ? `<span class="tag warn" title="${esc(`Runs worker ${agent.standing?.presence?.daemonVersion ?? ""}; the newest is ${state.release?.newest ?? ""}`)}">Outdated</span>` : ""}${jailWords(agent.standing) ? `<span class="tag warn" title="No oracle, research or contract jobs">Fewer jobs</span>` : ""}</span>
@@ -679,7 +680,7 @@ function jailFixHtml(detail: string, local: boolean): string {
   if (!fix.command) return `<p class="care-fix">${esc(fix.why)}</p>`;
   const copied = state.copied === fix.command;
   return `<p class="care-fix">${esc(fix.why)} Run this there, then restart its worker:</p>
-    <div class="command"><code>${esc(fix.command)}</code><button class="link" data-copy="${esc(fix.command)}" title="Copy (⌘C)">${copied ? "Copied" : "Copy"}</button></div>`;
+    <div class="command"><code>${esc(fix.command)}</code><button class="link" data-copy="${esc(fix.command)}" title="Copy (${ctrl("C")})">${copied ? "Copied" : "Copy"}</button></div>`;
 }
 
 /** An agent's newest job: the one it is on, or else the last it did. */
@@ -989,8 +990,8 @@ function settingsHtml(): string {
       <label class="line"><span>Open at login</span><button class="switch${state.openAtLogin ? " on" : ""}" role="switch" aria-checked="${state.openAtLogin}" data-action="login"><span></span></button></label>
       <div class="line"><span>Appearance</span><span class="choices" role="radiogroup" title="Appearance (A)">${THEMES.map(([theme, name]) => `<button role="radio" aria-checked="${settings.theme === theme}" class="${settings.theme === theme ? "on" : ""}" data-action="theme" data-theme="${theme}">${name}</button>`).join("")}</span></div>
       <label class="line"><span>Sounds<span class="sub">When a job is taken or accepted</span></span><button class="switch${settings.sounds ? " on" : ""}" role="switch" aria-checked="${settings.sounds}" data-action="sounds" title="Sounds"><span></span></button></label>
-      ${state.update ? `<div class="line"><span>Update to ${esc(state.update)}<span class="sub">It restarts on the new version</span></span><button class="pill" data-action="update" title="Update (⇧U)" ${state.updating ? "disabled" : ""}>${state.updating ? "Updating…" : "Update"}</button></div>` : ""}
-      <div class="line"><span>Quit IMD Agents${appVersion ? `<span class="sub">Version ${esc(appVersion)}</span>` : ""}</span><button class="pill" data-action="quit" title="Quit (⌘Q)">Quit</button></div>
+      ${state.update ? `<div class="line"><span>Update to ${esc(state.update)}<span class="sub">It restarts on the new version</span></span><button class="pill" data-action="update" title="Update (${shift("U")})" ${state.updating ? "disabled" : ""}>${state.updating ? "Updating…" : "Update"}</button></div>` : ""}
+      <div class="line"><span>Quit IMD Agents${appVersion ? `<span class="sub">Version ${esc(appVersion)}</span>` : ""}</span><button class="pill" data-action="quit" title="Quit (${ctrl("Q")})">Quit</button></div>
     </section>
     ${noteHtml()}`;
 }
@@ -1341,7 +1342,7 @@ app.addEventListener("click", (event) => {
   if (action === "login") {
     event.preventDefault();
     const next = !state.openAtLogin;
-    void (next ? autostartOn() : autostartOff()).then(() => { state.openAtLogin = next; render(); }).catch((e) => { state.note = { text: String(e), bad: true }; render(); });
+    void api.setOpenAtLogin(next).then(() => { state.openAtLogin = next; render(); }).catch((e) => { state.note = { text: String(e), bad: true }; render(); });
     return;
   }
   const remove = target.closest<HTMLElement>("[data-remove]")?.dataset.remove;

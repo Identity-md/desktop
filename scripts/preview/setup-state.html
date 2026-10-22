@@ -11,7 +11,7 @@
     <script type="module">
       import { stage } from "./setup-states.js";
       const params = new URLSearchParams(location.search);
-      stage(params.get("state"), params.get("theme"));
+      stage(params.get("state"), params.get("theme"), params.get("os"));
     </script>
     <script type="module" src="/src/setup.ts"></script>
   </body>

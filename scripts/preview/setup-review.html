@@ -51,6 +51,9 @@
       .lede { margin: 0 10px 8px; color: var(--ink-2); text-wrap: pretty; }
       .group { margin: 16px 10px 4px; font-size: 12px; color: var(--ink-2); }
       .state { display: block; width: 100%; padding: 5px 10px; border-radius: 7px; text-align: left; }
+      .os { display: inline-flex; gap: 2px; margin: 4px 10px 0; padding: 2px; border-radius: 9px; background: var(--hover); }
+      .os button { padding: 3px 12px; border-radius: 7px; color: var(--ink-2); }
+      .os button[aria-checked="true"] { color: var(--pick-ink); background: var(--pick); }
       .state[aria-current="true"] { color: var(--pick-ink); background: var(--pick); }
       @media (hover: hover) and (pointer: fine) { .state:not([aria-current="true"]):hover { background: var(--hover); } }
 
@@ -71,6 +74,16 @@
       .lights i:nth-child(1) { background: #ff5f57; }
       .lights i:nth-child(2) { background: #febc2e; }
       .bar span { position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; font-weight: 600; color: var(--bar-ink); pointer-events: none; }
+      /* Windows 11's: the icon and title at the left, its three buttons at the right, square corners but for 8px */
+      .window[data-os="windows"] { border-radius: 8px; }
+      .window[data-os="windows"] .bar { height: 32px; padding: 0 0 0 12px; gap: 8px; }
+      .window[data-os="windows"] .bar span { position: static; display: block; font: 12px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+      .window[data-os="windows"] .lights { display: none; }
+      .caption { display: none; margin-left: auto; color: var(--bar-ink); }
+      .window[data-os="windows"] .caption { display: flex; }
+      .caption i { display: grid; place-items: center; width: 46px; height: 32px; }
+      .win-icon { display: none; }
+      .window[data-os="windows"] .win-icon { display: block; }
       iframe { display: block; width: 460px; height: 600px; border: 0; }
       .size { margin: 12px 0 0; font-size: 12px; text-align: center; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 
@@ -86,6 +99,7 @@
       <aside class="states">
         <h1>Setup window</h1>
         <p class="lede">Every state of the real page, with the app stood in for. Copy and style changes show here as they're saved.</p>
+        <div class="os" role="radiogroup" aria-label="Computer"><button role="radio" data-os="mac" title="Mac (M)">Mac</button><button role="radio" data-os="windows" title="Windows (W)">Windows</button></div>
         <nav id="list" aria-label="States"></nav>
       </aside>
       <main>
@@ -102,31 +116,54 @@
           </div>
         </div>
         <div class="window">
-          <div class="bar"><span>IMD Agents</span><div class="lights"><i></i><i></i><i></i></div></div>
+          <div class="bar"><img class="win-icon" src="/app-icon.png" width="16" height="16" alt=""><span>IMD Agents</span><div class="lights"><i></i><i></i><i></i></div><div class="caption" aria-hidden="true"><i><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor"/></svg></i><i><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x=".5" y=".5" width="9" height="9" rx="1" stroke="currentColor" opacity=".4"/></svg></i><i><svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0 0 10" stroke="currentColor"/></svg></i></div></div>
           <iframe id="frame" title="The setup window"></iframe>
         </div>
         <p class="size" id="size">460 × 600</p>
       </main>
     </div>
     <script type="module">
-      import { STATES } from "./setup-states.js";
+      import { statesFor } from "./setup-states.js";
 
       const $ = (id) => document.getElementById(id);
       const frame = $("frame");
       const SUN = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg>`;
       const MOON = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1Z"/></svg>`;
 
+      // a Mac's states or a PC's, the one last picked here
+      let os = (() => { try { return localStorage.getItem("setup-review:os"); } catch { return null; } })() === "windows" ? "windows" : "mac";
+      let STATES = statesFor(os);
+      let rows = [];
+
       // the list: each state under the step it belongs to
-      let group = null;
-      $("list").innerHTML = STATES.map((s, i) => {
-        const head = s.group !== group ? `<div class="group">${s.group}</div>` : "";
-        group = s.group;
-        return `${head}<button class="state" data-i="${i}">${s.name}</button>`;
-      }).join("");
-      const rows = [...document.querySelectorAll(".state")];
+      function list() {
+        let group = null;
+        $("list").innerHTML = STATES.map((s, i) => {
+          const head = s.group !== group ? `<div class="group">${s.group}</div>` : "";
+          group = s.group;
+          return `${head}<button class="state" data-i="${i}">${s.name}</button>`;
+        }).join("");
+        rows = [...document.querySelectorAll(".state")];
+        document.querySelector(".window").dataset.os = os;
+        for (const button of document.querySelectorAll(".os button")) button.setAttribute("aria-checked", String(button.dataset.os === os));
+      }
+      list();
 
       let index = Math.max(0, STATES.findIndex((s) => s.id === location.hash.slice(1)));
       const theme = () => document.documentElement.dataset.theme;
+
+      // the same state on the other computer, or the nearest one it has
+      function pick(next) {
+        if (next === os) return;
+        const at = STATES[index]?.id;
+        os = next;
+        try { localStorage.setItem("setup-review:os", os); } catch {}
+        const before = STATES.slice(0, index + 1).map((s) => s.id);
+        STATES = statesFor(os);
+        list();
+        const same = STATES.findIndex((s) => s.id === at);
+        show(same >= 0 ? same : Math.max(0, ...before.map((id) => STATES.findIndex((s) => s.id === id))));
+      }
 
       function show(i) {
         index = Math.min(STATES.length - 1, Math.max(0, i));
@@ -139,7 +176,7 @@
         $("prev").disabled = index === 0;
         $("next").disabled = index === STATES.length - 1;
         // a fresh page each time, so each state plays from its start
-        frame.src = `setup-state.html?state=${s.id}&theme=${theme()}&at=${Date.now()}`;
+        frame.src = `setup-state.html?state=${s.id}&theme=${theme()}&os=${os}&at=${Date.now()}`;
       }
 
       function flip() {
@@ -168,6 +205,8 @@
         else if (event.key === "ArrowRight" || event.key === "ArrowDown") { event.preventDefault(); show(index + 1); }
         else if (event.key === "r") show(index);
         else if (event.key === "t") flip();
+        else if (event.key === "m") pick("mac");
+        else if (event.key === "w") pick("windows");
       }
       window.addEventListener("keydown", key);
       // a link to a state, or back and forward, shows it
@@ -181,6 +220,10 @@
       $("list").addEventListener("click", (event) => {
         const row = event.target.closest(".state");
         if (row) show(Number(row.dataset.i));
+      });
+      document.querySelector(".os").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-os]");
+        if (button) pick(button.dataset.os);
       });
       $("prev").addEventListener("click", () => show(index - 1));
       $("next").addEventListener("click", () => show(index + 1));

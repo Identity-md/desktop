@@ -4,6 +4,7 @@ import morphdom from "morphdom";
 import * as api from "./api";
 import { faceFor, loadFace } from "./masks";
 import { setupErrorWords } from "./model";
+import { iconHome, mac, windows } from "./platform";
 
 /**
  * Running an agent here: the setup window. Its own window, which stays open beside Finder and Docker while
@@ -15,8 +16,10 @@ import { setupErrorWords } from "./model";
 
 type Step = "docker" | "pull" | "install" | "signin" | "pair" | "start";
 
-const mac = /Mac/.test(navigator.userAgent);
-const windows = /Windows/.test(navigator.userAgent);
+/** Where the app installs Docker itself, with Docker's own installer; on Linux it opens Docker's page. */
+const installs = mac || windows;
+/** This computer, as its person calls it. */
+const computer = mac ? "Mac" : windows ? "PC" : "computer";
 const settings = (() => { try { return JSON.parse(localStorage.getItem("imd-agents:settings") ?? "{}") as { runtime?: string }; } catch { return {}; } })();
 /** Whether Continue was pressed on the first screen, now or before: reopened part way, setup opens on its steps. */
 const BEGUN = "imd-agents:setup-begun";
@@ -42,8 +45,9 @@ const state = {
   free: null as number | null,
 };
 
-/** What setup takes on disk: Docker 2.2 GB, the box 1.4 GB, and Docker's 590 MB download while it installs. */
-const NEEDED = 5e9;
+/** What setup takes on disk: Docker 2.2 GB, the box 1.4 GB, and Docker's 590 MB download while it installs. On Windows,
+ * Docker 3.5 GB and its 650 MB download, and WSL besides. */
+const NEEDED = windows ? 7e9 : 5e9;
 
 const esc = (text: unknown) => String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
@@ -92,8 +96,19 @@ async function step(): Promise<void> {
   render();
   try {
     if (next === "docker") {
-      await (state.at?.docker === "missing" ? api.dockerInstall() : api.dockerOpen());
-      state.words.docker = mac || state.at?.docker === "stopped" ? "Starting Docker…" : "Waiting for Docker…";
+      // the restart Windows needs to finish installing WSL: setup opens again after it
+      if (state.at?.docker === "restart") {
+        await api.restartPc();
+        // Windows asks apps with unsaved work first: canceled there, the button comes back
+        setTimeout(() => { if (state.busy === "docker") { state.busy = null; render(); } }, 30_000);
+        return;
+      }
+      const restart = state.at?.docker === "missing" ? await api.dockerInstall() : await api.dockerOpen();
+      if (restart) {
+        state.busy = null;
+        return void check();
+      }
+      state.words.docker = installs || state.at?.docker === "stopped" ? "Starting Docker…" : "Waiting for Docker…";
       state.since.docker = Date.now();
       return void check();
     }
@@ -150,27 +165,39 @@ const LOCK = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke
 
 const CHECK = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5 6.5 11.5 12.5 4.5"/></svg>`;
 
+/** The first words of Docker's step, before the app's own: a Mac downloads at once, a PC looks at itself first. */
+const FIRST_WORDS = windows ? "Checking this PC…" : "Starting the download…";
+
 /** While Docker's step is under way: what comes next outside this window, said before it happens. */
 function dockerHelp(missing: boolean): string {
-  const words = state.words.docker ?? (missing && mac ? "Starting the download…" : "");
-  if (missing && !mac) return windows ? "Run the installer in Downloads. Docker opens once it's installed." : "Install Docker Desktop from its page, then open it.";
+  const words = state.words.docker ?? (missing && installs ? FIRST_WORDS : "");
+  if (missing && !installs) return "Install Docker Desktop from its page, then open it.";
+  // on Windows nothing asks anything between the check and Docker's first run
+  if (windows && /^(Checking|Starting the download|Downloading|Verifying)/.test(words)) return "";
   if (words.startsWith("Downloading") || words.startsWith("Starting the download") || words.startsWith("Verifying")) return "Next, your Mac asks for your password to install Docker.";
   // macOS's own box takes it, and gives the app leave to install, never the password
   if (words.startsWith("Waiting for your password")) return "Your Mac needs your password to install Docker. It goes to macOS, never to IMD Agents.";
-  if (words.startsWith("Installing")) return "Docker's installer is putting Docker in Applications. On an older Mac this takes a minute or two.";
-  // Docker's first run asks two things the box doesn't need: an account, and the Mac's local network
-  return "Docker starts by itself. Skip its sign-in, and if your Mac asks about devices on your network, choose Don't Allow.";
+  // Windows dims the screen for its own prompt, which names WSL and Microsoft as its publisher; Docker itself asks for none
+  if (words.startsWith("Waiting for your OK")) return "Windows asks to let Windows Subsystem for Linux, which Docker runs on, make changes. Choose Yes.";
+  if (/^(Installing|Updating) WSL/.test(words)) return `Windows is ${words.startsWith("Updating") ? "updating" : "installing"} WSL. This takes a few minutes.`;
+  if (words.startsWith("Installing")) {
+    return mac ? "Docker's installer is putting Docker in Applications. On an older Mac this takes a minute or two." : "Docker's installer is setting it up. This takes a few minutes.";
+  }
+  // Docker's first run asks things the box doesn't need: an account, and on a Mac the local network
+  return mac ? "Docker starts by itself. Skip its sign-in, and if your Mac asks about devices on your network, choose Don't Allow." : "Docker starts by itself. Skip its sign-in.";
 }
 
 /** Docker's step in words, for each state it can be in: not here, here but not running, or under way. */
 function docker(at: api.Setup | null, busy: boolean): { about: string; act: string; busy: string; help: string } {
+  // Windows: WSL is in, and turns on with a restart, after which setup opens again by itself
+  if (at?.docker === "restart") return { about: "WSL is installed. It turns on after a restart.", act: "Restart your PC", busy: "Restarting…", help: busy ? "" : "Save your work first. Setup opens again after the restart." };
   // not looked at yet, it reads as not here: the words a new Mac sees first
   const missing = !at || at.docker === "missing";
   return {
     about: missing ? "The free app that runs the sealed box." : "Installed, not running.",
-    act: missing ? (mac ? "Install Docker" : "Get Docker") : "Open Docker",
-    busy: state.words.docker ?? (missing && mac ? "Starting the download…" : missing ? "Waiting for Docker…" : "Starting Docker…"),
-    help: busy ? dockerHelp(missing) : missing && mac ? `Installs Docker Desktop, free for personal use.<br>You accept <button class="text-link" data-action="docker-terms">Docker's terms</button>.` : "",
+    act: missing ? (installs ? "Install Docker" : "Get Docker") : "Open Docker",
+    busy: state.words.docker ?? (missing && installs ? FIRST_WORDS : missing ? "Waiting for Docker…" : "Starting Docker…"),
+    help: busy ? dockerHelp(missing) : missing && installs ? `Installs Docker Desktop, free for personal use.<br>You accept <button class="text-link" data-action="docker-terms">Docker's terms</button>.` : "",
   };
 }
 
@@ -194,7 +221,7 @@ function nextHelp(next: Step | null): string {
   if (!next) return "";
   const busy = state.busy === next;
   if (next === "docker") return docker(state.at, busy).help;
-  if (next === "pull" && busy && state.words.pull === "Unpacking…") return "Docker is unpacking the box. On an older Mac this takes a few minutes.";
+  if (next === "pull" && busy && state.words.pull === "Unpacking…") return `Docker is unpacking the box. On an older ${computer} this takes a few minutes.`;
   // on a Mac, the sign-in opens in Terminal, which the Mac asks about the first time: the one prompt to allow
   if (next === "signin" && mac) return busy ? "Choose Allow if your Mac asks, then sign in through the Terminal window. This step finishes by itself." : "If your Mac asks to let IMD Agents control Terminal, choose Allow. Claude's sign-in opens there.";
   if (next === "signin" && busy) return "A terminal window opened inside the box. Sign in there, and this step finishes by itself.";
@@ -217,7 +244,7 @@ const onIntro = () => screenOf() === "intro";
 function introHtml(): string {
   // the disk is read, not asked about: it's said only when it's short
   const short = state.free !== null && state.free < NEEDED
-    ? `<p class="note warn" role="status">${mac ? "This Mac" : "This computer"} has ${(state.free / 1e9).toFixed(1)} GB free. Setup needs about 5 GB.</p>`
+    ? `<p class="note warn" role="status">This ${computer} has ${(state.free / 1e9).toFixed(1)} GB free. Setup needs about ${NEEDED / 1e9} GB.</p>`
     : "";
   // the two things setup can't check for: Claude Code comes with every paid Claude plan, and Codex isn't in the box
   const seat = `<p class="setup-needs">You'll need <button class="text-link" data-action="seats" title="Agent seats on imd.fun (S)">an agent seat</button> and <button class="text-link" data-action="claude-plans" title="Claude's plans (C)">a paid Claude plan</button>.</p>`;
@@ -260,7 +287,7 @@ function agentHtml(): string {
   return `<div class="agent">
       <span class="mask big${running ? "" : " away"}">${face ? `<img src="${esc(face)}" alt="" draggable="false">` : `<span class="mask-blank"></span>`}<span class="dot${running ? " on" : ""}"></span></span>
       <h1>Agent #${esc(token)} ${running ? "is running" : "is set up"}</h1>
-      <p class="setup-intro">${running ? "It's in your menu bar, where it turns on and off." : "Start it and it begins taking jobs."}</p>
+      <p class="setup-intro">${running ? `It's in your ${iconHome}, where it turns on and off.` : "Start it and it begins taking jobs."}</p>
     </div>
     ${foot(`${register}${errorLine()}`, button(nextStep()), !running)}`;
 }

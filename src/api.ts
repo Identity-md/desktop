@@ -89,14 +89,19 @@ export const boxStart = (runtime: string) => invoke<void>("box_start", { runtime
 export const boxStop = () => invoke<void>("box_stop");
 export const boxRestart = (runtime: string) => invoke<void>("box_restart", { runtime });
 
-/** How far setting this computer's box up has got. */
-export type Setup = { docker: "missing" | "stopped" | "running"; image: boolean; worker: boolean; claude: boolean; device_key: string | null };
+/** How far setting this computer's box up has got. On Windows Docker can wait on a restart, which finishes installing WSL. */
+export type Setup = { docker: "missing" | "stopped" | "running" | "restart"; image: boolean; worker: boolean; claude: boolean; device_key: string | null };
 export const boxSetupState = () => invoke<Setup>("box_setup_state");
 /** Docker Desktop: its download page if it is not installed, the app if it is not running. */
 export const dockerOpen = () => invoke<void>("docker_open");
 export const boxPull = () => invoke<void>("box_pull");
-/** Docker Desktop installed for this computer: downloaded, checked and installed by Docker's own installer on a Mac. */
-export const dockerInstall = () => invoke<void>("docker_install");
+/** Docker Desktop installed for this computer: downloaded, checked and installed by Docker's own installer on a Mac and on
+ * Windows, where WSL comes first. True when Windows needs a restart before Docker. */
+export const dockerInstall = () => invoke<boolean>("docker_install");
+/** Windows restarted, while the restart WSL needs is still to come; setup opens again after it. */
+export const restartPc = () => invoke<void>("restart_pc");
+/** Open at login, on or off. */
+export const setOpenAtLogin = (on: boolean) => invoke<void>("set_open_at_login", { on });
 /** The setup window: opened, or brought to the front; closed when setup is done, onto the panel. */
 export const openSetup = () => invoke<void>("open_setup");
 export const setupDone = () => invoke<void>("setup_done");

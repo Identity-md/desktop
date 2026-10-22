@@ -387,8 +387,10 @@ export function jailFix(detail: string): { why: string; command: string | null }
 export function setupErrorWords(raw: string): string {
   const text = raw.trim();
   const known: Array<[RegExp, string]> = [
+    // Windows: the engine's pipe shut to this user, or not there while Docker isn't running
+    [/pipe.*access is denied/i, "This Windows user can't use Docker. Add it to the docker-users group, sign out and in again, then try again."],
     [/permission denied.*docker daemon socket/i, "This user can't use Docker. Add it to the docker group, log in again, then try again."],
-    [/cannot connect to the docker daemon|is the docker daemon running|docker is not installed/i, "Docker isn't running. Open Docker, then try again."],
+    [/cannot connect to the docker daemon|is the docker daemon running|docker is not installed|error during connect.*pipe/i, "Docker isn't running. Open Docker, then try again."],
     [/no space left on device/i, "Docker is out of disk space. Raise its disk limit in Docker's settings or delete images you don't use, then try again."],
     [/computed checksum did not match|sha256sums?: .*failed|: FAILED$/im, "The worker's download didn't match its published checksum, so nothing was installed. Try again."],
     [/no such host|could not resolve|network is unreachable|i\/o timeout|tls handshake timeout|connection reset|eai_again|enotfound|etimedout/i, "This computer can't reach the internet right now. Check the connection, then try again."],

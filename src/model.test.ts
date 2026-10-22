@@ -163,6 +163,9 @@ describe("numbers", () => {
     expect(setupErrorWords("failed to register layer: write /usr/lib/x86_64-linux-gnu/libLLVM.so: no space left on device")).toMatch(/^Docker is out of disk space/);
     expect(setupErrorWords("Cannot connect to the Docker daemon at unix:///Users/me/.docker/run/docker.sock. Is the docker daemon running?")).toBe("Docker isn't running. Open Docker, then try again.");
     expect(setupErrorWords("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock")).toMatch(/^This user can't use Docker/);
+    // Windows: Docker Desktop not running, and its pipe shut to this user
+    expect(setupErrorWords('error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.51/info": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.')).toBe("Docker isn't running. Open Docker, then try again.");
+    expect(setupErrorWords('error during connect: Get "http://%2F%2F.%2Fpipe%2Fdocker_engine/v1.51/version": open //./pipe/docker_engine: Access is denied.')).toMatch(/^This Windows user can't use Docker/);
     expect(setupErrorWords("identitymd-worker.tgz: FAILED\nsha256sum: WARNING: 1 computed checksum did NOT match")).toMatch(/didn't match its published checksum/);
     expect(setupErrorWords("timed out")).toBe("That took too long. Check the connection, then try again.");
     // one it does not know: Docker's error, not the line after it
