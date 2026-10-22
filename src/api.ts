@@ -75,7 +75,8 @@ export async function readyToClaim(wallet: string, rewards: Earning[]): Promise<
 
 export async function earnings(wallet: string): Promise<Earning[]> {
   const answer = await get<{ earnings: Earning[] }>(`/wallets/${wallet}/earnings?limit=50`);
-  return answer.status === 200 ? answer.body?.earnings ?? [] : [];
+  // a launch still on its way has no coin yet (its token address is null): it shows once it launches
+  return answer.status === 200 ? (answer.body?.earnings ?? []).filter((e) => e.token?.address) : [];
 }
 
 export const agentSvg = (tokenId: string) => invoke<string | null>("agent_svg", { tokenId });
