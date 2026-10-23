@@ -26,6 +26,9 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
 const API: &str = "https://api.imd.fun";
+/// The same plane under Railway's own name, which the worker also falls back to when api.imd.fun
+/// stops resolving (as it did on 23 October 2026, while the domain was on hold).
+const API_FALLBACK: &str = "https://api-imd.up.railway.app";
 const EXPLORER: &str = "https://explorer.imd.fun";
 const KEY_SERVICE: &str = "fun.imd.agents";
 const KEY_ACCOUNT: &str = "app-key";
@@ -38,6 +41,22 @@ const BOX_VOLUME: &str = "imd-worker-home";
 /// Where reads and writes go. The public network unless a developer points it elsewhere.
 fn api_base() -> String {
     std::env::var("IMD_API").ok().filter(|v| v.starts_with("http")).unwrap_or_else(|| API.into())
+}
+
+/// Sends a call to the API, and once more to the plane's Railway name when api.imd.fun could not be
+/// reached at all. Only a call that never connected is sent again, so no write arrives twice; a
+/// developer's IMD_API is never swapped.
+async fn api_send(call: impl Fn(&str) -> reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+    let base = api_base();
+    let fallback = (base == API).then_some(API_FALLBACK);
+    send_or_fall_back(&base, fallback, call).await
+}
+
+async fn send_or_fall_back(base: &str, fallback: Option<&str>, call: impl Fn(&str) -> reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+    match (call(base).send().await, fallback) {
+        (Err(e), Some(fallback)) if e.is_connect() => call(fallback).send().await,
+        (sent, _) => sent,
+    }
 }
 
 fn explorer_base() -> String {
@@ -93,14 +112,14 @@ struct Answer {
 }
 
 /// A path on the IMD API, and nothing that could leave it: no scheme, no host, no climbing.
-fn api_path(path: &str) -> Result<String, String> {
+fn api_path(path: &str) -> Result<&str, String> {
     let ok = path.starts_with('/')
         && !path.starts_with("//")
         && !path.contains("..")
         && !path.contains('\\')
         && path.len() < 512
         && path.chars().all(|c| c.is_ascii_graphic());
-    if ok { Ok(format!("{}{}", api_base(), path)) } else { Err("not an API path".into()) }
+    if ok { Ok(path) } else { Err("not an API path".into()) }
 }
 
 async fn answer(response: reqwest::Response) -> Answer {
@@ -112,8 +131,8 @@ async fn answer(response: reqwest::Response) -> Answer {
 /// A public read: agents, standings, records, rewards. Status 0 when the network did not answer.
 #[tauri::command]
 async fn api_get(path: String) -> Answer {
-    let Ok(url) = api_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
-    match http().get(url).send().await {
+    let Ok(path) = api_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
+    match api_send(|base| http().get(format!("{base}{path}"))).await {
         Ok(response) => answer(response).await,
         Err(_) => Answer { status: 0, body: serde_json::Value::Null },
     }
@@ -151,7 +170,7 @@ async fn agent_svg(token_id: String) -> Option<String> {
     if token_id.is_empty() || token_id.len() > 78 || !token_id.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    let response = http().get(format!("{}/agents/by-token/{token_id}.svg", api_base())).send().await.ok()?;
+    let response = api_send(|base| http().get(format!("{base}/agents/by-token/{token_id}.svg"))).await.ok()?;
     let svg = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -246,7 +265,7 @@ fn machine_model() -> String {
 async fn link_start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let key = load_key(true)?.ok_or("no key")?;
     let body = serde_json::json!({ "appKey": public_key(&key), "name": app_name() });
-    let response = http().post(format!("{}/app-links", api_base())).json(&body).send().await.map_err(|_| "The network did not answer".to_string())?;
+    let response = api_send(|base| http().post(format!("{base}/app-links")).json(&body)).await.map_err(|_| "The network did not answer".to_string())?;
     let answer = answer(response).await;
     match answer.status {
         200 => {
@@ -292,7 +311,7 @@ async fn seat_pause(token_id: String, paused: bool, relay_origin: String) -> Ans
         "key": public_key(&key), "paused": paused, "nonce": nonce, "issuedAt": issued_at,
         "relayOrigin": relay_origin, "signature": sign(&key, &text),
     }});
-    match http().post(format!("{}/seats/{token_id}/pause", api_base())).json(&body).send().await {
+    match api_send(|base| http().post(format!("{base}/seats/{token_id}/pause")).json(&body)).await {
         Ok(response) => answer(response).await,
         Err(_) => Answer { status: 0, body: serde_json::Value::Null },
     }
@@ -307,7 +326,7 @@ async fn unlink(relay_origin: String) -> Result<(), String> {
         let body = serde_json::json!({ "app": {
             "key": public_key(&key), "nonce": nonce, "issuedAt": issued_at, "relayOrigin": relay_origin, "signature": sign(&key, &text),
         }});
-        let status = http().post(format!("{}/app-links/unlink", api_base())).json(&body).send().await
+        let status = api_send(|base| http().post(format!("{base}/app-links/unlink")).json(&body)).await
             .map(|r| r.status().as_u16()).map_err(|_| "The network did not answer; try again".to_string())?;
         // A link the network no longer has is as gone as one it just removed.
         if status != 200 && status != 404 {
@@ -1056,8 +1075,8 @@ async fn box_pair(app: tauri::AppHandle) -> Result<Paired, String> {
 /// Opens the page a pairing code is approved on: the network's own pairing page, never another.
 #[tauri::command]
 fn open_pairing(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    let base = format!("{}/pair?", api_base());
-    let ok = url.starts_with(&base) && url.len() < 256 && url.chars().all(|c| c.is_ascii_graphic()) && !url.contains("..");
+    // a worker that fell back to the plane's Railway name prints its pairing page there
+    let ok = [api_base().as_str(), API_FALLBACK].iter().any(|base| url.starts_with(&format!("{base}/pair?"))) && url.len() < 256 && url.chars().all(|c| c.is_ascii_graphic()) && !url.contains("..");
     if !ok {
         return Err("not a pairing page".into());
     }
@@ -1787,6 +1806,35 @@ mod tests {
         for bad in ["https://evil.test/x", "//evil.test", "/../admin", "/a\\b", "/a b"] {
             assert!(api_path(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_call_that_never_connected_goes_to_the_fallback_once() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let up = format!("http://{}", server.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in server.incoming().flatten() {
+                let _ = stream.read(&mut [0u8; 4096]);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok");
+            }
+        });
+        // a port nothing listens on any more, as a name that no longer resolves fails: before connecting
+        let down = format!("http://{}", std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap());
+        let sent = AtomicUsize::new(0);
+        let call = |base: &str| {
+            sent.fetch_add(1, Ordering::SeqCst);
+            http().get(format!("{base}/health"))
+        };
+        tauri::async_runtime::block_on(async {
+            let response = send_or_fall_back(&down, Some(up.as_str()), call).await.expect("the fallback answers");
+            assert_eq!(response.status(), 200);
+            assert_eq!(sent.swap(0, Ordering::SeqCst), 2);
+            assert!(send_or_fall_back(&down, None, call).await.is_err(), "a developer's IMD_API is not swapped");
+            assert_eq!(sent.swap(0, Ordering::SeqCst), 1);
+            send_or_fall_back(&up, Some(down.as_str()), call).await.expect("the API answers");
+            assert_eq!(sent.swap(0, Ordering::SeqCst), 1, "a call that connected is not sent again");
+        });
     }
 
     /// Against the live network and this computer's Docker: `cargo test -- --ignored --nocapture`.
