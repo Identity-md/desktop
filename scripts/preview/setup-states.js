@@ -1,12 +1,13 @@
-// Every state of the setup window, in the order a new Mac meets them, for setup-review.html to page through.
+// Every state of the setup window, in the order a new Mac or PC meets them, for setup-review.html to page through.
 // Each opens the real setup page (setup-state.html) with the Rust side stood in for, then presses and says
 // what the app would to get there: `click` presses the button, `words` is the app's progress line for a step,
-// `hang` keeps a command waiting, `resolve` answers one at once, `fail` makes one fail as Docker would.
+// `hang` keeps a command waiting, `resolve` answers one at once, `fail` makes one fail as Docker would. A state
+// with `os` is only that computer's.
 import { installMock } from "./mock.mjs";
 
 const E = "e".padEnd(64, "0"); // a box with its key, not paired yet
 const D = "d5e40d01".padEnd(64, "0"); // the mock's paired box: Agent #12
-const none = { docker: "missing", image: false, worker: false, claude: false, device_key: null };
+const none = { docker: "missing", restart_ahead: false, image: false, worker: false, claude: false, device_key: null };
 const docker = { ...none, docker: "running" };
 const box = { ...docker, image: true };
 const agent = { ...box, worker: true, device_key: E };
@@ -18,11 +19,17 @@ export const STATES = [
   { id: "intro-short", group: "Opening", name: "Short of space", setup: none, intro: true, free: 3.2e9, about: "The disk is read, not asked about: a Mac short of room hears it here, before anything downloads." },
   { id: "looking", group: "Opening", name: "Looking at this computer", setup: none, hang: ["box_setup_state"], about: "Only if Continue is pressed before the check of this Mac is back, usually under a second." },
   { id: "docker", group: "Install Docker", name: "Install Docker", setup: none, about: "A Mac without Docker. The button installs it, the link opens Docker's terms." },
-  { id: "docker-start", group: "Install Docker", name: "Starting the download", setup: none, click: true, about: "Install Docker pressed. Docker's own installer starts downloading." },
+  { id: "docker-pc", group: "Install Docker", name: "Install Docker, restart ahead", os: "windows", setup: { ...none, restart_ahead: true }, about: "A PC without WSL: installing Docker ends in one restart, which the line under the button says before anything starts." },
+  { id: "docker-checking", group: "Install Docker", name: "Checking this PC", os: "windows", setup: none, click: true, about: "Install Docker pressed. A second's look at Windows' version, virtualization and WSL." },
+  { id: "docker-ok", group: "Install Docker", name: "Windows asks", os: "windows", setup: none, click: true, words: ["docker", "Waiting for your OK…"], about: "Only without WSL, or with one too old: Windows dims the screen and asks to let Windows Subsystem for Linux, from Microsoft, make changes. A clock shows after 3 seconds." },
+  { id: "docker-wsl", group: "Install Docker", name: "Installing WSL", os: "windows", setup: none, click: true, words: ["docker", "Installing WSL…"], about: "Windows installing WSL, which Docker's Linux runs on, a few minutes." },
+  { id: "docker-restart", group: "Install Docker", name: "Restart", os: "windows", setup: { ...none, docker: "restart" }, about: "WSL and Docker installed on a PC whose Virtual Machine Platform was off: WSL turns on at the next start of Windows, and Docker starts after it. Restart your PC restarts it, and setup opens again by itself and starts Docker." },
+  { id: "docker-restart-wsl", group: "Install Docker", name: "Restart, Docker after", os: "windows", setup: { ...none, docker: "restart-wsl" }, about: "Only if Docker's installer turned down a PC whose WSL waits on its restart: the restart comes first, and Docker installs after it." },
+  { id: "docker-start", group: "Install Docker", name: "Starting the download", setup: none, click: true, words: ["docker", "Starting the download…"], about: "Install Docker pressed. Docker's own installer starts downloading." },
   { id: "docker-download", group: "Install Docker", name: "Downloading", setup: none, click: true, words: ["docker", "Downloading 212 of 590 MB"], about: "Docker's installer downloading. The button fills as it goes." },
   { id: "docker-check", group: "Install Docker", name: "Verifying", setup: none, click: true, words: ["docker", "Verifying Docker…"], about: "Verifying the download is Docker's own signed installer. About a second." },
-  { id: "docker-password", group: "Install Docker", name: "Password", setup: none, click: true, words: ["docker", "Waiting for your password…"], about: "macOS asks for the password in a box from IMD Agents. A clock shows after 3 seconds." },
-  { id: "docker-installing", group: "Install Docker", name: "Installing", setup: none, click: true, words: ["docker", "Installing Docker…"], about: "Docker's installer putting Docker in Applications." },
+  { id: "docker-password", group: "Install Docker", name: "Password", os: "mac", setup: none, click: true, words: ["docker", "Waiting for your password…"], about: "macOS asks for the password in a box from IMD Agents. A clock shows after 3 seconds." },
+  { id: "docker-installing", group: "Install Docker", name: "Installing", setup: none, click: true, words: ["docker", "Installing Docker…"], about: "Docker's installer putting Docker in Applications, or on Windows installing it for this user alone, with no prompt." },
   { id: "docker-opening", group: "Install Docker", name: "Opening Docker", setup: none, click: true, words: ["docker", "Opening Docker…"], about: "Installed. Docker opens for its first run." },
   { id: "docker-starting", group: "Install Docker", name: "Starting Docker", setup: none, click: true, resolve: ["docker_install"], about: "Waiting for Docker to finish starting. It may offer a sign-in, which can be skipped." },
   { id: "docker-open", group: "Install Docker", name: "Not running", setup: { ...none, docker: "stopped" }, about: "Docker installed but not running, as after a restart." },
@@ -43,9 +50,16 @@ export const STATES = [
   { id: "error", group: "If a step fails", name: "Out of disk space", setup: docker, click: true, fail: { box_pull: "Error: no space left on device" }, about: "A failed step says what happened and what to do, under the button." },
 ];
 
+/** The states one computer meets: a Mac's or a PC's. */
+export const statesFor = (os) => STATES.filter((state) => !state.os || state.os === os);
+
+/** What WebView2 says it is, on Windows 11: the setup page's words follow it. */
+const WINDOWS_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0";
+
 /** Readies setup-state.html for one state, before the setup page's own script runs. */
-export function stage(id, theme) {
+export function stage(id, theme, os) {
   const s = STATES.find((state) => state.id === id) ?? STATES[0];
+  if (os === "windows") Object.defineProperty(navigator, "userAgent", { value: WINDOWS_AGENT });
   // past the first screen, but on it
   try { if (s.intro) localStorage.removeItem("imd-agents:setup-begun"); else localStorage.setItem("imd-agents:setup-begun", "1"); } catch {}
   installMock({ fixtures: { api: {}, svg: {} }, scenario: { box: s.box ?? "no-docker", linked: [], watching: [], setup: s.setup, fail: s.fail }, owner: null, scheme: theme ?? "light" });

@@ -37,7 +37,8 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
-    "shortDescription": "Every IMD agent you hold, from the menu bar.",
+    "publisher": "IMD",
+    "shortDescription": "Every IMD agent you hold, from the menu bar or the taskbar.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -45,6 +46,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "nsis": { "installerIcon": "icons/icon.ico" }
+    },
     "macOS": {
       "minimumSystemVersion": "12.0",
       "files": { "Resources/Assets.car": "icons/Assets.car" },
@@ -54,7 +58,8 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYzREM5RkM4QjMyNkQ1MDAKUldRQTFTYXp5Si9jODBZVHd4Q3BLeSt1SE51UE1ZL1RhcXBWQWY3c0cyZHBLYk1sMjhJb1k1Q3MK",
-      "endpoints": ["https://github.com/Identity-md/desktop/releases/latest/download/latest.json"]
+      "endpoints": ["https://github.com/Identity-md/desktop/releases/latest/download/latest.json"],
+      "windows": { "installMode": "quiet" }
     }
   }
 }

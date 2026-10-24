@@ -36,6 +36,16 @@ export async function seatRecord(tokenId: string, rows = 100): Promise<SeatRecor
   return answer.status === 200 ? answer.body : null;
 }
 
+/**
+ * A seat looked up to watch it: its record; "none" when the network has none, so it never ran an agent; or
+ * "unreached" when the read failed, which says nothing about the seat.
+ */
+export async function seatLookup(tokenId: string): Promise<SeatRecord | "none" | "unreached"> {
+  const answer = await get<SeatRecord>(`/seats/${tokenId}?work=0&reviews=0&collaborators=0`).catch(() => null);
+  if (answer?.status === 404) return "none";
+  return answer?.status === 200 && answer.body ? answer.body : "unreached";
+}
+
 /** Something that just happened in the swarm: a step started or accepted, a job posted, an agent joined, a site went up. */
 export type SwarmEvent = { kind: string; at: string; tokenId?: number | null; step?: string; state?: string; jobId?: string; objective?: string; ensName?: string };
 
@@ -89,14 +99,19 @@ export const boxStart = (runtime: string) => invoke<void>("box_start", { runtime
 export const boxStop = () => invoke<void>("box_stop");
 export const boxRestart = (runtime: string) => invoke<void>("box_restart", { runtime });
 
-/** How far setting this computer's box up has got. */
-export type Setup = { docker: "missing" | "stopped" | "running"; image: boolean; worker: boolean; claude: boolean; device_key: string | null };
+/** How far setting this computer's box up has got. On Windows Docker can wait on a restart, which finishes installing WSL. */
+export type Setup = { docker: "missing" | "stopped" | "running" | "restart" | "restart-wsl"; restart_ahead: boolean; image: boolean; worker: boolean; claude: boolean; device_key: string | null };
 export const boxSetupState = () => invoke<Setup>("box_setup_state");
 /** Docker Desktop: its download page if it is not installed, the app if it is not running. */
 export const dockerOpen = () => invoke<void>("docker_open");
 export const boxPull = () => invoke<void>("box_pull");
-/** Docker Desktop installed for this computer: downloaded, checked and installed by Docker's own installer on a Mac. */
-export const dockerInstall = () => invoke<void>("docker_install");
+/** Docker Desktop installed for this computer: downloaded, checked and installed by Docker's own installer on a Mac and on
+ * Windows, where WSL comes first. True when Windows needs a restart before Docker. */
+export const dockerInstall = () => invoke<boolean>("docker_install");
+/** Windows restarted, while the restart WSL needs is still to come; setup opens again after it. */
+export const restartPc = () => invoke<void>("restart_pc");
+/** Open at login, on or off. */
+export const setOpenAtLogin = (on: boolean) => invoke<void>("set_open_at_login", { on });
 /** The setup window: opened, or brought to the front; closed when setup is done, onto the panel. */
 export const openSetup = () => invoke<void>("open_setup");
 export const setupDone = () => invoke<void>("setup_done");
@@ -139,9 +154,12 @@ export const quit = () => invoke<void>("quit");
 export const updateCheck = () => invoke<string | null>("update_check");
 export const updateInstall = () => invoke<void>("update_install");
 
-/** An ENS name's wallet, as the explorer's own search finds it: null when it finds none. */
-export async function ensWallet(name: string): Promise<string | null> {
-  const answer = await invoke<Answer<{ groups?: Array<{ key: string; hits?: Array<{ meta?: string; href?: string }> }> }>>("explorer_get", { path: `/api/search?q=${name}` });
+/** An ENS name's wallet, as the explorer's own search finds it: null when it finds none, "unreached" when the read failed. */
+export async function ensWallet(name: string): Promise<string | null | "unreached"> {
+  const answer = await invoke<Answer<{ groups?: Array<{ key: string; hits?: Array<{ meta?: string; href?: string }> }> }>>("explorer_get", { path: `/api/search?q=${name}` }).catch(() => null);
+  // 400 is this app's own refusal of what isn't a name: nothing found, not a read that failed
+  if (answer?.status === 400) return null;
+  if (answer?.status !== 200) return "unreached";
   const hit = answer.body?.groups?.find((g) => g.key === "go")?.hits?.find((h) => h.meta === "wallet" && h.href?.startsWith("/wallet/"));
   const wallet = hit?.href?.slice("/wallet/".length).toLowerCase();
   return wallet && /^0x[0-9a-f]{40}$/.test(wallet) ? wallet : null;
