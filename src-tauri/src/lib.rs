@@ -51,6 +51,8 @@ fn http() -> reqwest::Client {
         .get_or_init(|| {
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
+                // let go of an idle connection before the network does: one it has closed fails the next read on it
+                .pool_idle_timeout(Duration::from_secs(30))
                 .user_agent(concat!("imd-agents/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .expect("http client")
@@ -86,6 +88,55 @@ fn mb(bytes: u64) -> u64 {
     (bytes as f64 / 1_000_000.0).round() as u64
 }
 
+/// What went wrong, kept beside the app's data for a look at a computer no one can watch it on: reads the
+/// network didn't answer, its own errors, and where a panic happened. Set as the app starts.
+static LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static LOGGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn log_failure(line: &str) {
+    if let Some(path) = LOG.get() {
+        log_in(path, line);
+    }
+}
+
+/// One line, after the time in UTC. Past a megabyte the log moves aside to imd-agents.old.log and starts again.
+fn log_in(path: &Path, line: &str) {
+    let _one_at_a_time = LOGGING.lock().unwrap_or_else(|held| held.into_inner());
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > 1_000_000) {
+        let _ = std::fs::rename(path, path.with_file_name("imd-agents.old.log"));
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(file, "{} {}", utc(unix_now()), line.replace(['\r', '\n'], " "));
+    }
+}
+
+/// A moment in UTC as ISO 8601 writes it, 2026-10-24T17:25:31Z: days to a date by Howard Hinnant's
+/// civil_from_days, which needs no calendar of its own.
+fn utc(secs: u64) -> String {
+    let (days, time) = ((secs / 86_400) as i64 + 719_468, secs % 86_400);
+    let (era, day_of_era) = (days.div_euclid(146_097), days.rem_euclid(146_097));
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 { shifted + 3 } else { shifted - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", time / 3_600, time % 3_600 / 60, time % 60)
+}
+
+/// An error and every cause under it: reqwest's own words stop at "error sending request".
+fn causes(error: &dyn std::error::Error) -> String {
+    let mut words = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        words.push_str(": ");
+        words.push_str(&next.to_string());
+        cause = next.source();
+    }
+    words
+}
+
 #[derive(Serialize)]
 struct Answer {
     status: u16,
@@ -104,19 +155,47 @@ fn api_path(path: &str) -> Result<String, String> {
 }
 
 async fn answer(response: reqwest::Response) -> Answer {
-    let status = response.status().as_u16();
-    let body = response.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null);
-    Answer { status, body }
+    let (status, url) = (response.status(), response.url().to_string());
+    let body = response.json::<serde_json::Value>().await.unwrap_or_else(|e| {
+        // an error's page needn't be JSON; an OK's must, or the read failed after all
+        if status == reqwest::StatusCode::OK {
+            log_failure(&format!("{url}: 200 that isn't JSON: {}", causes(&e)));
+        }
+        serde_json::Value::Null
+    });
+    Answer { status: status.as_u16(), body }
+}
+
+/// A read of the network, logged when it fails: no answer at all, or an answer of the network's own error.
+async fn read(url: String) -> Answer {
+    let mut sent = http().get(&url).send().await;
+    // a connection the network closed as it sat idle fails the first read on it: once more, on a new one. Not after
+    // a timeout, which would only wait as long again
+    if let Err(e) = &sent {
+        if !e.is_timeout() {
+            log_failure(&format!("GET {url}: tried again: {}", causes(e)));
+            sent = http().get(&url).send().await;
+        }
+    }
+    match sent {
+        Ok(response) => {
+            if response.status().is_server_error() {
+                log_failure(&format!("GET {url}: {}", response.status()));
+            }
+            answer(response).await
+        }
+        Err(e) => {
+            log_failure(&format!("GET {url}: no answer: {}", causes(&e)));
+            Answer { status: 0, body: serde_json::Value::Null }
+        }
+    }
 }
 
 /// A public read: agents, standings, records, rewards. Status 0 when the network did not answer.
 #[tauri::command]
 async fn api_get(path: String) -> Answer {
     let Ok(url) = api_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
-    match http().get(url).send().await {
-        Ok(response) => answer(response).await,
-        Err(_) => Answer { status: 0, body: serde_json::Value::Null },
-    }
+    read(url).await
 }
 
 /// The explorer's two public reads of a wallet's rewards, which the plane does not price: which are
@@ -139,10 +218,7 @@ fn ens_like(name: &str) -> bool {
 #[tauri::command]
 async fn explorer_get(path: String) -> Answer {
     let Ok(url) = explorer_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
-    match http().get(url).send().await {
-        Ok(response) => answer(response).await,
-        Err(_) => Answer { status: 0, body: serde_json::Value::Null },
-    }
+    read(url).await
 }
 
 /// An agent's face, as SVG text. Only the by-token art, and only SVG of a sane size.
@@ -619,9 +695,11 @@ fn jail_flags() -> Vec<String> {
 
 #[derive(Serialize)]
 struct Setup {
-    /// "missing", "stopped" (installed, not running) or "running"; on Windows "restart" too, while the restart that
-    /// finishes installing WSL is still to come.
+    /// "missing", "stopped" (installed, not running) or "running". On Windows, while the restart that turns WSL on is
+    /// still to come, "restart" with Docker installed, to start after it, or "restart-wsl" with Docker to install after it.
     docker: &'static str,
+    /// Windows: installing Docker here ends in a restart, as WSL isn't installed yet or waits on one.
+    restart_ahead: bool,
     /// The box's image is here.
     image: bool,
     /// The worker is installed in the box's volume.
@@ -643,14 +721,29 @@ async fn box_setup_state(app: tauri::AppHandle) -> Setup {
         let _ = app;
         false
     };
-    setup_state(restart).await
+    let setup = setup_state(restart).await;
+    // Docker running, the restart it waited on is behind it
+    #[cfg(target_os = "windows")]
+    if setup.docker == "running" {
+        forget_restart(&app);
+    }
+    setup
 }
 
 async fn setup_state(restart: bool) -> Setup {
     tauri::async_runtime::spawn_blocking(move || {
-        let none = |docker| Setup { docker, image: false, worker: false, claude: false, device_key: None };
+        let none = |docker| Setup { docker, restart_ahead: false, image: false, worker: false, claude: false, device_key: None };
         if docker().is_none() {
-            return none(if restart { "restart" } else { "missing" });
+            // a Docker that wouldn't install before the restart goes in after it
+            #[cfg(target_os = "windows")]
+            if restart && DOCKER_AFTER_RESTART.load(Ordering::Relaxed) {
+                return none("restart-wsl");
+            }
+            return Setup { restart_ahead: restart || wsl_missing(), ..none("missing") };
+        }
+        // installed, and to start once Windows has turned WSL on
+        if restart {
+            return none("restart");
         }
         if !engine_listening() || !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
             return none("stopped");
@@ -671,6 +764,7 @@ async fn setup_state(restart: bool) -> Setup {
         let lines: Vec<String> = answer.filter(|(ok, _)| *ok).map(|(_, out)| out.lines().map(str::to_string).collect()).unwrap_or_default();
         Setup {
             docker: "running",
+            restart_ahead: false,
             image: true,
             worker: lines.iter().any(|l| l == "worker"),
             claude: lines.iter().any(|l| l == "claude"),
@@ -678,7 +772,7 @@ async fn setup_state(restart: bool) -> Setup {
         }
     })
     .await
-    .unwrap_or(Setup { docker: "missing", image: false, worker: false, claude: false, device_key: None })
+    .unwrap_or(Setup { docker: "missing", restart_ahead: false, image: false, worker: false, claude: false, device_key: None })
 }
 
 /// Docker's signing team: Docker Desktop is installed only when it is Docker's own signed app.
@@ -713,19 +807,31 @@ async fn docker_install(app: tauri::AppHandle) -> Result<bool, String> {
         let _busy = Busy::new();
         progress(&app, "docker", "Checking this PC…");
         let ready = app.clone();
-        if tauri::async_runtime::spawn_blocking(move || prepare_windows(&ready)).await.map_err(|e| e.to_string())?? {
-            return Ok(true);
+        let restart = tauri::async_runtime::spawn_blocking(move || prepare_windows(&ready)).await.map_err(|e| e.to_string())??;
+        // Docker goes in now even with WSL's restart to come, as Docker's own installer has it: one restart, at the
+        // end, and Docker starts after it
+        let installed: Result<(), String> = async {
+            // a folder of its own, empty: Docker's installer won't run from one with other programs' files in it
+            let dir = std::env::temp_dir().join("imd-docker-install");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let installer = dir.join("Docker Desktop Installer.exe");
+            progress(&app, "docker", "Starting the download…");
+            download(&app, "docker", &docker_download(), &installer).await?;
+            let installs = app.clone();
+            tauri::async_runtime::spawn_blocking(move || install_docker_windows(&installs, &dir, &installer, restart)).await.map_err(|e| e.to_string())?
         }
-        // a folder of its own, empty: Docker's installer won't run from one with other programs' files in it
-        let dir = std::env::temp_dir().join("imd-docker-install");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let installer = dir.join("Docker Desktop Installer.exe");
-        progress(&app, "docker", "Starting the download…");
-        download(&app, "docker", &docker_download(), &installer).await?;
-        let installs = app.clone();
-        tauri::async_runtime::spawn_blocking(move || install_docker_windows(&installs, &dir, &installer)).await.map_err(|e| e.to_string())??;
-        Ok(false)
+        .await;
+        match installed {
+            Ok(()) => Ok(restart),
+            // turned down before the restart: logged, and Docker goes in after the restart instead
+            Err(e) if restart => {
+                log_failure(&format!("Docker before WSL's restart: {e}"));
+                DOCKER_AFTER_RESTART.store(true, Ordering::Relaxed);
+                Ok(true)
+            }
+            Err(e) => Err(e),
+        }
     }
     #[cfg(target_os = "linux")]
     docker_open(app).map(|_| false)
@@ -748,6 +854,10 @@ fn prepare_windows(app: &tauri::AppHandle) -> Result<bool, String> {
     // an x64 build of this app on an Arm PC sees a translated processor: there Docker's installer checks for itself
     if !windows_on_arm() && !virtualization_on() {
         return Err("Virtualization is off on this PC. Turn it on in its BIOS or UEFI settings, then try again.".into());
+    }
+    // installed since Windows last started: all that's left of WSL is the restart that turns it on
+    if restart_waiting(app) {
+        return Ok(true);
     }
     let (version, platform) = (wsl_version(), virtual_machine_platform());
     if version.is_some_and(|v| v >= (2, 1, 5)) && platform != Some(false) {
@@ -776,7 +886,7 @@ fn prepare_windows(app: &tauri::AppHandle) -> Result<bool, String> {
 /// Docker Desktop installed by Docker's own installer, checked first as Docker's, for this Windows user alone: in
 /// their own folders, with no administrator's leave and no service. Then opened, as Docker doesn't start itself.
 #[cfg(target_os = "windows")]
-fn install_docker_windows(app: &tauri::AppHandle, dir: &Path, installer: &Path) -> Result<(), String> {
+fn install_docker_windows(app: &tauri::AppHandle, dir: &Path, installer: &Path, restart: bool) -> Result<(), String> {
     progress(app, "docker", "Verifying Docker…");
     if !docker_signed(installer) {
         let _ = std::fs::remove_dir_all(dir);
@@ -805,6 +915,10 @@ fn install_docker_windows(app: &tauri::AppHandle, dir: &Path, installer: &Path) 
         4 => return Err("Docker is already installed on this PC by your organization. Open Docker, then try again.".into()),
         -6 => return Err("Another installer is running. Wait for it to finish, then try again.".into()),
         code => return Err(format!("Docker's installer stopped ({code}). Its log is in %LOCALAPPDATA%\\Docker\\install-log.txt.")),
+    }
+    // WSL's restart still to come: Docker can't start before it, and starts after it with setup
+    if restart {
+        return Ok(());
     }
     forget_restart(app);
     progress(app, "docker", "Opening Docker…");
@@ -1049,6 +1163,22 @@ fn restart_waiting(app: &tauri::AppHandle) -> bool {
         }
         None => false,
     }
+}
+
+/// Docker's installer turned down before the restart that turns WSL on, so Docker goes in after it instead.
+#[cfg(target_os = "windows")]
+static DOCKER_AFTER_RESTART: AtomicBool = AtomicBool::new(false);
+
+/// Whether WSL is still to install, which ends in a restart: looked at once, the first time setup asks.
+#[cfg(target_os = "windows")]
+fn wsl_missing() -> bool {
+    static MISSING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MISSING.get_or_init(|| wsl_version().is_none())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wsl_missing() -> bool {
+    false
 }
 
 #[cfg(target_os = "windows")]
@@ -1678,19 +1808,48 @@ const PANEL_WIDTH: f64 = 360.0;
 const INSET_TOP: f64 = 6.0;
 const INSET_SIDE: f64 = 22.0;
 const INSET_BOTTOM: f64 = 32.0;
+/// The panel at its tallest, with its inset: the page shows no more than 720 points of it.
+const PANEL_TALLEST: f64 = 720.0 + INSET_TOP + INSET_BOTTOM;
 
 /// The window is as tall as the panel shows, its inset included. A resize alone keeps a window's bottom
 /// edge on macOS, so the edge by the icon is put back: the top under a menu bar, the bottom over a taskbar.
+/// Windows resizes no window under the panel: see `clip_panel`.
 #[tauri::command]
 fn fit_panel(window: tauri::WebviewWindow, height: f64) {
-    let height = height.clamp(80.0 + INSET_TOP + INSET_BOTTOM, 720.0 + INSET_TOP + INSET_BOTTOM);
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let before = window.outer_position().ok().zip(window.outer_size().ok());
-    let _ = window.set_size(LogicalSize::new(PANEL_WIDTH + 2.0 * INSET_SIDE, height));
-    if let Some((position, size)) = before {
-        let y = if PANEL_ABOVE.load(Ordering::Relaxed) { position.y as f64 + size.height as f64 - height * scale } else { position.y as f64 };
-        let _ = window.set_position(PhysicalPosition::new(position.x as f64, y));
+    let height = height.clamp(80.0 + INSET_TOP + INSET_BOTTOM, PANEL_TALLEST);
+    #[cfg(target_os = "windows")]
+    {
+        PANEL_HEIGHT.store(height.to_bits(), Ordering::Relaxed);
+        clip_panel(&window, height);
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let before = window.outer_position().ok().zip(window.outer_size().ok());
+        let _ = window.set_size(LogicalSize::new(PANEL_WIDTH + 2.0 * INSET_SIDE, height));
+        if let Some((position, size)) = before {
+            let y = if PANEL_ABOVE.load(Ordering::Relaxed) { position.y as f64 + size.height as f64 - height * scale } else { position.y as f64 };
+            let _ = window.set_position(PhysicalPosition::new(position.x as f64, y));
+        }
+    }
+}
+
+/// Windows: how tall the panel last showed, its inset included, for its region on the next opening.
+#[cfg(target_os = "windows")]
+static PANEL_HEIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// Windows: a window resized under WebView2 shows its old page for a frame at the new size, so the panel grows
+/// and shrinks in a window that stays at its tallest. Only the window's region follows it: the part Windows draws
+/// and sends clicks to, the panel and its inset at the end by the taskbar. Clicks on the rest reach what's behind.
+#[cfg(target_os = "windows")]
+fn clip_panel(window: &tauri::WebviewWindow, height: f64) {
+    use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+    let (Ok(hwnd), Ok(size), Ok(scale)) = (window.hwnd(), window.outer_size(), window.scale_factor()) else { return };
+    let (width, tallest) = (size.width as i32, size.height as i32);
+    let tall = ((height * scale).round() as i32).min(tallest);
+    let top = if PANEL_ABOVE.load(Ordering::Relaxed) { tallest - tall } else { 0 };
+    // the window owns a region once it has it, and lets the last one go
+    unsafe { SetWindowRgn(hwnd.0 as _, CreateRectRgn(0, top, width, top + tall), 1) };
 }
 
 #[tauri::command]
@@ -2009,6 +2168,9 @@ fn open_panel(win: &tauri::WebviewWindow, above: bool) {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // the region again, on the side the icon is on now and at this screen's scale
+        #[cfg(target_os = "windows")]
+        clip_panel(win, Some(f64::from_bits(PANEL_HEIGHT.load(Ordering::Relaxed))).filter(|h| *h > 0.0).unwrap_or(518.0));
         let _ = win.show();
         // kept off the taskbar each time, as Windows can forget it for a window made hidden (tauri#10422)
         #[cfg(target_os = "windows")]
@@ -2165,9 +2327,28 @@ pub fn run() {
             restart_pc, set_open_at_login
         ])
         .setup(|app| {
+            // The log of what went wrong, and a panic's place in it before the app goes.
+            if let Ok(dir) = app.path().app_local_data_dir() {
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = LOG.set(dir.join("imd-agents.log"));
+            }
+            let before = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                let at = info.location().map(|place| format!("{}:{}:{}", place.file(), place.line(), place.column())).unwrap_or_default();
+                let payload = info.payload();
+                let said = payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_default();
+                log_failure(&format!("panic at {at}: {said}"));
+                before(info);
+            }));
+
             // A menu bar app: no Dock icon, no app switcher entry.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            // Windows: the panel's window at its tallest for good, its region showing as much as the panel needs
+            #[cfg(target_os = "windows")]
+            if let Some(panel) = app.get_webview_window("panel") {
+                let _ = panel.set_size(LogicalSize::new(PANEL_WIDTH + 2.0 * INSET_SIDE, PANEL_TALLEST));
+            }
             #[cfg(target_os = "macos")]
             if let Some(win) = app.get_webview_window("panel") {
                 float_over_full_screen(&win);
@@ -2435,6 +2616,28 @@ mod tests {
         for bad in ["https://evil.test/x", "//evil.test", "/../admin", "/a\\b", "/a b"] {
             assert!(api_path(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_log_dates_its_lines_in_utc() {
+        assert_eq!(utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(utc(1_709_208_000), "2024-02-29T12:00:00Z");
+        assert_eq!(utc(1_792_877_131), "2026-10-24T21:25:31Z");
+    }
+
+    #[test]
+    fn the_log_starts_again_past_a_megabyte() {
+        let dir = std::env::temp_dir().join(format!("imd-agents-log-{}", nonce()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("imd-agents.log");
+        std::fs::write(&log, vec![b'x'; 1_000_001]).unwrap();
+        log_in(&log, "GET https://api.imd.fun/swarm: no answer:\nline two");
+        let kept = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(kept.lines().count(), 1, "one line, its own line breaks flattened");
+        assert!(kept.ends_with("no answer: line two\n") && kept.as_bytes()[4] == b'-' && kept.contains("Z GET "), "{kept}");
+        assert_eq!(std::fs::metadata(dir.join("imd-agents.old.log")).unwrap().len(), 1_000_001);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Against the live network and this computer's Docker: `cargo test -- --ignored --nocapture`.

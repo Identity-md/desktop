@@ -67,6 +67,8 @@ function nextStep(): Step | null {
 const NAMES: Record<Exclude<Step, "start">, string> = { docker: "Install Docker", pull: "Install IMD Box", install: "Install IMD Agent", signin: "Connect Claude", pair: "Connect IMD Agent" };
 
 let timer: ReturnType<typeof setTimeout> | null = null;
+/** Windows: Docker started by setup itself, once, on opening to it installed and not running, as after WSL's restart. */
+let startedDocker = false;
 
 /** Reads how far this computer has got, and looks again every few seconds while something outside the window is under way. */
 async function check(): Promise<void> {
@@ -83,6 +85,11 @@ async function check(): Promise<void> {
   const order: Step[] = ["docker", "pull", "install", "signin", "pair"];
   void emit("setup-progress", next && next !== "start" ? `Step ${order.indexOf(next) + 1} of 5 · ${NAMES[next]}` : next === "start" ? "Ready to start" : null);
   if (state.busy === "docker" || state.busy === "signin") timer = setTimeout(() => void check(), 2500);
+  // reopened after WSL's restart on a Docker installed before it: setup carries on by itself
+  else if (windows && !startedDocker && !state.intro && state.at?.docker === "stopped") {
+    startedDocker = true;
+    void step();
+  }
 }
 
 /** Takes the next step: installs or opens Docker, downloads the box, installs the worker, opens Claude's sign-in, pairs, starts. */
@@ -96,8 +103,8 @@ async function step(): Promise<void> {
   render();
   try {
     if (next === "docker") {
-      // the restart Windows needs to finish installing WSL: setup opens again after it
-      if (state.at?.docker === "restart") {
+      // the restart Windows needs to turn WSL on: setup opens again after it
+      if (state.at?.docker === "restart" || state.at?.docker === "restart-wsl") {
         await api.restartPc();
         // Windows asks apps with unsaved work first: canceled there, the button comes back
         setTimeout(() => { if (state.busy === "docker") { state.busy = null; render(); } }, 30_000);
@@ -179,7 +186,7 @@ function dockerHelp(missing: boolean): string {
   if (words.startsWith("Waiting for your password")) return "Your Mac needs your password to install Docker. It goes to macOS, never to IMD Agents.";
   // Windows dims the screen for its own prompt, which names WSL and Microsoft as its publisher; Docker itself asks for none
   if (words.startsWith("Waiting for your OK")) return "Windows asks to let Windows Subsystem for Linux, which Docker runs on, make changes. Choose Yes.";
-  if (/^(Installing|Updating) WSL/.test(words)) return `Windows is ${words.startsWith("Updating") ? "updating" : "installing"} WSL. This takes a few minutes.`;
+  if (/^(Installing|Updating) WSL/.test(words)) return `Docker runs on WSL, a part of Windows.<br>${words.startsWith("Updating") ? "Updating" : "Installing"} it takes a few minutes.`;
   if (words.startsWith("Installing")) {
     return mac ? "Docker's installer is putting Docker in Applications. On an older Mac this takes a minute or two." : "Docker's installer is setting it up. This takes a few minutes.";
   }
@@ -189,15 +196,20 @@ function dockerHelp(missing: boolean): string {
 
 /** Docker's step in words, for each state it can be in: not here, here but not running, or under way. */
 function docker(at: api.Setup | null, busy: boolean): { about: string; act: string; busy: string; help: string } {
-  // Windows: WSL is in, and turns on with a restart, after which setup opens again by itself
-  if (at?.docker === "restart") return { about: "WSL is installed. It turns on after a restart.", act: "Restart your PC", busy: "Restarting…", help: busy ? "" : "Save your work first. Setup opens again after the restart." };
+  // Windows: WSL turns on with a restart, after which setup opens again by itself. Docker, in before it, starts
+  // after it; one that wouldn't install yet goes in after it
+  if (at?.docker === "restart" || at?.docker === "restart-wsl") {
+    const about = at.docker === "restart" ? "Docker is installed. It starts after a restart." : "WSL is installed. It turns on after a restart.";
+    return { about, act: "Restart your PC", busy: "Restarting…", help: busy ? "" : "Save your work first. Setup opens again after the restart." };
+  }
   // not looked at yet, it reads as not here: the words a new Mac sees first
   const missing = !at || at.docker === "missing";
   return {
     about: missing ? "The free app that runs the sealed box." : "Installed, not running.",
     act: missing ? (installs ? "Install Docker" : "Get Docker") : "Open Docker",
     busy: state.words.docker ?? (missing && installs ? FIRST_WORDS : missing ? "Waiting for Docker…" : "Starting Docker…"),
-    help: busy ? dockerHelp(missing) : missing && installs ? `Installs Docker Desktop, free for personal use.<br>You accept <button class="text-link" data-action="docker-terms">Docker's terms</button>.` : "",
+    // the restart WSL ends in, said before anything starts
+    help: busy ? dockerHelp(missing) : missing && installs ? `Installs Docker Desktop, free for personal use.<br>${at?.restart_ahead ? "Your PC restarts once. " : ""}You accept <button class="text-link" data-action="docker-terms">Docker's terms</button>.` : "",
   };
 }
 

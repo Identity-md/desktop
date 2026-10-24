@@ -389,20 +389,29 @@ async function watch(value: string): Promise<boolean> {
   state.resolving = true;
   state.note = null;
   render();
-  const found = await Promise.all(parts.map(async (part): Promise<{ wallet?: string; seat?: string; missing?: string }> => {
+  const found = await Promise.all(parts.map(async (part): Promise<{ wallet?: string; name?: string; seat?: string; missing?: string; unreached?: boolean }> => {
     if (/^\d+$/.test(part)) {
       const seat = part;
       // a seat the network knows has run an agent: one that never paired has nothing to show
-      const record = await api.seatRecord(seat, 0).catch(() => null);
-      if (record) seatInfo.set(seat, { owner: record.owner?.toLowerCase() ?? "", online: record.online ?? false });
-      return record ? { seat } : { missing: `#${seat}` };
+      const record = await api.seatLookup(seat);
+      if (record === "unreached") return { unreached: true };
+      if (record === "none") return { missing: `#${seat}` };
+      seatInfo.set(seat, { owner: record.owner?.toLowerCase() ?? "", online: record.online ?? false });
+      return { seat };
     }
     if (part.startsWith("0x")) return { wallet: part };
-    const wallet = await api.ensWallet(part).catch(() => null);
-    if (wallet) settings.ens[wallet] = part;
-    return wallet ? { wallet } : { missing: part };
+    const wallet = await api.ensWallet(part);
+    if (wallet === "unreached") return { unreached: true };
+    return wallet ? { wallet, name: part } : { missing: part };
   }));
   state.resolving = false;
+  // a read that failed says nothing of what was typed: nothing is added, and it stays to try again
+  if (found.some((f) => f.unreached)) {
+    state.note = { text: "Couldn't reach the IMD network. Try again in a moment.", bad: true };
+    render();
+    return false;
+  }
+  for (const { wallet, name } of found) if (wallet && name) settings.ens[wallet] = name;
   // what already shows is said, not added twice: a wallet watched, a seat listed, or a seat a watched wallet
   // holds. Wallets go first, so a seat that one typed beside it holds counts as shown.
   const already: Array<{ label: string; through?: string }> = [];

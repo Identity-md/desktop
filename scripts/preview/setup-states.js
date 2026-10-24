@@ -7,7 +7,7 @@ import { installMock } from "./mock.mjs";
 
 const E = "e".padEnd(64, "0"); // a box with its key, not paired yet
 const D = "d5e40d01".padEnd(64, "0"); // the mock's paired box: Agent #12
-const none = { docker: "missing", image: false, worker: false, claude: false, device_key: null };
+const none = { docker: "missing", restart_ahead: false, image: false, worker: false, claude: false, device_key: null };
 const docker = { ...none, docker: "running" };
 const box = { ...docker, image: true };
 const agent = { ...box, worker: true, device_key: E };
@@ -19,10 +19,12 @@ export const STATES = [
   { id: "intro-short", group: "Opening", name: "Short of space", setup: none, intro: true, free: 3.2e9, about: "The disk is read, not asked about: a Mac short of room hears it here, before anything downloads." },
   { id: "looking", group: "Opening", name: "Looking at this computer", setup: none, hang: ["box_setup_state"], about: "Only if Continue is pressed before the check of this Mac is back, usually under a second." },
   { id: "docker", group: "Install Docker", name: "Install Docker", setup: none, about: "A Mac without Docker. The button installs it, the link opens Docker's terms." },
+  { id: "docker-pc", group: "Install Docker", name: "Install Docker, restart ahead", os: "windows", setup: { ...none, restart_ahead: true }, about: "A PC without WSL: installing Docker ends in one restart, which the line under the button says before anything starts." },
   { id: "docker-checking", group: "Install Docker", name: "Checking this PC", os: "windows", setup: none, click: true, about: "Install Docker pressed. A second's look at Windows' version, virtualization and WSL." },
   { id: "docker-ok", group: "Install Docker", name: "Windows asks", os: "windows", setup: none, click: true, words: ["docker", "Waiting for your OK…"], about: "Only without WSL, or with one too old: Windows dims the screen and asks to let Windows Subsystem for Linux, from Microsoft, make changes. A clock shows after 3 seconds." },
   { id: "docker-wsl", group: "Install Docker", name: "Installing WSL", os: "windows", setup: none, click: true, words: ["docker", "Installing WSL…"], about: "Windows installing WSL, which Docker's Linux runs on, a few minutes." },
-  { id: "docker-restart", group: "Install Docker", name: "Restart", os: "windows", setup: { ...none, docker: "restart" }, about: "WSL installed on a PC whose Virtual Machine Platform was off: it turns on at the next start of Windows. Restart your PC restarts it, and setup opens again by itself after." },
+  { id: "docker-restart", group: "Install Docker", name: "Restart", os: "windows", setup: { ...none, docker: "restart" }, about: "WSL and Docker installed on a PC whose Virtual Machine Platform was off: WSL turns on at the next start of Windows, and Docker starts after it. Restart your PC restarts it, and setup opens again by itself and starts Docker." },
+  { id: "docker-restart-wsl", group: "Install Docker", name: "Restart, Docker after", os: "windows", setup: { ...none, docker: "restart-wsl" }, about: "Only if Docker's installer turned down a PC whose WSL waits on its restart: the restart comes first, and Docker installs after it." },
   { id: "docker-start", group: "Install Docker", name: "Starting the download", setup: none, click: true, words: ["docker", "Starting the download…"], about: "Install Docker pressed. Docker's own installer starts downloading." },
   { id: "docker-download", group: "Install Docker", name: "Downloading", setup: none, click: true, words: ["docker", "Downloading 212 of 590 MB"], about: "Docker's installer downloading. The button fills as it goes." },
   { id: "docker-check", group: "Install Docker", name: "Verifying", setup: none, click: true, words: ["docker", "Verifying Docker…"], about: "Verifying the download is Docker's own signed installer. About a second." },
