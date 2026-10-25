@@ -4,9 +4,10 @@
 // `hang` keeps a command waiting, `resolve` answers one at once, `fail` makes one fail as Docker would. A state
 // with `os` is only that computer's.
 import { installMock } from "./mock.mjs";
+import { forceTheme, holdStill, ready } from "./preview.js";
 
 const E = "e".padEnd(64, "0"); // a box with its key, not paired yet
-const D = "d5e40d01".padEnd(64, "0"); // the mock's paired box: Agent #12
+const D = "d5e40d01".padEnd(64, "0"); // the mock's paired box: this computer's agent
 const none = { docker: "missing", restart_ahead: false, image: false, worker: false, claude: false, device_key: null };
 const docker = { ...none, docker: "running" };
 const box = { ...docker, image: true };
@@ -56,21 +57,20 @@ export const statesFor = (os) => STATES.filter((state) => !state.os || state.os 
 /** What WebView2 says it is, on Windows 11: the setup page's words follow it. */
 const WINDOWS_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0";
 
-/** Readies setup-state.html for one state, before the setup page's own script runs. */
-export function stage(id, theme, os) {
+/**
+ * Readies setup-state.html for one state, before the setup page's own script runs. The agent it pairs is the
+ * fixtures' first seat, with its own face, when this checkout has read a wallet; setup needs none of the rest.
+ */
+export function stage(id, theme, os, fixtures) {
   const s = STATES.find((state) => state.id === id) ?? STATES[0];
   if (os === "windows") Object.defineProperty(navigator, "userAgent", { value: WINDOWS_AGENT });
   // past the first screen, but on it
   try { if (s.intro) localStorage.removeItem("imd-agents:setup-begun"); else localStorage.setItem("imd-agents:setup-begun", "1"); } catch {}
-  installMock({ fixtures: { api: {}, svg: {} }, scenario: { box: s.box ?? "no-docker", linked: [], watching: [], setup: s.setup, fail: s.fail }, owner: null, scheme: theme ?? "light" });
-  // the setup window has no desktop behind it
-  document.addEventListener("DOMContentLoaded", () => { document.documentElement.style.background = ""; });
+  installMock({ fixtures: fixtures ?? { api: {}, svg: {} }, scenario: { box: s.box ?? "no-docker", linked: [], watching: [], setup: s.setup, fail: s.fail } });
   const invoke = window.__TAURI_INTERNALS__.invoke;
   let registered = false;
   let started = false;
   window.__TAURI_INTERNALS__.invoke = async (cmd, args, options) => {
-    // the agents' own faces, from the fixtures the panel's preview reads, when this machine has them
-    if (cmd === "agent_svg") return fetch("./fixtures.json").then((r) => r.json()).then((f) => f.svg?.[args.tokenId] ?? null).catch(() => null);
     // the window fits its page, as the app's does: the review page sizes the frame
     if (cmd === "fit_setup") { parent.postMessage({ fit: Math.min(900, Math.max(200, args.height)) }, location.origin); return null; }
     if (s.hang?.includes(cmd)) return new Promise(() => {});
@@ -84,29 +84,17 @@ export function stage(id, theme, os) {
     if (cmd === "box_state" && started) return { ...answer, state: "running", device_key: D };
     return cmd === "box_setup_state" && registered ? { ...answer, device_key: D } : answer;
   };
-  if (theme) {
-    // the page follows the Mac's appearance; here it takes the one the review page shows, again whenever Vite swaps the styles
-    const force = () => {
-      document.documentElement.style.colorScheme = theme;
-      for (const sheet of document.styleSheets) {
-        let rules;
-        try { rules = sheet.cssRules; } catch { continue; }
-        for (const rule of rules) {
-          if (rule instanceof CSSMediaRule && rule.conditionText.includes("prefers-color-scheme")) rule.media.mediaText = rule.conditionText.includes("dark") === (theme === "dark") ? "all" : "not all";
-        }
-      }
-    };
-    new MutationObserver(force).observe(document.head, { childList: true, subtree: true, characterData: true });
-    force();
-  }
+  // the page follows the computer's appearance; the review page sets the one it shows
+  if (theme) forceTheme(theme);
+  if (new URLSearchParams(location.search).has("shot")) holdStill(document.getElementById("setup"));
   // once the page has looked at this computer, press and say what the app would to get here
-  if (s.click || s.words) {
-    const go = () => {
-      const button = document.querySelector("#setup [data-action=step]");
-      if (!button) return void setTimeout(go, 40);
-      if (s.click) button.click();
-      if (s.words) setTimeout(() => window.__emit("setup-step-progress", { step: s.words[0], words: s.words[1] }), 60);
-    };
-    setTimeout(go, 0);
-  }
+  const go = () => {
+    const button = document.querySelector("#setup [data-action=step]");
+    if (!button) return void setTimeout(go, 40);
+    if (s.click) button.click();
+    if (s.words) setTimeout(() => window.__emit("setup-step-progress", { step: s.words[0], words: s.words[1] }), 60);
+    setTimeout(ready, 100);
+  };
+  const drawn = () => (document.getElementById("setup").childElementCount ? ready() : setTimeout(drawn, 40));
+  setTimeout(s.click || s.words ? go : drawn, 0);
 }

@@ -9,10 +9,11 @@
     <main id="setup" class="setup-page"></main>
     <!-- the setup page in the state named by ?state=: the stand-in goes first, then the page's own script -->
     <script type="module">
+      import { readFixtures } from "./preview.js";
       import { stage } from "./setup-states.js";
       const params = new URLSearchParams(location.search);
-      stage(params.get("state"), params.get("theme"), params.get("os"));
+      stage(params.get("state"), params.get("theme"), params.get("os"), await readFixtures());
+      await import("/src/setup.ts");
     </script>
-    <script type="module" src="/src/setup.ts"></script>
   </body>
 </html>

@@ -6,11 +6,14 @@
     <title>Setup review</title>
     <link rel="icon" href="/app-icon.png" />
     <script>
-      // the theme before first paint: the one last picked here, else the Mac's
+      // the theme before first paint: ?theme=, else the one last picked here, else the computer's. ?shot leaves the window
+      // alone on clear pixels, with room for its shadow, for a picture of it
       (() => {
-        let picked = null;
-        try { picked = localStorage.getItem("setup-review:theme"); } catch {}
+        const params = new URLSearchParams(location.search);
+        let picked = params.get("theme");
+        if (!picked) try { picked = localStorage.getItem("setup-review:theme"); } catch {}
         document.documentElement.dataset.theme = picked ?? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        if (params.has("shot")) document.documentElement.dataset.shot = "";
       })();
     </script>
     <style>
@@ -68,6 +71,9 @@
       .controls button:disabled { opacity: 0.35; }
 
       .window { width: 460px; border-radius: 12px; overflow: hidden; background: var(--bar); box-shadow: var(--frame); }
+      [data-shot] body { min-height: 0; background: transparent; }
+      [data-shot] .review { display: block; padding: 28px; }
+      [data-shot] .states, [data-shot] .head, [data-shot] .size { display: none; }
       .bar { position: relative; display: flex; align-items: center; height: 28px; padding: 0 12px; }
       .lights { display: flex; gap: 8px; }
       .lights i { width: 12px; height: 12px; border-radius: 50%; background: var(--zoom); }
@@ -130,8 +136,8 @@
       const SUN = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg>`;
       const MOON = `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1Z"/></svg>`;
 
-      // a Mac's states or a PC's, the one last picked here
-      let os = (() => { try { return localStorage.getItem("setup-review:os"); } catch { return null; } })() === "windows" ? "windows" : "mac";
+      // a Mac's states or a PC's: ?os=, else the one last picked here
+      let os = (new URLSearchParams(location.search).get("os") ?? (() => { try { return localStorage.getItem("setup-review:os"); } catch { return null; } })()) === "windows" ? "windows" : "mac";
       let STATES = statesFor(os);
       let rows = [];
 
@@ -176,7 +182,7 @@
         $("prev").disabled = index === 0;
         $("next").disabled = index === STATES.length - 1;
         // a fresh page each time, so each state plays from its start
-        frame.src = `setup-state.html?state=${s.id}&theme=${theme()}&os=${os}&at=${Date.now()}`;
+        frame.src = `setup-state.html?state=${s.id}&theme=${theme()}&os=${os}${"shot" in document.documentElement.dataset ? "&shot" : ""}&at=${Date.now()}`;
       }
 
       function flip() {

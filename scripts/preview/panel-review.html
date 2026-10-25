@@ -67,6 +67,8 @@
       .window { width: 404px; border-radius: 14px; overflow: hidden; }
       iframe { display: block; width: 404px; height: 600px; border: 0; }
       .size { margin: 12px 0 0; font-size: 12px; text-align: center; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+      .missing { max-width: 460px; margin: 120px auto; padding: 0 16px; text-align: center; color: var(--ink-2); text-wrap: pretty; }
+      .missing code { display: block; margin-top: 8px; color: var(--ink); font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
 
       @media (max-width: 800px) {
         .review { grid-template-columns: minmax(0, 404px); gap: 32px; }
@@ -79,7 +81,7 @@
     <div class="review">
       <aside class="states">
         <h1>Panel</h1>
-        <p class="lede">The real panel with your wallet's public data, the app stood in for. Click, type and rename in it; copy and style changes show as they're saved.</p>
+        <p class="lede">The real panel with a wallet's public data, the app stood in for. Click, type and rename in it; copy and style changes show as they're saved.</p>
         <nav id="list" aria-label="States"></nav>
       </aside>
       <main>
@@ -101,7 +103,8 @@
     </div>
     <script type="module">
       import { panelStates } from "./panel-states.js";
-      const STATES = panelStates(await fetch("./fixtures.json").then((r) => r.json()));
+      import { needFixtures } from "./preview.js";
+      const STATES = panelStates(await needFixtures());
 
       const $ = (id) => document.getElementById(id);
       const frame = $("frame");
