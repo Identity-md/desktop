@@ -5,7 +5,7 @@ import morphdom from "morphdom";
 import * as api from "./api";
 import { faceFor, loadFace } from "./masks";
 import { ctrl, shift } from "./platform";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
 
 // ---------------------------------------------------------------------------------------------
 // What the app remembers between runs: wallets, the network it signs for, names. Nothing secret:
@@ -390,7 +390,8 @@ async function watch(value: string): Promise<boolean> {
   state.note = null;
   render();
   const found = await Promise.all(parts.map(async (part): Promise<{ wallet?: string; name?: string; seat?: string; missing?: string; unreached?: boolean }> => {
-    if (/^\d+$/.test(part)) {
+    const kind = watchKind(part);
+    if (kind === "seat") {
       const seat = part;
       // a seat the network knows has run an agent: one that never paired has nothing to show
       const record = await api.seatLookup(seat);
@@ -399,7 +400,7 @@ async function watch(value: string): Promise<boolean> {
       seatInfo.set(seat, { owner: record.owner?.toLowerCase() ?? "", online: record.online ?? false });
       return { seat };
     }
-    if (part.startsWith("0x")) return { wallet: part };
+    if (kind === "wallet") return { wallet: part };
     const wallet = await api.ensWallet(part);
     if (wallet === "unreached") return { unreached: true };
     return wallet ? { wallet, name: part } : { missing: part };
