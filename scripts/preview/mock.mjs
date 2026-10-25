@@ -1,27 +1,32 @@
 // The app's Rust side, stood in for in the browser: real public data from fixtures.json, a box in a given
 // state, and events the page listens for, which a script can send with window.__emit(name, payload).
-export async function mockApp(context, { fixtures, scenario, owner, scheme, zoom = 1 }) {
-  await context.addInitScript(installMock, { fixtures, scenario, owner, scheme, zoom });
+export async function mockApp(context, { fixtures, scenario }) {
+  await context.addInitScript(installMock, { fixtures, scenario });
 }
 
 /** The stand-in itself, run before the page's own scripts: by Playwright through mockApp, or by a page that imports it. */
-export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
+export function installMock({ fixtures, scenario }) {
+  // the clock reads as it did when the fixtures were read, so every "today", "ago" and fortnight is as it was then
+  if (fixtures.readAt) {
+    const shift = Date.parse(fixtures.readAt) - Date.now();
+    const Real = Date;
+    globalThis.Date = class extends Real {
+      constructor(...args) { super(...(args.length ? args : [Real.now() + shift])); }
+      static now() { return Real.now() + shift; }
+    };
+  }
+  // this computer's agent: the first seat the wallet holds, as in panel-states.js, or with no wallet read, #12
+  const local = fixtures.api[`/pair/wallet/${fixtures.wallet}`]?.body?.tokens?.[0]?.tokenId ?? "12";
   // seats watched by number, names given, and what the last run learned: `seats: ["22"]`, `names: { "22": "Mac mini" }`, `localOwner`, `shown`
-  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, seats: scenario.seats ?? [], wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: scenario.names ?? {}, runtime: "claude", localToken: scenario.box === "no-docker" ? null : "12", localOwner: scenario.localOwner ?? null, shown: scenario.shown ?? 0 }));
+  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, seats: scenario.seats ?? [], wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: scenario.names ?? {}, runtime: "claude", localToken: scenario.box === "no-docker" ? null : local, localOwner: scenario.localOwner ?? null, shown: scenario.shown ?? 0 }));
   // what the panel showed when it last closed: `seen: { today, accepted, usd }`
   if (scenario.seen) localStorage.setItem("imd-agents:seen", JSON.stringify(scenario.seen)); else localStorage.removeItem("imd-agents:seen");
-  // a desktop behind the panel, so its shadow shows
-  document.addEventListener("DOMContentLoaded", () => {
-    document.documentElement.style.background = scheme === "dark" ? "#0e0e10" : "#e6e6eb";
-    // a film is recorded at one pixel per point: drawn larger, it stays sharp
-    if (zoom !== 1) Object.assign(document.body.style, { transform: `scale(${zoom})`, transformOrigin: "0 0" });
-  });
   window.__fixtures = fixtures;
   // the job lands 2.5 s in, and the page reads again as R does
   if (scenario.lands) setTimeout(() => { window.__landed = true; window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" })); }, 2500);
   const deviceKey = "d5e40d01".padEnd(64, "0");
   const answer = (path) => {
-    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: "active", tokenId: "12" } } };
+    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: "active", tokenId: local } } };
     const hit = window.__fixtures.api[path];
     if (!hit) return { status: 404, body: null };
     const body = structuredClone(hit.body);

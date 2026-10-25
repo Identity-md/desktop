@@ -140,9 +140,9 @@ pnpm app:build                # the installable app, in src-tauri/target/release
 
 On a Mac, `pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis` builds the Windows installer too (`brew install llvm lld makensis`, `cargo install --locked cargo-xwin`), as a release does.
 
-### Seeing the panel without the app
+### Seeing it without the app
 
-`pnpm dev`, then `node scripts/preview/fixtures.mjs <wallet>` reads a wallet's real public data, `node scripts/preview/capture.mjs` screenshots every state of the panel, light and dark, into `scripts/preview/shots/`, and `node scripts/preview/film.mjs` films its motion there. `scripts/preview/setup-review.html` pages through every state of the setup window, a Mac's or a PC's.
+`scripts/preview/` draws the panel and the setup window in a browser, every state of each, from a wallet's public data, and takes pictures of them: `node scripts/preview/fixtures.mjs <wallet>`, `pnpm dev`, then open [localhost:1430/scripts/preview/panel-review.html](http://localhost:1430/scripts/preview/panel-review.html). [Its README](scripts/preview/README.md) has the rest.
 
 ## Layout
 
@@ -158,6 +158,7 @@ On a Mac, `pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc 
 | `scripts/installer/` | The disk image's window, drawn with imd.fun's own wall |
 | `scripts/release.mjs` | Build, sign, notarize and publish, for Mac and Windows |
 | `scripts/sign-windows.mjs` | Signs each Windows program as a release builds it |
+| `scripts/preview/` | Every state of the panel and the setup window in a browser, and pictures of them |
 
 ## Release
 

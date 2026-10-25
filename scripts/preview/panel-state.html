@@ -11,12 +11,12 @@
     <script type="module">
       import { installMock } from "./mock.mjs";
       import { panelStates } from "./panel-states.js";
+      import { forceTheme, holdStill, needFixtures, ready } from "./preview.js";
       const params = new URLSearchParams(location.search);
-      const theme = params.get("theme") === "dark" ? "dark" : "light";
-      const fixtures = await fetch("./fixtures.json").then((r) => r.json());
+      const fixtures = await needFixtures();
       const states = panelStates(fixtures);
       const state = states.find((s) => s.id === params.get("state")) ?? states[0];
-      installMock({ fixtures, scenario: state.scenario, owner: fixtures.wallet, scheme: theme });
+      installMock({ fixtures, scenario: state.scenario });
 
       // the panel sizes its window as the app's does: here the review page sizes the frame
       const invoke = window.__TAURI_INTERNALS__.invoke;
@@ -28,21 +28,16 @@
       window.addEventListener("blur", (event) => event.stopImmediatePropagation(), true);
       document.addEventListener("pointerdown", (event) => { if (!document.getElementById("panel").contains(event.target)) event.stopImmediatePropagation(); }, true);
 
-      // the panel follows the Mac's appearance; here it takes the one the review page shows, again whenever Vite swaps the styles
-      const force = () => {
-        document.documentElement.style.colorScheme = theme;
-        for (const sheet of document.styleSheets) {
-          let rules;
-          try { rules = sheet.cssRules; } catch { continue; }
-          for (const rule of rules) {
-            if (rule instanceof CSSMediaRule && rule.conditionText.includes("prefers-color-scheme")) rule.media.mediaText = rule.conditionText.includes("dark") === (theme === "dark") ? "all" : "not all";
-          }
-        }
-      };
-      new MutationObserver(force).observe(document.head, { childList: true, subtree: true, characterData: true });
-
+      // the panel follows the computer's appearance; ?theme= sets it, as the review page does
+      if (params.get("theme")) forceTheme(params.get("theme"));
+      // ?shot, for a picture of it: held still, and the panel as tall as what's in it, whatever height its last resize left
+      if (params.has("shot")) {
+        const style = document.createElement("style");
+        style.textContent = "#panel { height: auto !important; }";
+        document.head.append(style);
+        holdStill(document.getElementById("app"));
+      }
       await import("/src/main.ts");
-      force();
       // then what someone would press to get there
       const until = (selector) => new Promise((done) => {
         const look = () => { const el = document.querySelector(selector); if (el) done(el); else setTimeout(look, 50); };
@@ -53,6 +48,9 @@
         (await until(selector)).click();
         await new Promise((done) => setTimeout(done, 700));
       }
+      // and a job that lands 2.5 s in, landed
+      if (state.scenario.lands) await new Promise((done) => setTimeout(done, 2000));
+      ready();
     </script>
   </body>
 </html>
