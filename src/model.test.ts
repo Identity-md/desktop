@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tookJob, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -142,6 +142,12 @@ describe("numbers", () => {
     expect(watchParts("14 25 vitalik").odd).toBe("vitalik");
     expect(watchParts("0").odd).toBe("0");
     expect(watchParts("  ").parts).toEqual([]);
+    // a name that starts like an address is still a name
+    expect(watchParts("0xminion.eth 0xE085327c5AD2F77147F10973Fed45Fb19d734F7e")).toEqual({ parts: ["0xminion.eth", "0xe085327c5ad2f77147f10973fed45fb19d734f7e"], odd: null });
+    expect(watchKind("0xminion.eth")).toBe("name");
+    expect(watchKind("0xe085327c5ad2f77147f10973fed45fb19d734f7e")).toBe("wallet");
+    expect(watchKind("14")).toBe("seat");
+    expect(watchKind("0xe085")).toBe(null);
   });
 
   it("names the command that fixes an agent's sandbox on its machine, from what the fleet's workers said", () => {

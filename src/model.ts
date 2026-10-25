@@ -359,8 +359,16 @@ export function tookJob(before: Map<string, string[]> | null, now: Map<string, s
 export function watchParts(value: string): { parts: string[]; odd: string | null } {
   const pieces = value.toLowerCase().split(/[\s,]+/).map((part) => part.replace(/^#/, "")).filter(Boolean);
   const parts = [...new Set(pieces.map((part) => (/^\d+$/.test(part) ? String(Number(part)) : part)))];
-  const odd = parts.find((part) => !/^[1-9]\d{0,5}$/.test(part) && !/^0x[0-9a-f]{40}$/.test(part) && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(part)) ?? null;
+  const odd = parts.find((part) => !watchKind(part)) ?? null;
   return { parts, odd };
+}
+
+/** What one of those pieces is, by its whole shape: an ENS name can start 0x too, as 0xminion.eth does. */
+export function watchKind(part: string): "seat" | "wallet" | "name" | null {
+  if (/^[1-9]\d{0,5}$/.test(part)) return "seat";
+  if (/^0x[0-9a-f]{40}$/.test(part)) return "wallet";
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(part)) return "name";
+  return null;
 }
 
 /**
