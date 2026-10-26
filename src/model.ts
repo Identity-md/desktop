@@ -404,6 +404,9 @@ export function setupErrorWords(raw: string): string {
     [/no such host|could not resolve|network is unreachable|i\/o timeout|tls handshake timeout|connection reset|eai_again|enotfound|etimedout/i, "This computer can't reach the internet right now. Check the connection, then try again."],
     [/\bdenied\b|unauthorized|authentication required/i, "GitHub refused the box download. Try again in a few minutes."],
     [/^timed out$/i, "That took too long. Check the connection, then try again."],
+    // `imd pair`'s own two endings short of paired: the code ran out, or the approval was refused
+    [/pairing code expired/i, "The code ran out before it was approved. Connect again for a new one."],
+    [/attempted but not accepted/i, "The approval didn't go through. Check the page in your browser, then connect again."],
   ];
   for (const [pattern, words] of known) if (pattern.test(text)) return words;
   const lines = text.split("\n").map((line) => line.trim()).filter((line) => line && !/^Run '.*--help'/.test(line));

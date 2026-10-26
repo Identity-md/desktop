@@ -18,7 +18,9 @@ export function installMock({ fixtures, scenario }) {
   // this computer's agent: the first seat the wallet holds, as in panel-states.js, or with no wallet read, #12
   const local = fixtures.api[`/pair/wallet/${fixtures.wallet}`]?.body?.tokens?.[0]?.tokenId ?? "12";
   // seats watched by number, names given, and what the last run learned: `seats: ["22"]`, `names: { "22": "Mac mini" }`, `localOwner`, `shown`
-  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, seats: scenario.seats ?? [], wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: scenario.names ?? {}, runtime: "claude", localToken: scenario.box === "no-docker" ? null : local, localOwner: scenario.localOwner ?? null, shown: scenario.shown ?? 0 }));
+  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, seats: scenario.seats ?? [], wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: scenario.names ?? {}, runtime: "claude", localToken: scenario.box === "no-docker" || scenario.fresh ? null : local, localOwner: scenario.localOwner ?? null, shown: scenario.shown ?? 0 }));
+  // where setup was told the seat came from, as `seat: "lend"`; unset, nothing a setup state left behind carries over
+  if (scenario.seat) localStorage.setItem("imd-agents:seat", scenario.seat); else if (!scenario.setup) localStorage.removeItem("imd-agents:seat");
   // what the panel showed when it last closed: `seen: { today, accepted, usd }`
   if (scenario.seen) localStorage.setItem("imd-agents:seen", JSON.stringify(scenario.seen)); else localStorage.removeItem("imd-agents:seen");
   window.__fixtures = fixtures;
@@ -26,7 +28,8 @@ export function installMock({ fixtures, scenario }) {
   if (scenario.lands) setTimeout(() => { window.__landed = true; window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" })); }, 2500);
   const deviceKey = "d5e40d01".padEnd(64, "0");
   const answer = (path) => {
-    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: "active", tokenId: local } } };
+    // the box's pairing, retired when its seat moved on: `unpaired: true`
+    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: scenario.unpaired ? "stale" : "active", tokenId: local } } };
     const hit = window.__fixtures.api[path];
     if (!hit) return { status: 404, body: null };
     const body = structuredClone(hit.body);
@@ -77,6 +80,8 @@ export function installMock({ fixtures, scenario }) {
         case "worker_releases": return { status: 200, body: window.__fixtures.releases ?? [] };
         // setting a box up: how far it has got (`setup` in the scenario), and steps that take their time
         case "box_setup_state": return scenario.setup ?? { docker: "running", image: true, worker: true, claude: true, device_key: deviceKey };
+        // a pairing code already out, setup's window closed on it: `pending: true`
+        case "pairing_pending": return scenario.pending ? { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" } : null;
         case "docker_open": case "box_sign_in": case "open_pairing": return null;
         case "box_pull": case "box_install": return new Promise((done) => setTimeout(done, 60_000));
         case "box_pair":

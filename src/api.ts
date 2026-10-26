@@ -56,10 +56,17 @@ export async function swarm(): Promise<{ online: number; working: number; events
   return health ? { online: health.agentsOnline, working: health.workingNow, events: answer.body?.events ?? [] } : null;
 }
 
-/** Which seat a device serves, from the network's own record of it. */
+/**
+ * Which seat a device serves, from the network's own record of it: null when it serves none, as when it never paired,
+ * was unlinked, or its seat moved to another wallet, which retires its pairing. A read that fails throws, so a busy
+ * network isn't taken for a box with no seat.
+ */
 export async function deviceSeat(deviceKey: string): Promise<string | null> {
   const answer = await get<Standing>(`/workers/${deviceKey}/standing?queue=0`);
-  return answer.status === 200 ? answer.body?.enrollment?.tokenId ?? null : null;
+  if (answer.status === 404) return null;
+  if (answer.status !== 200) throw new Error(`the network answered ${answer.status}`);
+  const enrollment = answer.body?.enrollment;
+  return enrollment?.status === "active" ? enrollment.tokenId : null;
 }
 
 /** Sepolia: a testnet coin is earned, never ready to claim, since claiming it is worth nothing. */
@@ -131,10 +138,25 @@ export const openClaudePlans = () => invoke<void>("open_claude_plans");
 export const freeSpace = () => invoke<number | null>("free_space");
 export const boxInstall = () => invoke<void>("box_install");
 export const boxSignIn = () => invoke<void>("box_sign_in");
-/** Pairs the box; its code arrives first as the `box-pairing` event. */
-export const boxPair = () => invoke<{ token_id: string | null; register: string | null }>("box_pair");
+/** Pairs the box, then starts it; its code arrives first as the `box-pairing` event, and its end as `box-pair-ended`. */
+export const boxPair = (runtime: string) => invoke<{ token_id: string | null; register: string | null }>("box_pair", { runtime });
+/** The pairing under way, if setup is opened again while its code waits. */
+export const pairingPending = () => invoke<{ code: string; url: string } | null>("pairing_pending");
 export const boxPairCancel = () => invoke<void>("box_pair_cancel");
 export const openPairing = (url: string) => invoke<void>("open_pairing", { url });
+/** The network's pairing link onto the clipboard, for whoever holds the seat to approve from their own wallet. */
+export const copyPairing = (url: string) => invoke<void>("copy_pairing", { url });
+/** When a pairing code runs out, from the network's record of it, or null where it can't say. */
+export async function pairingExpires(code: string): Promise<number | null> {
+  const answer = await get<{ expiresAt?: string }>(`/pair/${code}`);
+  const at = answer.status === 200 ? Date.parse(answer.body?.expiresAt ?? "") : Number.NaN;
+  return Number.isFinite(at) ? at : null;
+}
+/**
+ * imdLend, where seats are lent, which the network doesn't run: its pairing page with the code put on the clipboard
+ * (true when it went), or its rewards, claimed for a vault's owner and operator at once.
+ */
+export const openLend = (page: "pair" | "rewards", code?: string) => invoke<boolean>("open_lend", { page, code: code ?? null });
 /** The worker's newest releases, from GitHub, as daemons update from them. */
 export const workerReleases = () => invoke<Answer<ReleaseRow[]>>("worker_releases");
 

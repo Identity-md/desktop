@@ -174,6 +174,9 @@ describe("numbers", () => {
     expect(setupErrorWords('error during connect: Get "http://%2F%2F.%2Fpipe%2Fdocker_engine/v1.51/version": open //./pipe/docker_engine: Access is denied.')).toMatch(/^This Windows user can't use Docker/);
     expect(setupErrorWords("identitymd-worker.tgz: FAILED\nsha256sum: WARNING: 1 computed checksum did NOT match")).toMatch(/didn't match its published checksum/);
     expect(setupErrorWords("timed out")).toBe("That took too long. Check the connection, then try again.");
+    // pairing's own endings, as `imd pair` writes them
+    expect(setupErrorWords("pairing code expired before it was signed")).toBe("The code ran out before it was approved. Connect again for a new one.");
+    expect(setupErrorWords("pairing was attempted but not accepted — check the browser tab")).toMatch(/^The approval didn't go through/);
     // one it does not know: Docker's error, not the line after it
     expect(setupErrorWords("docker: Error response from daemon: range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available\nRun 'docker run --help' for more information")).toBe("range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available");
     expect(setupErrorWords("")).toBe("Something went wrong. Try again.");

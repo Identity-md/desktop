@@ -558,6 +558,21 @@ body.setup-window { padding: 0; overflow: auto; background: var(--bg); }
 .pairing { margin-top: 16px; text-align: center; }
 .pairing .code { margin: 0 0 8px; }
 .pairing .actions { justify-content: center; }
+
+/* the seat screen: the question in the middle of the room, its answers as rows whose circles the steps' echo */
+.question { margin: auto 0; }
+.question + .setup-foot { margin-top: 0; }
+.question h1, .question .setup-intro { text-align: center; }
+.seat-choice { position: relative; display: grid; grid-template-columns: 26px 1fr; gap: 12px; align-items: center; width: 100%; min-height: 52px; padding: 8px; border-radius: 12px; text-align: left; transition: background-color 0.15s; }
+.seat-choice:hover { background: var(--hover); }
+.seat-choice:active { background: var(--press); }
+.seat-choice:focus-visible { outline-offset: -2px; }
+.seat-choice + .seat-choice::before { content: ""; position: absolute; top: 0; right: 8px; left: 46px; height: 0.5px; background: var(--line); transition: opacity 0.15s; }
+/* a lit row has no rule above or below it */
+.seat-choice:hover::before, .seat-choice:hover + .seat-choice::before { opacity: 0; }
+/* a radio drawn as the steps draw their circles: a ring, and picked, the ring fills in ink to a dot */
+.radio { width: 22px; height: 22px; margin: 0 2px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--off); transition: box-shadow 0.3s var(--spring); }
+.seat-choice.on .radio { box-shadow: inset 0 0 0 7px var(--ink); }
 /* a step that failed says so under the button, centred like the line it takes the place of */
 .setup-page .note { text-align: center; text-wrap: pretty; }
 
