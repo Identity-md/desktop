@@ -319,7 +319,7 @@ function html(): string {
     { key: "signin", done: Boolean(at?.claude), doneWords: "Connected", about: "The AI your agent thinks with. Sign in once." },
     { key: "pair", done: Boolean(state.token), doneWords: `Connected · Agent #${state.token}`, about: "Approve with the wallet that holds your seat." },
   ];
-  const list = steps.map((s, i) => `<div class="line step${s.done ? " done" : s.key === next ? " next" : ""}" id="step-${s.key}">
+  const list = steps.map((s, i) => `<div class="line step${s.done ? " complete" : s.key === next ? " next" : ""}" id="step-${s.key}">
       <span class="step-num" aria-hidden="true">${s.done ? CHECK : `<b>${i + 1}</b>`}</span>
       <span class="step-lines"><span class="step-name">${esc(NAMES[s.key])}</span><span class="sub">${esc(s.done ? s.doneWords : s.about)}</span></span>
     </div>`).join("");

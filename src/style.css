@@ -478,8 +478,9 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 /* the number trimmed to its cap height and baseline, so it centres in the circle by its ink, not its line */
 .step-num b { display: block; font-weight: inherit; text-box: trim-both cap alphabetic; }
 .step.next .step-num { color: var(--bg); background: var(--ink); box-shadow: none; }
-.step.done .step-num { color: var(--on); background: color-mix(in srgb, var(--on) 16%, transparent); box-shadow: none; animation: pop 0.45s var(--spring) both; }
-.step:not(.done):not(.next) { opacity: 0.45; }
+/* `complete`, not the panel's `done`, whose rows sit 8 px wider */
+.step.complete .step-num { color: var(--on); background: color-mix(in srgb, var(--on) 16%, transparent); box-shadow: none; animation: pop 0.45s var(--spring) both; }
+.step:not(.complete):not(.next) { opacity: 0.45; }
 .step-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .step-name { font-weight: 600; }
 .check { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; color: var(--on); background: color-mix(in srgb, var(--on) 16%, transparent); animation: pop 0.45s var(--spring) both; }
