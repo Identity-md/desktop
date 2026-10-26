@@ -1731,24 +1731,19 @@ fn pairing_link(url: &str) -> bool {
 /// imdLend, the market where seats are lent, which the network doesn't run.
 const LEND: &str = "https://imdlend.com";
 
-/// Opens one of imdLend's two pages, and no other: its pairing page, for a seat borrowed there, with the box's code on
-/// the clipboard, since the page takes a code typed or pasted and not from its link (the code rides in the link too, for
-/// the day it does); or its rewards, where a vault's are claimed for its owner and its operator at once. True when the
-/// code went onto the clipboard.
+/// Opens one of imdLend's two pages, and no other: its pairing page, for a seat borrowed there, which takes the box's code
+/// from its link; or its rewards, where a vault's are claimed for its owner and its operator at once.
 #[tauri::command]
-fn open_lend(app: tauri::AppHandle, page: String, code: Option<String>) -> Result<bool, String> {
-    let mut copied = false;
+fn open_lend(app: tauri::AppHandle, page: String, code: Option<String>) -> Result<(), String> {
     let url = match page.as_str() {
         "pair" => {
             let code = code.filter(|c| pairing_code(c)).ok_or("not a pairing code")?;
-            copied = copy_text(&code).is_ok();
             format!("{LEND}/run/pair?code={code}")
         }
         "rewards" => format!("{LEND}/rewards"),
         _ => return Err("not an imdLend page".into()),
     };
-    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())?;
-    Ok(copied)
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
 /// A pairing code as the network makes them: four to sixteen capitals and digits, nothing to escape in a link.

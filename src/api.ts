@@ -153,10 +153,11 @@ export async function pairingExpires(code: string): Promise<number | null> {
   return Number.isFinite(at) ? at : null;
 }
 /**
- * imdLend, where seats are lent, which the network doesn't run: its pairing page with the code put on the clipboard
- * (true when it went), or its rewards, claimed for a vault's owner and operator at once.
+ * imdLend, where seats are lent, which the network doesn't run: its pairing page, taking the code from its link; or its
+ * rewards, claimed for a vault's owner and operator at once.
  */
-export const openLend = (page: "pair" | "rewards", code?: string) => invoke<boolean>("open_lend", { page, code: code ?? null });
+export const openLend = (page: "pair" | "rewards", of: { code?: string } = {}) =>
+  invoke<void>("open_lend", { page, code: of.code ?? null });
 /** The worker's newest releases, from GitHub, as daemons update from them. */
 export const workerReleases = () => invoke<Answer<ReleaseRow[]>>("worker_releases");
 
