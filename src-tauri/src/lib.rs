@@ -613,6 +613,8 @@ const BOX_PUBLISHED: &str = "ghcr.io/identity-md/box:latest";
 const BOX_PAIRING: &str = "imd-worker-pair";
 /// The one-off box that unlinks, named so that one left behind is cleared before the next.
 const BOX_UNLINKING: &str = "imd-worker-unlink";
+/// The one-off box that updates the worker before a pairing, named as the others are.
+const BOX_UPDATING: &str = "imd-worker-update";
 /// Docker Desktop's installer for this computer's chip, straight from Docker, so Install Docker downloads it rather
 /// than opening a page that asks which chip it is for; on Linux, Docker's page.
 fn docker_download() -> String {
@@ -1655,6 +1657,7 @@ async fn box_pair(app: tauri::AppHandle, runtime: String) -> Result<Paired, Stri
 }
 
 fn pair_and_start(app: &tauri::AppHandle, runtime: &str) -> Result<Paired, String> {
+    update_worker();
     let answer = (|| {
         use std::io::BufRead;
         let _ = run_docker(&["rm", "-f", BOX_PAIRING], Duration::from_secs(30));
@@ -1702,6 +1705,20 @@ fn pair_and_start(app: &tauri::AppHandle, runtime: &str) -> Result<Paired, Strin
         }
     }
     answer
+}
+
+/// The newest worker, before a pairing: `imd update` in a one-off box. A running box takes each release by itself, but
+/// one that hasn't run since an older release still has that release's worker, and pairing needs a recent one. Best
+/// effort: without GitHub, the pairing goes on with the worker it has.
+fn update_worker() {
+    let _ = run_docker(&["rm", "-f", BOX_UPDATING], Duration::from_secs(30));
+    let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_UPDATING.into()];
+    args.extend(box_flags());
+    args.extend([BOX_IMAGE.to_string(), "imd".into(), "update".into()]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Some((false, why)) = run_docker(&args, Duration::from_secs(90)) {
+        log_failure(&format!("imd update before pairing: {}", why.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("failed")));
+    }
 }
 
 /// Opens the page a pairing code is approved on: the network's own pairing page, never another.
