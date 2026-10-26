@@ -611,6 +611,8 @@ async fn box_state() -> BoxState {
 const BOX_PUBLISHED: &str = "ghcr.io/identity-md/box:latest";
 /// The one-off box that pairs, named so that a cancel can stop it.
 const BOX_PAIRING: &str = "imd-worker-pair";
+/// The one-off box that unlinks, named so that one left behind is cleared before the next.
+const BOX_UNLINKING: &str = "imd-worker-unlink";
 /// Docker Desktop's installer for this computer's chip, straight from Docker, so Install Docker downloads it rather
 /// than opening a page that asks which chip it is for; on Linux, Docker's page.
 fn docker_download() -> String {
@@ -1731,19 +1733,145 @@ fn pairing_link(url: &str) -> bool {
 /// imdLend, the market where seats are lent, which the network doesn't run.
 const LEND: &str = "https://imdlend.com";
 
-/// Opens one of imdLend's two pages, and no other: its pairing page, for a seat borrowed there, which takes the box's code
-/// from its link; or its rewards, where a vault's are claimed for its owner and its operator at once.
+/// Opens one of imdLend's pages, and no other: its pairing page, for a seat borrowed there, which takes the box's code
+/// from its link; a new listing, for a seat of this wallet's to lend; the lender's vaults, where a lent seat is withdrawn
+/// or lent again; the borrower's lendings; or its rewards, where a vault's are claimed for its owner and its operator at
+/// once.
 #[tauri::command]
-fn open_lend(app: tauri::AppHandle, page: String, code: Option<String>) -> Result<(), String> {
+fn open_lend(app: tauri::AppHandle, page: String, code: Option<String>, seat: Option<String>) -> Result<(), String> {
     let url = match page.as_str() {
         "pair" => {
             let code = code.filter(|c| pairing_code(c)).ok_or("not a pairing code")?;
             format!("{LEND}/run/pair?code={code}")
         }
+        "vaults" => format!("{LEND}/lend/vaults"),
+        "run" => format!("{LEND}/run"),
+        "list" => {
+            let seat = seat.filter(|s| seat_number(s)).ok_or("not a seat number")?;
+            format!("{LEND}/lend/new?seat={seat}")
+        }
         "rewards" => format!("{LEND}/rewards"),
         _ => return Err("not an imdLend page".into()),
     };
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// imdLend's market on Ethereum, which made every vault, and so can say whether an address is one.
+const LEND_MARKET: &str = "0x2008b60c94e97a0f5315fc90a0aafe9e3bd78f7d";
+
+/// What imdLend fixed when it made a vault: who lent the seat, who runs it, and the lender's share in basis points.
+/// None of it ever changes.
+#[derive(Serialize, Debug, PartialEq)]
+struct Terms {
+    owner: String,
+    operator: String,
+    owner_bps: u16,
+}
+
+/// When a seat's latest lending in its vault began and ends (or ended), in seconds. The vault counts it as on until its
+/// end (`isNftLent`), so the clock says when it's over.
+#[derive(Serialize, Debug, PartialEq)]
+struct Span {
+    started_at: u64,
+    ends_at: u64,
+}
+
+/// A vault's terms, read from its code where the vault itself reads them (`Clones.fetchCloneArgs`): a clone's 45 bytes
+/// pointing at imdLend's vault code, then the lender, the borrower and the share, a word each. Any other code, a wallet's
+/// delegation or another contract, is no vault.
+fn clone_terms(code: &str) -> Option<Terms> {
+    if code.len() != 282 || !code.starts_with("363d3d373d3d3d363d73") || code.get(60..90) != Some("5af43d82803e903d91602b57fd5bf3") {
+        return None;
+    }
+    let args = code.get(90..)?;
+    let owner_bps = word_u64(args, 2).and_then(|b| u16::try_from(b).ok())?;
+    Some(Terms { owner: word_address(args, 0)?, operator: word_address(args, 1)?, owner_bps })
+}
+
+/// Whether a seat's holder is one of imdLend's vaults, and its terms if so: one read of its code, then the market's word
+/// that the vault for those terms lives at that address, so a contract that only looks like a vault isn't taken for one.
+/// Neither answer ever changes, so the app asks once per holder. None when the holder isn't a vault; an error when the
+/// chain couldn't be read, which says nothing either way.
+#[tauri::command]
+async fn lend_vault(holder: String) -> Result<Option<Terms>, String> {
+    let holder = holder.to_ascii_lowercase();
+    if !hex_address(&holder) {
+        return Err("not an address".into());
+    }
+    let Some(terms) = rpc("eth_getCode", serde_json::json!([holder, "latest"])).await?.as_deref().and_then(clone_terms) else { return Ok(None) };
+    let at = format!("b369ec51{:0>64}{:0>64}{:064x}", &terms.owner[2..], &terms.operator[2..], terms.owner_bps);
+    let made = eth_call(LEND_MARKET, &at).await?.and_then(|w| word_address(&w, 0));
+    Ok((made.as_deref() == Some(holder.as_str())).then_some(terms))
+}
+
+/// A seat's latest lending in a vault the app has checked: one call, `getLending`. None for a seat the vault never lent.
+#[tauri::command]
+async fn lend_span(vault: String, seat: String) -> Result<Option<Span>, String> {
+    let vault = vault.to_ascii_lowercase();
+    if !hex_address(&vault) || !seat_number(&seat) {
+        return Err("not a vault and a seat".into());
+    }
+    let token = format!("{:064x}", seat.parse::<u64>().map_err(|e| e.to_string())?);
+    let span = eth_call(&vault, &format!("b3277d3e{token}")).await?.ok_or("no answer to getLending")?;
+    let (Some(started_at), Some(ends_at)) = (word_u64(&span, 0), word_u64(&span, 1)) else { return Err("an unreadable lending".into()) };
+    Ok((started_at > 0).then_some(Span { started_at, ends_at }))
+}
+
+/// An address as 0x and 40 hex digits.
+fn hex_address(text: &str) -> bool {
+    text.len() == 42 && text.starts_with("0x") && text[2..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// One call to a contract on Ethereum: what it returned, or nothing when it refused, as a contract without that function
+/// does.
+async fn eth_call(to: &str, data: &str) -> Result<Option<String>, String> {
+    rpc("eth_call", serde_json::json!([{ "to": to, "data": format!("0x{data}") }, "latest"])).await
+}
+
+/// One read of Ethereum, through the explorer's endpoint: what it returned, as lowercase hex without its 0x; nothing when
+/// it returned nothing or a call was refused; an error when it couldn't be asked.
+async fn rpc(method: &str, params: serde_json::Value) -> Result<Option<String>, String> {
+    let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let response = http().post(format!("{}/api/rpc/1", explorer_base())).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("the chain's endpoint answered {}", response.status()));
+    }
+    let answer: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if let Some(error) = answer.get("error") {
+        // the call ran and the contract refused it: an answer, not a failure to ask
+        let said = error.to_string().to_ascii_lowercase();
+        return if said.contains("revert") { Ok(None) } else { Err(said) };
+    }
+    let result = answer.get("result").and_then(|r| r.as_str()).and_then(|r| r.strip_prefix("0x")).ok_or("no result")?;
+    if !result.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("an answer that isn't hex".into());
+    }
+    Ok((!result.is_empty()).then(|| result.to_ascii_lowercase()))
+}
+
+/// The `index`th 32-byte word of a call's answer.
+fn word(hex: &str, index: usize) -> Option<&str> {
+    hex.get(index * 64..(index + 1) * 64)
+}
+
+/// A word holding an address, as 0x and 40 hex digits.
+fn word_address(hex: &str, index: usize) -> Option<String> {
+    let word = word(hex, index)?;
+    word[..24].bytes().all(|b| b == b'0').then(|| format!("0x{}", &word[24..]))
+}
+
+/// A word holding a number that fits 64 bits: a time, a share, a yes or no.
+fn word_u64(hex: &str, index: usize) -> Option<u64> {
+    let word = word(hex, index)?;
+    if !word[..48].bytes().all(|b| b == b'0') {
+        return None;
+    }
+    u64::from_str_radix(&word[48..], 16).ok()
+}
+
+/// A seat's number, and nothing else, to go in a link.
+fn seat_number(seat: &str) -> bool {
+    (1..=6).contains(&seat.len()) && seat.chars().all(|c| c.is_ascii_digit())
 }
 
 /// A pairing code as the network makes them: four to sixteen capitals and digits, nothing to escape in a link.
@@ -1825,6 +1953,33 @@ async fn box_stop() -> Result<(), String> {
         Some((false, why)) if why.contains("No such container") => Ok(()),
         Some((false, why)) => Err(why),
         None => Err("Docker is not installed".into()),
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Takes this computer off its seat before the seat is listed, as imdLend asks of every lender: its box removed, then
+/// `imd unlink`, signed with this computer's own key, in a one-off box. Removed, the box doesn't start again by itself.
+#[tauri::command]
+async fn box_unlink() -> Result<(), String> {
+    let _busy = Busy::new();
+    tauri::async_runtime::spawn_blocking(|| {
+        match run_docker(&["rm", "-f", BOX_NAME], Duration::from_secs(60)) {
+            Some((true, _)) => {}
+            Some((false, why)) if why.contains("No such container") => {}
+            Some((false, why)) => return Err(why),
+            None => return Err("Docker is not installed".into()),
+        }
+        let _ = run_docker(&["rm", "-f", BOX_UNLINKING], Duration::from_secs(30));
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_UNLINKING.into()];
+        args.extend(box_flags());
+        args.extend([BOX_IMAGE.to_string(), "imd".into(), "unlink".into()]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match run_docker(&args, Duration::from_secs(90)) {
+            Some((true, _)) => Ok(()),
+            Some((false, why)) => Err(why.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("this computer could not be unlinked").to_string()),
+            None => Err("Docker is not installed".into()),
+        }
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2433,7 +2588,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
-            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
+            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
             docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound, set_theme,
             restart_pc, set_open_at_login
         ])
@@ -2612,6 +2767,68 @@ mod tests {
         // nothing that would change the link it rides in, and nothing the network wouldn't make
         for not in ["qx7m4kd2", "QX7", "QX7M 4KD2", "QX7M4KD2&seat=1", "QX7M4KD2/../x", "ÄX7M4KD2"] {
             assert!(!super::pairing_code(not), "{not}");
+        }
+    }
+
+    #[test]
+    fn reads_a_vaults_answers_word_by_word() {
+        // as seat #494's vault answered getLending and OWNER on 2026-10-26
+        let span = format!("{:064x}{:064x}", 1792269179u64, 1792873979u64);
+        assert_eq!((super::word_u64(&span, 0), super::word_u64(&span, 1)), (Some(1792269179), Some(1792873979)));
+        let owner = "000000000000000000000000047f606fd5b2baa5f5c6c4ab8958e45cb6b054b7";
+        assert_eq!(super::word_address(owner, 0).as_deref(), Some("0x047f606fd5b2baa5f5c6c4ab8958e45cb6b054b7"));
+        // a word too big for what it should hold, or not there at all, is no answer
+        assert_eq!(super::word_u64(owner, 0), None);
+        assert_eq!(super::word_u64(&span, 2), None);
+    }
+
+    /// Seat #494's vault's code, as it stood on 2026-10-26: the clone, imdLend's vault code, then its lender, borrower
+    /// and 30%.
+    const VAULT_494: &str = concat!(
+        "363d3d373d3d3d363d73", "9a70dd32e29be73add3b8d1d34a47fbc082e963e", "5af43d82803e903d91602b57fd5bf3",
+        "000000000000000000000000047f606fd5b2baa5f5c6c4ab8958e45cb6b054b7",
+        "00000000000000000000000056fb0edf4e2fdfa3d82c5707312ed3d2a6ff5c24",
+        "0000000000000000000000000000000000000000000000000000000000000bb8",
+    );
+
+    fn terms_494() -> super::Terms {
+        super::Terms { owner: "0x047f606fd5b2baa5f5c6c4ab8958e45cb6b054b7".into(), operator: "0x56fb0edf4e2fdfa3d82c5707312ed3d2a6ff5c24".into(), owner_bps: 3000 }
+    }
+
+    #[test]
+    fn reads_a_vaults_terms_from_its_code() {
+        assert_eq!(super::clone_terms(VAULT_494), Some(terms_494()));
+        // a wallet, a wallet delegating its code, a clone without terms, one cut short, and another contract's code
+        let delegated = "ef0100612373d7003d694220f7800eeaf8e3924c0951d3";
+        let bare = &VAULT_494[..90];
+        let short = &VAULT_494[..280];
+        let other = VAULT_494.replacen("5af43d", "5af43e", 1);
+        for code in ["", delegated, bare, short, &other] {
+            assert_eq!(super::clone_terms(code), None, "{code}");
+        }
+    }
+
+    /// Seat #494's lending, the first on imdLend, read from its vault and checked against the market. Needs the network.
+    #[test]
+    #[ignore]
+    fn reads_a_real_imdlend_vault() {
+        let vault = "0x251a8fe7b3f712716c0e5206d0aec17a68cc4d83";
+        assert_eq!(tauri::async_runtime::block_on(super::lend_vault(vault.into())), Ok(Some(terms_494())));
+        let span = tauri::async_runtime::block_on(super::lend_span(vault.into(), "494".into()));
+        assert_eq!(span, Ok(Some(super::Span { started_at: 1792269179, ends_at: 1792873979 })));
+        // a seat the vault never lent
+        assert_eq!(tauri::async_runtime::block_on(super::lend_span(vault.into(), "88".into())), Ok(None));
+        // a wallet is no vault, delegating its code or not, and neither is a contract that isn't one: the seats themselves
+        for holder in ["0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40", "0x047f606fd5b2baa5f5c6c4ab8958e45cb6b054b7", "0x0000ec93127baa929e58e97dd0095a2bfb38ec1d"] {
+            assert_eq!(tauri::async_runtime::block_on(super::lend_vault(holder.into())), Ok(None), "{holder}");
+        }
+    }
+
+    #[test]
+    fn imdlends_listing_takes_only_a_seat_number() {
+        assert!(super::seat_number("88"));
+        for not in ["", "8a", "88&x=1", "1234567", "-1"] {
+            assert!(!super::seat_number(not), "{not}");
         }
     }
 

@@ -3,8 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import { isEnabled as autostartIsOn } from "@tauri-apps/plugin-autostart";
 import morphdom from "morphdom";
 import * as api from "./api";
+import { lendingOn, lendReader, type Lending, type Terms } from "./lending";
 import { faceFor, loadFace } from "./masks";
-import { ctrl, shift } from "./platform";
+import { ctrl, mac, shift, windows } from "./platform";
 import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
 
 // ---------------------------------------------------------------------------------------------
@@ -36,19 +37,28 @@ type Settings = {
   sounds: boolean;
   /** Light, dark, or the computer's own. */
   theme: api.Theme;
+  /** Each connected wallet's seats as last seen in it, and those it lent: one that leaves is looked for in its imdLend vaults. */
+  held: Record<string, string[]>;
+  /** imdLend vaults' terms by address, each read once: imdLend fixes them when it makes the vault. */
+  vaults: Record<string, Terms>;
 };
 
 const STORE = "imd-agents:settings";
 const stored = (() => { try { return JSON.parse(localStorage.getItem(STORE) ?? "{}"); } catch { return {}; } })();
-const settings: Settings = Object.assign({ watching: [], seats: [], wallets: [], relayOrigin: null, names: {}, ens: {}, runtime: "claude", localToken: null, localOwner: null, shown: 0, sounds: false, theme: "system" }, stored);
+const settings: Settings = Object.assign({ watching: [], seats: [], wallets: [], relayOrigin: null, names: {}, ens: {}, runtime: "claude", localToken: null, localOwner: null, shown: 0, sounds: false, theme: "system", held: {}, vaults: {} }, stored);
 if (settings.theme !== "system") void api.setTheme(settings.theme).catch(() => undefined);
 // Watching used to take one wallet.
 if (typeof stored.watch === "string" && !settings.watching.includes(stored.watch)) settings.watching.push(stored.watch);
 delete (settings as { watch?: unknown }).watch;
 const save = () => { try { localStorage.setItem(STORE, JSON.stringify(settings)); } catch { /* kept for this run */ } };
+const lend = lendReader({ vault: api.lendVault, span: api.lendSpan }, settings.vaults, save);
 
 const state = {
-  view: "home" as "home" | "settings" | "watching",
+  view: "home" as "home" | "settings" | "watching" | "lend",
+  /** The agent the Lend view is for. */
+  lending: null as string | null,
+  /** Seats in imdLend vaults, by seat: a connected wallet's lent out, or this computer's borrowed. */
+  lendings: new Map<string, Lent>(),
   /** Where setup has got, while its window is open: the panel's row back to it. */
   settingUp: null as string | null,
   box: null as Box | null,
@@ -58,6 +68,8 @@ const state = {
   localOwner: settings.localOwner as string | null,
   /** This computer's box serves no seat: never paired, unlinked, or its seat moved on, as when a lending ends. */
   unpaired: false,
+  /** This computer is being taken off a seat it serves, before that seat is listed on imdLend. */
+  unlinking: false,
   /** A pairing code is out, waiting on the seat's wallet, with setup's window closed: the agent starts once it's approved. */
   pairingOut: false,
   agents: [] as Agent[],
@@ -122,6 +134,8 @@ let lastHistory = 0;
 /** The device key whose seat was last asked: the same key on the same box is the same seat. */
 let lastDeviceKey: string | null = null;
 let lastRewards = 0;
+/** When seats in imdLend vaults were last read: every five minutes, or on a full read. */
+let lastLend = 0;
 let lastSwarm = 0;
 let lastRelease = 0;
 /** Each seat watched by its number: its holder, and whether it was up when its record was last read. */
@@ -190,6 +204,14 @@ async function refresh(full = false): Promise<void> {
     for (const tokenId of settings.seats) {
       const info = seatInfo.get(tokenId);
       if (info && !seats.some((s) => s.tokenId === tokenId)) seats.push({ tokenId, wallet: info.owner, online: info.online });
+    }
+    if (full || Date.now() - lastLend > 300_000) {
+      lastLend = Date.now();
+      await readLendings(held);
+    }
+    // a connected wallet's seat out on imdLend stays in the list, held by its vault
+    for (const [tokenId, lent] of state.lendings) {
+      if (!seats.some((s) => s.tokenId === tokenId) && tokenId !== state.localToken) seats.push({ tokenId, wallet: lent.vault, online: lent.online });
     }
     if (state.localToken && !seats.some((s) => s.tokenId === state.localToken)) {
       seats.unshift({ tokenId: state.localToken, wallet: state.localOwner ?? "", online: state.box?.state === "running" });
@@ -528,8 +550,8 @@ async function disconnect(): Promise<void> {
   render();
 }
 
-/** A fix's command onto the clipboard, to run on the agent's own machine; its button says so for a moment. */
-function copyFix(command: string): void {
+/** Text onto the clipboard, a fix's command for an agent's machine or an invite for a friend; its button says so for a moment. */
+function copyText(command: string): void {
   const done = () => {
     state.copied = command;
     render();
@@ -557,9 +579,75 @@ function claim(wallet = state.rewards[0]?.wallet ?? watched()[0]): void {
   void api.openExplorer(`/wallet/${wallet}/earned`);
 }
 
-/** The wallet holding this computer's agent is an imdLend vault, as setup was told the seat came from there. */
+/** A seat in an imdLend vault, as read from it, with the vault and whether a machine of the seat's was up. */
+type Lent = Lending & { vault: string; online: boolean };
+
+/**
+ * Seats in imdLend vaults. A connected wallet's seat that left it is asked after: its holder now, from the network, and
+ * whether that's an imdLend vault of the wallet's, from the chain, which `lend` asks as seldom as it can. One that went
+ * anywhere else is forgotten; one whose read failed is kept as it was, to ask again. This computer's seat, when a vault
+ * holds it, is a borrower's.
+ */
+async function readLendings(held: Array<{ wallet: string; tokens: Array<{ tokenId: string }> }>): Promise<void> {
+  const found = new Map<string, Lent>();
+  let changed = false;
+  const asBefore = (tokenId: string) => { const was = state.lendings.get(tokenId); if (was) found.set(tokenId, was); };
+  for (const { wallet, tokens } of held) {
+    if (!linked(wallet)) continue;
+    const now = tokens.map((t) => t.tokenId);
+    const kept: string[] = [];
+    for (const tokenId of (settings.held[wallet] ?? []).filter((t) => !now.includes(t))) {
+      const record = await api.seatRecord(tokenId, 0).catch(() => null);
+      const holder = record?.owner?.toLowerCase();
+      if (!holder) { kept.push(tokenId); asBefore(tokenId); continue; }
+      const lending = holder === wallet.toLowerCase() ? null : await lend.read(holder, tokenId);
+      if (lending === undefined) { kept.push(tokenId); asBefore(tokenId); continue; }
+      if (lending && lending.owner === wallet.toLowerCase()) {
+        found.set(tokenId, { ...lending, vault: holder, online: record?.online ?? false });
+        kept.push(tokenId);
+      }
+    }
+    const next = [...now, ...kept];
+    if (next.join() !== (settings.held[wallet] ?? []).join()) { settings.held[wallet] = next; changed = true; }
+  }
+  // this computer's seat, held by a vault that isn't a connected wallet's: borrowed
+  const local = state.localToken;
+  if (local && state.localOwner && !linked(state.localOwner) && !found.has(local)) {
+    const lending = await lend.read(state.localOwner, local);
+    if (lending) found.set(local, { ...lending, vault: state.localOwner, online: state.box?.state === "running" });
+    else if (lending === undefined) asBefore(local);
+  }
+  lend.keep(found.keys());
+  state.lendings = found;
+  if (changed) save();
+}
+
+/** The wallet holding this computer's agent is an imdLend vault: read so, or as setup was told the seat came from there. */
 function lentHere(wallet: string): boolean {
-  return wallet === state.localOwner && seatSource() === "lend";
+  return [...state.lendings.values()].some((l) => l.vault === wallet && !linked(l.owner)) || (wallet === state.localOwner && seatSource() === "lend");
+}
+
+/** A day as a person says it: "Nov 3", or "Nov 3, 2027" in another year. */
+function dayOf(seconds: number): string {
+  const day = new Date(seconds * 1000);
+  return day.toLocaleDateString("en-US", { month: "short", day: "numeric", ...(day.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }) });
+}
+
+/**
+ * A seat out on imdLend, from its side: the lender sees whom it's lent to, until when, and their share, with imdLend's
+ * vaults a click away, where it's withdrawn or lent again; this computer's borrower sees whom it's from and their share.
+ * A lending past its end says so: the seat works on in its vault, its rewards split, until its owner withdraws it.
+ */
+function lendingHtml(lent: Lent): string {
+  const lender = linked(lent.owner);
+  const share = (lender ? lent.owner_bps : 10_000 - lent.owner_bps) / 100;
+  const page = lender ? "vaults" : "run";
+  if (!lendingOn(lent)) {
+    const about = lender ? "Rewards split until you withdraw it" : "Its owner can take it back now";
+    return `<div class="care-row warn"><span class="care-text">Lending ended ${esc(dayOf(lent.ends_at))}<span class="sub">${esc(about)}</span></span><button class="link" data-lend-page="${page}" title="${lender ? "Withdraw it on imdLend" : "Your lendings on imdLend"}">${lender ? "Withdraw ›" : "imdLend ›"}</button></div>`;
+  }
+  const who = lender ? `To ${short(lent.operator)}` : `From ${short(lent.owner)}`;
+  return `<div class="care-row control"><span class="care-text">${lender ? "Lent" : "Lent to you"} until ${esc(dayOf(lent.ends_at))}<span class="sub">${esc(`${who} · You get ${share}%`)}</span></span><button class="link" data-lend-page="${page}" title="${lender ? "Your vaults on imdLend" : "Your lendings on imdLend"}">imdLend ›</button></div>`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -626,7 +714,7 @@ function agentsHtml(): string {
     return `<div class="row${open ? " open" : ""}" id="agent-${esc(agent.tokenId)}" data-agent="${esc(agent.tokenId)}" tabindex="0" aria-expanded="${open}" title="${open ? "Fold" : `What ${esc(nameOf(agent.tokenId))} is doing`}${i < 9 ? ` (${shift(String(i + 1))})` : ""}">
       ${maskHtml(agent, phase)}
       <span class="lines">
-        <span class="name"><b>${esc(label || `Agent #${agent.tokenId}`)}</b>${label ? `<span class="label">#${esc(agent.tokenId)}</span>` : ""}${outdated(agent) ? `<span class="tag warn" title="${esc(`Runs worker ${agent.standing?.presence?.daemonVersion ?? ""}; the newest is ${state.release?.newest ?? ""}`)}">Outdated</span>` : ""}${jailWords(agent.standing) ? `<span class="tag warn" title="No oracle, research or contract jobs">Fewer jobs</span>` : ""}</span>
+        <span class="name"><b>${esc(label || `Agent #${agent.tokenId}`)}</b>${label ? `<span class="label">#${esc(agent.tokenId)}</span>` : ""}${lentOut(agent.tokenId) ? `<span class="tag lent" title="${esc(lentTitle(agent.tokenId))}">Lent</span>` : ""}${outdated(agent) ? `<span class="tag warn" title="${esc(`Runs worker ${agent.standing?.presence?.daemonVersion ?? ""}; the newest is ${state.release?.newest ?? ""}`)}">Outdated</span>` : ""}${jailWords(agent.standing) ? `<span class="tag warn" title="No oracle, research or contract jobs">Fewer jobs</span>` : ""}</span>
         <span class="status${phase.kind === "working" ? " shimmer" : ""}">${esc(status)}</span>
       </span>
       <span class="row-end"><span class="chevron" aria-hidden="true">${CHEVRON}</span></span>
@@ -687,7 +775,9 @@ function agentTrayHtml(agent: Agent): string {
   // and resumed through its connected wallet; 1 to 9 still flip it from anywhere
   const toggle = switchHtml(agent, phaseFor(agent), state.agents.indexOf(agent));
   const here = agent.tokenId === state.localToken && state.box?.installed;
+  const lent = state.lendings.get(agent.tokenId);
   const care = [
+    lent ? lendingHtml(lent) : "",
     // one label for both, since on means it takes jobs either way; under it, what off does to this one
     toggle ? `<div class="care-row control"><span class="care-text">Take jobs<span class="sub">${here ? "Off stops it on this computer" : "Off pauses it after its current job"}</span></span>${toggle}</div>` : "",
     failing ? `<div class="care-row bad"><span class="care-text" title="${esc(failing)}">Its last job failed: ${esc(failing)}</span>${local && !behind ? restart : ""}</div>` : "",
@@ -700,7 +790,7 @@ function agentTrayHtml(agent: Agent): string {
     ${care ? `<div class="care">${care}</div>` : ""}
     ${doing ? `<div class="tray-label">Now</div>${doing}` : `<div class="tray-label">Now</div><p class="idle">${esc(phaseFor(agent).kind === "ready" ? "Waiting for its next job." : statusLine(phaseFor(agent), agent))}</p>`}
     ${done ? `<div class="tray-label">Lately</div>${done}` : ""}
-    <div class="tray-foot"><span class="facts" title="${esc(record ? `${record.accepted} accepted, ${record.rejected} rejected, ${record.failed} failed` : "")}">${esc(facts)}</span><button class="link" data-explorer="/agents/${esc(agent.tokenId)}" title="Open on the explorer (O)">Explorer ›</button></div>
+    <div class="tray-foot"><span class="facts" title="${esc(record ? `${record.accepted} accepted, ${record.rejected} rejected, ${record.failed} failed` : "")}">${esc(facts)}</span><span class="links">${lendable(agent) ? `<button class="link" data-lend="${esc(agent.tokenId)}" title="Lend seat #${esc(agent.tokenId)}, to a friend or on imdLend (${shift("L")})">Lend seat</button>` : ""}<button class="link" data-explorer="/agents/${esc(agent.tokenId)}" title="Open on the explorer (O)">Explorer ›</button></span></div>
   </div>`;
 }
 
@@ -1017,6 +1107,96 @@ function watchingHtml(): string {
     ${noteHtml()}`;
 }
 
+/**
+ * Lending an agent, from the wallet that holds it: to a friend, whose machine runs it once its link is approved here,
+ * the seat staying in this wallet; or on imdLend, paid upfront, its rewards split by a vault, once the computer running
+ * it is taken off it (`listSeat`).
+ */
+function lendHtml(): string {
+  const agent = state.agents.find((a) => a.tokenId === state.lending);
+  const head = `<header class="settings-head">
+      <button class="back" data-action="home" title="Back (Esc)">‹ Back</button>
+      <div class="title">${esc(agent ? `Lend seat #${agent.tokenId}` : "Lend seat")}</div>
+      <span></span>
+    </header>`;
+  if (!agent || !lendable(agent)) return `${head}<p class="footnote">This agent isn't held by a wallet connected here any more.</p>`;
+  const invite = inviteText(agent.tokenId);
+  const place = runsOn(agent);
+  const list = place === "here"
+    ? `<span>On imdLend<span class="sub">Paid upfront. This ${thisComputer} stops running it first.</span></span><button class="pill" data-list="${esc(agent.tokenId)}" title="Take this ${thisComputer} off #${esc(agent.tokenId)}, then list it on imdLend (L)"${state.unlinking ? " disabled" : ""}>${state.unlinking ? "Stopping…" : "Stop and list"}</button>`
+    : place === "elsewhere"
+      ? `<span>On imdLend<span class="sub">Paid upfront. List it from the computer running it.</span></span>`
+      : `<span>On imdLend<span class="sub">Paid upfront. Rewards split on their own.</span></span><button class="pill" data-list="${esc(agent.tokenId)}" title="List it on imdLend (L)">List</button>`;
+  return `${head}
+    <section class="card list">
+      <div class="line"><span>To a friend<span class="sub">It stays in your wallet. Their machine takes over once you approve it.</span></span><button class="pill" data-copy="${esc(invite)}" title="Copy an invite to send them (C)">${state.copied === invite ? "Copied" : "Copy invite"}</button></div>
+      <div class="line">${list}</div>
+    </section>
+    ${noteHtml()}`;
+}
+
+/** A connected wallet's seat out on imdLend, and what its tag says on hover. */
+const lentOut = (tokenId: string) => { const lent = state.lendings.get(tokenId); return Boolean(lent && linked(lent.owner)); };
+const lentTitle = (tokenId: string) => { const lent = state.lendings.get(tokenId); return lent ? `On imdLend, ${lendingOn(lent) ? `until ${dayOf(lent.ends_at)}` : "its lending ended"}` : ""; };
+
+/** A seat its holder can lend from here: held by a wallet connected to this app, which proved by signing that it's theirs. */
+const lendable = (agent: Agent) => linked(agent.wallet);
+
+/** What a friend gets: where the app is, what to pick, and to send back the link it makes, for the wallet here to approve. */
+const inviteText = (tokenId: string) => `I'm lending you my IMD agent seat #${tokenId}. Get IMD Agents at https://imd.fun/app. When setup asks where the seat is, pick "In a friend's wallet". At the end it copies a link: send it to me right away and I'll approve it.`;
+
+/** Where a seat runs: on this computer, which serves it whether its box is up or not; on another; or nowhere. */
+function runsOn(agent: Agent): "here" | "elsewhere" | null {
+  if (agent.tokenId === state.localToken) return "here";
+  const kind = phaseFor(agent).kind;
+  return kind === "offline" || kind === "off" || kind === "docker-down" ? null : "elsewhere";
+}
+
+/** What this computer is called where the panel names it. */
+const thisComputer = mac ? "Mac" : windows ? "PC" : "computer";
+
+/**
+ * Lists a seat on imdLend. A seat this computer serves is taken off it first, as imdLend asks of every lender: unlinked,
+ * its box removed. One another computer runs is listed from there, the only place it can be taken off.
+ */
+async function listSeat(tokenId: string | null): Promise<void> {
+  const agent = state.agents.find((a) => a.tokenId === tokenId);
+  if (!agent || state.unlinking) return;
+  const place = runsOn(agent);
+  if (place === "elsewhere") return;
+  if (place === "here") {
+    state.unlinking = true;
+    render();
+    try {
+      await api.boxUnlink();
+    } catch (error) {
+      state.note = { text: `Couldn't take this ${thisComputer} off #${agent.tokenId}: ${String(error)}`, bad: true };
+      return;
+    } finally {
+      state.unlinking = false;
+      render();
+    }
+    // off its seat, its box gone: the panel offers Connect, which pairs, and never Start, which would run a box with no seat
+    state.localToken = null;
+    state.localOwner = null;
+    state.unpaired = true;
+    settings.localToken = null;
+    settings.localOwner = null;
+    save();
+    void refresh(true);
+  }
+  void api.openLend("list", { seat: agent.tokenId }).catch(() => undefined);
+}
+
+/** The Lend view, for an agent this app can lend. */
+function openLend(tokenId: string | null | undefined): void {
+  const agent = state.agents.find((a) => a.tokenId === tokenId);
+  if (!agent || !lendable(agent)) return;
+  state.lending = agent.tokenId;
+  state.view = "lend";
+  render();
+}
+
 function settingsHtml(): string {
   return `<header class="settings-head">
       <button class="back" data-action="home" title="Back (Esc)">‹ Back</button>
@@ -1084,7 +1264,7 @@ function remember(): void {
 }
 
 /** How deep each view sits, so the next slides in from the side it lives on. */
-const DEPTH = { home: 0, settings: 1, watching: 2 } as const;
+const DEPTH = { home: 0, settings: 1, lend: 1, watching: 2 } as const;
 let shownView = state.view;
 let drawn = false;
 let lastTray = "";
@@ -1095,7 +1275,7 @@ function render(): void {
   const from = drawn ? panel.offsetHeight : 0;
   // a note belongs to the view it was said on
   if (state.view !== shownView) state.note = null;
-  const html = state.view === "watching" ? watchingHtml() : state.view === "settings" ? settingsHtml() : homeHtml();
+  const html = state.view === "watching" ? watchingHtml() : state.view === "settings" ? settingsHtml() : state.view === "lend" ? lendHtml() : homeHtml();
   if (state.view !== shownView) {
     scroller.scrollTop = 0;
     slide(html, DEPTH[state.view] > DEPTH[shownView]);
@@ -1386,12 +1566,18 @@ app.addEventListener("click", (event) => {
     void api.setOpenAtLogin(next).then(() => { state.openAtLogin = next; render(); }).catch((e) => { state.note = { text: String(e), bad: true }; render(); });
     return;
   }
+  const lend = target.closest<HTMLElement>("[data-lend]")?.dataset.lend;
+  if (lend) return openLend(lend);
+  const list = target.closest<HTMLElement>("[data-list]")?.dataset.list;
+  if (list) return void listSeat(list);
+  const lendPage = target.closest<HTMLElement>("[data-lend-page]")?.dataset.lendPage;
+  if (lendPage === "vaults" || lendPage === "run") return void api.openLend(lendPage).catch(() => undefined);
   const remove = target.closest<HTMLElement>("[data-remove]")?.dataset.remove;
   if (remove) return unwatch(remove);
   const removeSeat = target.closest<HTMLElement>("[data-remove-seat]")?.dataset.removeSeat;
   if (removeSeat) return unwatchSeat(removeSeat);
   const copy = target.closest<HTMLElement>("[data-copy]")?.dataset.copy;
-  if (copy) return copyFix(copy);
+  if (copy) return copyText(copy);
   const wallet = target.closest<HTMLElement>("[data-claim]")?.dataset.claim;
   if (wallet) return claim(wallet);
   const token = target.closest<HTMLElement>("[data-token]")?.dataset.token;
@@ -1466,7 +1652,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (state.scrub !== null) return scrubTo(null);
     if (state.view === "watching") openSettings();
-    else if (state.view === "settings") { state.view = "home"; render(); } else close();
+    else if (state.view === "settings" || state.view === "lend") { state.view = "home"; render(); } else close();
     return;
   }
   if (event.metaKey || event.ctrlKey) {
@@ -1475,11 +1661,16 @@ window.addEventListener("keydown", (event) => {
     // with nothing selected, ⌘C takes the open agent's fix, for its machine
     if (event.key === "c" && !String(getSelection() ?? "")) {
       const fix = app.querySelector<HTMLElement>("[data-copy]")?.dataset.copy;
-      if (fix) copyFix(fix);
+      if (fix) copyText(fix);
     }
     return;
   }
   if (event.key === ",") return state.view === "settings" ? (state.view = "home", render()) : openSettings();
+  if (state.view === "lend" && state.lending) {
+    if (event.key === "c") return copyText(inviteText(state.lending));
+    if (event.key === "l") return void listSeat(state.lending);
+  }
+  if (event.key === "L" && state.view === "home") return openLend(state.openAgent);
   if (event.key === "w") { event.preventDefault(); return focusWatch(); }
   if (event.key === "l") return void connect();
   if (event.key === "c") return claim();

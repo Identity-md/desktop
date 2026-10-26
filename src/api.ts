@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 export { getVersion as appVersion } from "@tauri-apps/api/app";
+import type { Span, Terms } from "./lending";
 import { sumOf, worthOf, type Box, type Earning, type ReleaseRow, type RewardValue, type Standing, type WorkRow } from "./model";
 
 /**
@@ -104,6 +105,8 @@ export const boxState = async (): Promise<Box> => {
 };
 export const boxStart = (runtime: string) => invoke<void>("box_start", { runtime });
 export const boxStop = () => invoke<void>("box_stop");
+/** Takes this computer off its seat: its box removed, then `imd unlink`, signed with its own key. */
+export const boxUnlink = () => invoke<void>("box_unlink");
 export const boxRestart = (runtime: string) => invoke<void>("box_restart", { runtime });
 
 /** How far setting this computer's box up has got. On Windows Docker can wait on a restart, which finishes installing WSL. */
@@ -153,11 +156,20 @@ export async function pairingExpires(code: string): Promise<number | null> {
   return Number.isFinite(at) ? at : null;
 }
 /**
- * imdLend, where seats are lent, which the network doesn't run: its pairing page, taking the code from its link; or its
- * rewards, claimed for a vault's owner and operator at once.
+ * imdLend, where seats are lent, which the network doesn't run: its pairing page, taking the code from its link; a new
+ * listing for a seat; the lender's vaults; the borrower's lendings; or its rewards, claimed for a vault's owner and
+ * operator at once.
  */
-export const openLend = (page: "pair" | "rewards", of: { code?: string } = {}) =>
-  invoke<void>("open_lend", { page, code: of.code ?? null });
+export const openLend = (page: "pair" | "list" | "vaults" | "run" | "rewards", of: { code?: string; seat?: string } = {}) =>
+  invoke<void>("open_lend", { page, code: of.code ?? null, seat: of.seat ?? null });
+
+/**
+ * Whether a seat's holder is one of imdLend's vaults, from its code, checked against imdLend's market: its terms if so,
+ * null when it isn't one. Neither ever changes. A read that fails throws, which says nothing either way.
+ */
+export const lendVault = (holder: string) => invoke<Terms | null>("lend_vault", { holder });
+/** A seat's latest lending in a vault: null for a seat the vault never lent. A read that fails throws. */
+export const lendSpan = (vault: string, seat: string) => invoke<Span | null>("lend_span", { vault, seat });
 /** The worker's newest releases, from GitHub, as daemons update from them. */
 export const workerReleases = () => invoke<Answer<ReleaseRow[]>>("worker_releases");
 
