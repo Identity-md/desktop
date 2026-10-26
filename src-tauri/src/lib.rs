@@ -1605,14 +1605,55 @@ struct Paired {
     register: Option<String>,
 }
 
-/// Pairs the box with the wallet that holds an agent: `imd pair` in a one-off box, its code and page
-/// handed to the panel as soon as it prints them, then its answer once the wallet has signed.
+/// How a pairing ended, for a setup window opened again while it waited, and for the panel: the agent it connected,
+/// or why it didn't.
+#[derive(Serialize, Clone)]
+struct PairEnded {
+    token_id: Option<String>,
+    error: Option<String>,
+}
+
+/// The pairing under way, while `imd pair` waits for a wallet: its code and page. Setup opened again shows this one
+/// rather than making a new one, which would end it, and its link may already be with a friend.
+static PAIRING: std::sync::Mutex<Option<PairingCode>> = std::sync::Mutex::new(None);
+
+fn set_pairing(pairing: Option<PairingCode>) {
+    *PAIRING.lock().unwrap_or_else(|e| e.into_inner()) = pairing;
+}
+
+/// The pairing under way, if there is one.
 #[tauri::command]
-async fn box_pair(app: tauri::AppHandle) -> Result<Paired, String> {
+fn pairing_pending() -> Option<PairingCode> {
+    PAIRING.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Pairs the box with the wallet that holds an agent: `imd pair` in a one-off box, its code and page
+/// handed to the panel as soon as it prints them, then its answer once the wallet has signed. Connected, the
+/// agent starts at once, so a seat approved while no one is at the window, as a friend's can be, goes to work.
+#[tauri::command]
+async fn box_pair(app: tauri::AppHandle, runtime: String) -> Result<Paired, String> {
+    if !RUNTIMES.contains(&runtime.as_str()) {
+        return Err("unknown runtime".into());
+    }
     // installing or pairing may give the worker a new key: read it fresh
     *DEVICE_KEY.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let _busy = Busy::new();
-    tauri::async_runtime::spawn_blocking(move || {
+    let answer = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || pair_and_start(&app, &runtime)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let ended = match &answer {
+        Ok(paired) => PairEnded { token_id: paired.token_id.clone(), error: None },
+        Err(why) => PairEnded { token_id: None, error: Some(why.clone()) },
+    };
+    let _ = app.emit("box-pair-ended", ended);
+    answer
+}
+
+fn pair_and_start(app: &tauri::AppHandle, runtime: &str) -> Result<Paired, String> {
+    let answer = (|| {
         use std::io::BufRead;
         let _ = run_docker(&["rm", "-f", BOX_PAIRING], Duration::from_secs(30));
         let mut command = docker_command().ok_or("Docker is not installed")?;
@@ -1629,7 +1670,9 @@ async fn box_pair(app: tauri::AppHandle) -> Result<Paired, String> {
             if let Some(rest) = line.strip_prefix("Code") {
                 code = rest.trim().to_string();
             } else if line.starts_with("http") && line.contains("/pair?code=") {
-                let _ = app.emit("box-pairing", PairingCode { code: code.clone(), url: line.to_string() });
+                let pairing = PairingCode { code: code.clone(), url: line.to_string() };
+                set_pairing(Some(pairing.clone()));
+                let _ = app.emit("box-pairing", pairing);
             } else if line.starts_with("http") && line.contains("/pair?register=") {
                 paired.register = Some(line.to_string());
             } else if let Some(rest) = line.strip_prefix("Paired. Token ") {
@@ -1646,9 +1689,17 @@ async fn box_pair(app: tauri::AppHandle) -> Result<Paired, String> {
             let _ = err.read_to_string(&mut why);
         }
         Err(why.lines().last().map(str::to_string).filter(|l| !l.is_empty()).unwrap_or_else(|| "Pairing stopped".into()))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    })();
+    set_pairing(None);
+    // connected is running: the box starts now, unless its seat must be registered first. A start that fails is
+    // left to setup's last screen, whose Start says why
+    if let Ok(paired) = &answer {
+        if paired.register.is_none() {
+            progress(app, "pair", "Starting your agent…");
+            let _ = run_box(runtime);
+        }
+    }
+    answer
 }
 
 /// Opens the page a pairing code is approved on: the network's own pairing page, never another.
@@ -1662,9 +1713,74 @@ fn open_pairing(app: tauri::AppHandle, url: String) -> Result<(), String> {
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Copies the network's pairing link for this box, for its person to send to a friend whose seat it will run, who
+/// approves it from their own wallet: the network's own page, never another.
+#[tauri::command]
+fn copy_pairing(url: String) -> Result<(), String> {
+    if !pairing_link(&url) {
+        return Err("not a pairing link".into());
+    }
+    copy_text(&url)
+}
+
+/// The network's pairing page for one code, exactly as `imd pair` prints it.
+fn pairing_link(url: &str) -> bool {
+    url.strip_prefix(&format!("{}/pair?code=", api_base())).is_some_and(pairing_code)
+}
+
+/// imdLend, the market where seats are lent, which the network doesn't run.
+const LEND: &str = "https://imdlend.com";
+
+/// Opens one of imdLend's two pages, and no other: its pairing page, for a seat borrowed there, with the box's code on
+/// the clipboard, since the page takes a code typed or pasted and not from its link (the code rides in the link too, for
+/// the day it does); or its rewards, where a vault's are claimed for its owner and its operator at once. True when the
+/// code went onto the clipboard.
+#[tauri::command]
+fn open_lend(app: tauri::AppHandle, page: String, code: Option<String>) -> Result<bool, String> {
+    let mut copied = false;
+    let url = match page.as_str() {
+        "pair" => {
+            let code = code.filter(|c| pairing_code(c)).ok_or("not a pairing code")?;
+            copied = copy_text(&code).is_ok();
+            format!("{LEND}/run/pair?code={code}")
+        }
+        "rewards" => format!("{LEND}/rewards"),
+        _ => return Err("not an imdLend page".into()),
+    };
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())?;
+    Ok(copied)
+}
+
+/// A pairing code as the network makes them: four to sixteen capitals and digits, nothing to escape in a link.
+fn pairing_code(code: &str) -> bool {
+    (4..=16).contains(&code.len()) && code.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+/// Text onto the clipboard, by the computer's own tool for it.
+fn copy_text(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("/usr/bin/pbcopy");
+    #[cfg(windows)]
+    let mut command = hidden(Command::new("clip"));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        Command::new("wl-copy")
+    } else {
+        let mut command = Command::new("xclip");
+        command.args(["-selection", "clipboard"]);
+        command
+    };
+    let mut child = command.stdin(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    child.stdin.take().ok_or("no input")?.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() { Ok(()) } else { Err(format!("the clipboard said {status}")) }
+}
+
 /// Stops a pairing that is waiting for a signature.
 #[tauri::command]
 async fn box_pair_cancel() {
+    set_pairing(None);
     let _ = tauri::async_runtime::spawn_blocking(|| run_docker(&["rm", "-f", BOX_PAIRING], Duration::from_secs(30))).await;
 }
 
@@ -2322,7 +2438,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
-            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, open_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
+            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
             docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound, set_theme,
             restart_pc, set_open_at_login
         ])
@@ -2493,6 +2609,23 @@ mod tests {
         let why = pull_through_engine(&mut stream, "ghcr.io/identity-md/nothing", "latest", None, &mut |_| {}).unwrap_err();
         assert_eq!(why, "pull access denied for ghcr.io/identity-md/nothing");
         assert!(String::from_utf8_lossy(&stream.asked).starts_with("POST /images/create?fromImage=ghcr.io%2Fidentity-md%2Fnothing&tag=latest HTTP/1.0\r\n"));
+    }
+
+    #[test]
+    fn imdlends_page_takes_only_a_pairing_code() {
+        assert!(super::pairing_code("QX7M4KD2"));
+        // nothing that would change the link it rides in, and nothing the network wouldn't make
+        for not in ["qx7m4kd2", "QX7", "QX7M 4KD2", "QX7M4KD2&seat=1", "QX7M4KD2/../x", "ÄX7M4KD2"] {
+            assert!(!super::pairing_code(not), "{not}");
+        }
+    }
+
+    #[test]
+    fn a_friend_is_sent_only_the_networks_pairing_link() {
+        assert!(super::pairing_link("https://api.imd.fun/pair?code=QX7M4KD2"));
+        for not in ["https://imd.fun.evil/pair?code=QX7M4KD2", "https://api.imd.fun/pair?code=QX7M4KD2&x=1", "https://api.imd.fun/pair?register=12", "QX7M4KD2"] {
+            assert!(!super::pairing_link(not), "{not}");
+        }
     }
 
     #[test]

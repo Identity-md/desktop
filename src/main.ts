@@ -56,6 +56,10 @@ const state = {
   localToken: settings.localToken as string | null,
   /** The wallet that holds this computer's agent: watched without asking. */
   localOwner: settings.localOwner as string | null,
+  /** This computer's box serves no seat: never paired, unlinked, or its seat moved on, as when a lending ends. */
+  unpaired: false,
+  /** A pairing code is out, waiting on the seat's wallet, with setup's window closed: the agent starts once it's approved. */
+  pairingOut: false,
   agents: [] as Agent[],
   /** How many agents each watched wallet holds. */
   holdings: new Map<string, number>(),
@@ -87,7 +91,11 @@ const state = {
   loaded: false,
 };
 
-const watched = () => [...new Set([...settings.watching, ...settings.wallets, state.localOwner].filter((w): w is string => Boolean(w)))];
+/** Where setup was told this computer's seat came from: "own", "friend", "lend" or "none". */
+const seatSource = () => { try { return localStorage.getItem("imd-agents:seat"); } catch { return null; } };
+/** The wallet holding this computer's agent, watched without asking, unless it's a friend's: their other seats and rewards are theirs. */
+const localWallet = () => (seatSource() === "friend" ? null : state.localOwner);
+const watched = () => [...new Set([...settings.watching, ...settings.wallets, localWallet()].filter((w): w is string => Boolean(w)))];
 const linked = (wallet: string | undefined) => Boolean(wallet && settings.wallets.includes(wallet));
 /** What its holder has called an agent in Settings, if anything: the name of a VPS, of a Mac mini. */
 const labelOf = (tokenId: string) => settings.names[tokenId]?.trim() ?? "";
@@ -144,16 +152,21 @@ async function refresh(full = false): Promise<void> {
     // the releases, to know an agent left behind: every half hour, well inside GitHub's limit
     const releaseRead = Date.now() - lastRelease > 30 * 60_000 ? (lastRelease = Date.now(), api.workerReleases().catch(() => null)) : null;
     const box = await api.boxState().catch(() => null);
+    state.pairingOut = Boolean(await api.pairingPending().catch(() => null));
     if (box && !(state.box?.state === "starting" || state.box?.state === "stopping") ) state.box = box;
     if (box?.deviceKey && (full || box.deviceKey !== lastDeviceKey || !state.localToken)) {
       lastDeviceKey = box.deviceKey;
-      const token = await api.deviceSeat(box.deviceKey);
+      // a read that fails changes nothing; one that says no seat lets the old one go
+      const token = await api.deviceSeat(box.deviceKey).catch(() => undefined);
+      if (token !== undefined) state.unpaired = token === null;
+      if (token === null && state.localToken) { state.localToken = null; state.localOwner = null; settings.localToken = null; settings.localOwner = null; save(); }
       if (token && token !== state.localToken) { state.localToken = token; state.localOwner = null; settings.localToken = token; save(); }
     }
     // Without a box there is no computer's own agent to show apart.
     if (box && !box.installed) {
       state.localToken = null;
       state.localOwner = null;
+      state.unpaired = false;
       if (settings.localOwner) { settings.localOwner = null; save(); }
     }
     if (state.localToken && !state.localOwner) {
@@ -534,10 +547,19 @@ function copyFix(command: string): void {
   });
 }
 
-/** Claiming happens on the explorer, where the wallet signs: the one with the newest reward. */
-function claim(): void {
-  const wallet = state.rewards[0]?.wallet ?? watched()[0];
-  if (wallet) void api.openExplorer(`/wallet/${wallet}/earned`);
+/**
+ * Claiming happens on the explorer, where the wallet signs: the one with the newest reward. A seat borrowed on imdLend
+ * is held by its vault, which signs nothing there: imdLend claims a vault's rewards and pays its owner and operator at once.
+ */
+function claim(wallet = state.rewards[0]?.wallet ?? watched()[0]): void {
+  if (!wallet) return;
+  if (lentHere(wallet)) return void api.openLend("rewards").catch(() => undefined);
+  void api.openExplorer(`/wallet/${wallet}/earned`);
+}
+
+/** The wallet holding this computer's agent is an imdLend vault, as setup was told the seat came from there. */
+function lentHere(wallet: string): boolean {
+  return wallet === state.localOwner && seatSource() === "lend";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -763,7 +785,7 @@ function rewardsHtml(): string {
       ${shown.map((r) => `<button class="reward" data-token="${esc(r.token.address)}" title="${esc(r.token.name)} on the explorer">
         ${coinHtml(r)}<span class="symbol">${esc(r.token.symbol)}</span><span class="amount">${esc(amountWords(r.amount, r.token.decimals))}</span><span class="age">${esc(shortAgo(new Date(r.at)))}</span>
       </button>`).join("")}
-      ${state.rewards.length > shown.length ? `<button class="more" data-claim="${esc(newest.wallet)}">All of them on the explorer</button>` : ""}
+      ${state.rewards.length > shown.length ? `<button class="more" data-explorer="/wallet/${esc(newest.wallet)}/earned">All of them on the explorer</button>` : ""}
     </div>` : ""}`;
 }
 
@@ -771,7 +793,8 @@ function rewardsHtml(): string {
 function claimHtml(wallet: string): string {
   const worth = state.worth.get(wallet);
   if (worth && worth.count === 0) return "";
-  return `<button class="claim" data-claim="${esc(wallet)}" title="${esc(worth ? `Claim the ${worth.count} ready, on the explorer, with your wallet (C)` : "Claim on the explorer, with your wallet (C)")}">Claim</button>`;
+  const where = lentHere(wallet) ? "on imdLend, which pays you and the seat's owner" : "on the explorer, with your wallet";
+  return `<button class="claim" data-claim="${esc(wallet)}" title="${esc(worth ? `Claim the ${worth.count} ready, ${where} (C)` : `Claim ${where} (C)`)}">Claim</button>`;
 }
 
 /**
@@ -891,12 +914,18 @@ function homeHtml(): string {
     ${noteHtml()}`;
 }
 
-/** Setup's window is open while agents show here: one row back to it. */
+/** Setup not finished, its window open or not: one row back to it. Or this computer's box runs no seat: one row to connect one. */
 function settingUpHtml(): string {
-  return state.settingUp
-    ? `<section class="card"><div class="line"><span>Setting up this computer<span class="sub">${esc(state.settingUp)}</span></span><button class="pill" data-action="setup" title="Continue setup (S)">Continue</button></div></section>`
-    : "";
+  const row = (title: string, sub: string, act: string) => `<section class="card"><div class="line"><span>${title}<span class="sub">${esc(sub)}</span></span><button class="pill" data-action="setup" title="${act} (S)">${act}</button></div></section>`;
+  if (state.settingUp) return row("Setting up this computer", state.settingUp, "Continue");
+  // a code out with no window: the agent starts by itself once the seat's wallet approves it
+  if (state.pairingOut) return row("Setting up this computer", "Waiting for the seat's approval", "Show code");
+  if (state.unpaired) return row("This computer's agent", "Not connected to a seat", "Connect");
+  return setupUnfinished() ? row("Setting up this computer", "Not finished", "Continue") : "";
 }
+
+/** The box installed but never started, with no agent of this computer's known: setup was left part way. */
+const setupUnfinished = () => Boolean(state.box?.installed && state.box.state !== "running" && !state.localToken && state.loaded);
 
 /**
  * The wallet that lets this computer pause and resume its agents, as a dapp's wallet connects: Connect
@@ -1237,6 +1266,8 @@ function close(): void {
 
 void listen<string>("update-available", (event) => { state.update = event.payload; render(); });
 void listen<string | null>("setup-progress", (event) => { state.settingUp = event.payload; render(); });
+// a pairing ended, its agent started or not: read again, so the agent shows at once
+void listen("box-pair-ended", () => void refresh(true));
 
 void listen<boolean>("panel-shown", (event) => {
   playIn(event.payload === true);
@@ -1362,7 +1393,7 @@ app.addEventListener("click", (event) => {
   const copy = target.closest<HTMLElement>("[data-copy]")?.dataset.copy;
   if (copy) return copyFix(copy);
   const wallet = target.closest<HTMLElement>("[data-claim]")?.dataset.claim;
-  if (wallet) return void api.openExplorer(`/wallet/${wallet}/earned`);
+  if (wallet) return claim(wallet);
   const token = target.closest<HTMLElement>("[data-token]")?.dataset.token;
   if (token) return void api.openExplorer(`/token/${token}`);
   const page = target.closest<HTMLElement>("[data-explorer]")?.dataset.explorer;
@@ -1455,7 +1486,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "e") return toggleRewards();
   if (event.key === "u") return void restartLocal();
   if (event.key === "U") return updateNow();
-  if (event.key === "s" && !state.box?.installed) return void api.openSetup();
+  if (event.key === "s" && (!state.box?.installed || state.unpaired || state.settingUp || state.pairingOut || setupUnfinished())) return void api.openSetup();
   if (event.key === "r") return void refresh(true);
   if (event.key === "a" && state.view === "settings") return setTheme(THEMES[(THEMES.findIndex(([t]) => t === settings.theme) + 1) % THEMES.length]![0]);
   if (event.key === "Enter") {

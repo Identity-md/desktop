@@ -16,6 +16,15 @@ import { iconHome, mac, windows } from "./platform";
 
 type Step = "docker" | "pull" | "install" | "signin" | "pair" | "start";
 
+/**
+ * Where the seat this computer will run is: in its person's own wallet; in a friend's, approved from it through a link
+ * sent to them; or on imdLend, where a vault holds it and imdLend approves the pairing. Asked once, after the first
+ * screen, and kept; until it's answered, the person's own wallet.
+ */
+type Seat = "own" | "friend" | "lend";
+const SEAT = "imd-agents:seat";
+const savedSeat = (() => { try { const seat = localStorage.getItem(SEAT); return seat === "own" || seat === "friend" || seat === "lend" ? seat : null; } catch { return null; } })();
+
 /** Where the app installs Docker itself, with Docker's own installer; on Linux it opens Docker's page. */
 const installs = mac || windows;
 /** This computer, as its person calls it. */
@@ -36,6 +45,20 @@ const state = {
   words: {} as Partial<Record<Step, string>>,
   since: {} as Partial<Record<Step, number>>,
   pairing: null as { code: string; url: string } | null,
+  /** When the pairing code runs out, as the network has it, for the button to count down to. */
+  expires: null as number | null,
+  /** Whether the code went onto the clipboard, for imdLend's page to take. */
+  copied: false,
+  /** Pairing stopped by Cancel: its end is no error. */
+  cancelled: false,
+  /** A pairing this window found already waiting, opened again after its code went out: its end comes as an event. */
+  resumed: false,
+  /** Where the seat is, as answered; null until asked. */
+  seat: savedSeat as Seat | null,
+  /** The seat screen, while it shows: after the first screen, or from step 5's Change. */
+  asking: null as "first" | "change" | null,
+  /** The answer picked on the seat screen, kept by Continue. */
+  picked: "own" as Seat,
   register: null as string | null,
   error: null as string | null,
   errorDetail: null as string | null,
@@ -125,22 +148,67 @@ async function step(): Promise<void> {
     }
     if (next === "pull") await api.boxPull();
     if (next === "install") await api.boxInstall();
-    if (next === "pair") state.register = (await api.boxPair()).register;
+    if (next === "pair") state.register = (await api.boxPair(settings.runtime ?? "claude")).register;
     if (next === "start") {
       await api.boxStart(settings.runtime ?? "claude");
       state.started = true;
     }
   } catch (error) {
-    state.errorDetail = String(error).replace(/^Error: /, "");
-    state.error = setupErrorWords(state.errorDetail);
+    if (!(next === "pair" && state.cancelled)) {
+      state.errorDetail = String(error).replace(/^Error: /, "");
+      state.error = setupErrorWords(state.errorDetail);
+    }
   }
   state.busy = null;
   state.pairing = null;
+  state.expires = null;
+  state.copied = false;
+  state.cancelled = false;
   await check();
+}
+
+/**
+ * Setup opened again while a code waits, its link perhaps already with a friend: that pairing, shown where it was,
+ * rather than Connect, which would make a new code and end it.
+ */
+async function resume(): Promise<void> {
+  const pending = await api.pairingPending().catch(() => null);
+  if (!pending || state.busy) return;
+  state.busy = "pair";
+  state.resumed = true;
+  state.pairing = pending;
+  state.since = { pair: Date.now() };
+  void api.pairingExpires(pending.code).then((at) => { if (state.pairing?.code === pending.code) { state.expires = at; render(); } }).catch(() => undefined);
+  render();
+}
+
+// a pairing this window didn't start, ending: connected and started, or why not
+void listen<{ token_id: string | null; error: string | null }>("box-pair-ended", (event) => {
+  if (!state.resumed) return;
+  state.resumed = false;
+  state.busy = null;
+  state.pairing = null;
+  state.expires = null;
+  state.copied = false;
+  const { error } = event.payload;
+  if (error && !state.cancelled) {
+    state.errorDetail = error;
+    state.error = setupErrorWords(error);
+  }
+  state.cancelled = false;
+  void check();
+});
+
+/** Cancel, while the code waits: the pairing stops, and the step stands as it was. */
+function cancelPairing(): void {
+  state.cancelled = true;
+  void api.boxPairCancel();
 }
 
 void listen<{ step: Step; words: string }>("setup-step-progress", (event) => {
   const { step, words } = event.payload;
+  // approved: the code's done with, and the agent is starting
+  if (step === "pair") { state.pairing = null; state.expires = null; }
   // a new phase starts its clock again; a count that only moves on keeps it
   if (state.words[step]?.replace(/[\d,]+/g, "#") !== words.replace(/[\d,]+/g, "#")) state.since[step] = Date.now();
   state.words[step] = words;
@@ -162,10 +230,39 @@ setInterval(() => { if (state.busy) render(); }, 1000);
 
 // the pairing code arrives while `imd pair` waits for the wallet: its page opens, and the code shows here
 void listen<{ code: string; url: string }>("box-pairing", (event) => {
+  const { code } = event.payload;
   state.pairing = event.payload;
-  void api.openPairing(event.payload.url).catch(() => undefined);
+  state.expires = null;
+  state.copied = false;
+  openApproval();
+  // when it runs out, from the network's own record of the code
+  void api.pairingExpires(code).then((at) => { if (state.pairing?.code === code) { state.expires = at; render(); } }).catch(() => undefined);
   render();
 });
+
+/** Where the seat is: as answered, or the person's own wallet until then. */
+const seat = (): Seat => state.seat ?? "own";
+
+/**
+ * Where the code goes to be approved. A seat in the wallet: the network's own page, with the code in its link. A
+ * friend's: that link, onto the clipboard, to send them, since their wallet isn't here. A seat from imdLend: imdLend's
+ * page, which can't take a code from its link, so the code goes onto the clipboard to paste there.
+ */
+function openApproval(): void {
+  const pairing = state.pairing;
+  if (!pairing) return;
+  const copied = () => { if (state.pairing === pairing) { state.copied = true; render(); } };
+  if (seat() === "friend") return void api.copyPairing(pairing.url).then(copied).catch(() => undefined);
+  if (seat() === "own") return void api.openPairing(pairing.url).catch(() => undefined);
+  void api.openLend("pair", pairing.code).then((done) => { if (done) copied(); }).catch(() => undefined);
+}
+
+/** What's left of the code's time, as " · 4:59", once the network has said when it runs out. */
+function left(): string {
+  if (!state.expires) return "";
+  const seconds = Math.max(0, Math.ceil((state.expires - Date.now()) / 1000));
+  return ` · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
 
 /** A closed padlock, drawn at the step numbers' weight. */
 const LOCK = `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.6"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>`;
@@ -221,8 +318,9 @@ function button(next: Step | null): string {
     return `<button id="go" class="primary big" data-action="step" title="${esc(label)} (Enter)"><span class="label">${esc(label)}</span></button>`;
   }
   const words = next === "docker" ? docker(state.at, true).busy : next === "pull" ? state.words.pull ?? "Starting the download…" : next === "install" ? state.words.install ?? "Installing…"
-    : next === "signin" ? "Waiting for you to sign in…" : next === "pair" ? "Waiting for your wallet…" : "Starting…";
-  const clock = elapsed(next);
+    : next === "signin" ? "Waiting for you to sign in…" : next === "pair" ? state.words.pair ?? (seat() === "friend" ? "Waiting for your friend…" : "Waiting for your wallet…") : "Starting…";
+  // the code counts down, where every other step counts up
+  const clock = next === "pair" && state.pairing && state.expires ? left() : elapsed(next);
   const [, got, total] = words.match(/([\d,]+) of ([\d,]+) MB/) ?? [];
   const share = got && total ? Math.min(100, (100 * Number(got.replace(/,/g, ""))) / Number(total.replace(/,/g, ""))) : null;
   return `<button id="go" class="primary big busy" disabled>${share === null ? `<span class="spinner"></span>` : `<span class="fill" style="width: ${share.toFixed(1)}%"></span>`}<span class="label">${esc(clock ? words.replace(/…$/, "") : words)}${clock}</span></button>`;
@@ -237,19 +335,32 @@ function nextHelp(next: Step | null): string {
   // on a Mac, the sign-in opens in Terminal, which the Mac asks about the first time: the one prompt to allow
   if (next === "signin" && mac) return busy ? "Choose Allow if your Mac asks, then sign in through the Terminal window. This step finishes by itself." : "If your Mac asks to let IMD Agents control Terminal, choose Allow. Claude's sign-in opens there.";
   if (next === "signin" && busy) return "A terminal window opened inside the box. Sign in there, and this step finishes by itself.";
+  // the page that approves the seat, said before it opens; once it's out, step 5's own line says what to do there
+  if (next === "pair" && !busy && seat() === "lend") return "imdLend opens next with the code copied. Paste it there and approve.";
+  if (next === "pair" && !busy && seat() === "own") return "Your browser opens next. Approve there with the wallet that holds your seat.";
+  // how long the link lasts is the network's to say: the button counts it down, from the code's own end
+  if (next === "pair" && !busy && seat() === "friend") return "Next, a link to send your friend. They approve it with their wallet.";
   return "";
 }
 
-type Screen = "intro" | "steps" | "agent";
+/** Step 5's line while its code waits: what to do on the page that's out, where the code's room leaves none below. */
+function approving(): string {
+  if (seat() === "lend") return state.copied ? "Code copied. Paste it on imdLend and approve." : "Enter this code on imdLend and approve.";
+  if (seat() === "friend") return state.copied ? "Link copied. Send it to your friend to approve." : "Copy the link and send it to your friend.";
+  return "Approve in your browser with your seat's wallet.";
+}
+
+type Screen = "intro" | "seat" | "steps" | "agent";
 
 /**
- * Three screens, one job each: the first, until Continue, says what it is, why it's safe and what it needs; the
- * steps; then, once the five are done, the agent itself, its face lit when it runs.
+ * Four screens, one job each: the first, until Continue, says what it is, why it's safe and what it needs; the
+ * seat, asked once; the steps; then, once the five are done, the agent itself, its face lit when it runs.
  */
 function screenOf(): Screen {
   const next = nextStep();
   if (state.at && (next === "start" || !next)) return "agent";
-  return state.intro ? "intro" : "steps";
+  if (state.intro) return "intro";
+  return state.asking ? "seat" : "steps";
 }
 const onIntro = () => screenOf() === "intro";
 
@@ -258,8 +369,9 @@ function introHtml(): string {
   const short = state.free !== null && state.free < NEEDED
     ? `<p class="note warn" role="status">This ${computer} has ${(state.free / 1e9).toFixed(1)} GB free. Setup needs about ${NEEDED / 1e9} GB.</p>`
     : "";
-  // the two things setup can't check for: Claude Code comes with every paid Claude plan, and Codex isn't in the box
-  const seat = `<p class="setup-needs">You'll need <button class="text-link" data-action="seats" title="Agent seats on imd.fun (S)">an agent seat</button> and <button class="text-link" data-action="claude-plans" title="Claude's plans (C)">a paid Claude plan</button>.</p>`;
+  // what setup can't check for: Claude Code comes with every paid Claude plan, and Codex isn't in the box. The seat
+  // is the next screen's
+  const seat = `<p class="setup-needs">You'll need <button class="text-link" data-action="claude-plans" title="Claude's plans (C)">a paid Claude plan</button>.</p>`;
   return `<div class="hero">
       <img class="setup-icon" src="/app-icon.png" width="72" height="72" alt="">
       <h1>Run an IMD Agent</h1>
@@ -273,11 +385,51 @@ function introHtml(): string {
     ${foot(`${short}${seat}`, `<button id="go" class="primary big" data-action="begin" title="Continue (Enter)"><span class="label">Continue</span></button>`, false)}`;
 }
 
-/** Past the first screen, remembered, so setup reopened opens on its steps. */
+/** Past the first screen, remembered, so setup reopened opens on its steps; the seat comes next, unless it's known. */
 function begin(): void {
   state.intro = false;
   try { localStorage.setItem(BEGUN, "1"); } catch { /* setup reopened shows the first screen again */ }
+  if (state.seat === null) return ask("first");
   render();
+}
+
+/** The three answers: where the seat is, said the way its person would. */
+const SEATS: Array<{ key: Seat; name: string }> = [
+  { key: "own", name: "In my wallet" },
+  { key: "friend", name: "In a friend's wallet" },
+  { key: "lend", name: "On imdLend" },
+];
+
+function ask(mode: NonNullable<typeof state.asking>): void {
+  state.asking = mode;
+  state.picked = seat();
+  render();
+}
+
+/** Continue on the seat screen: the answer kept. */
+function keep(): void {
+  state.seat = state.picked;
+  try { localStorage.setItem(SEAT, state.seat); } catch { /* asked again next time */ }
+  state.asking = null;
+  render();
+}
+
+/**
+ * The seat it will run: one question, three short answers, the person's own wallet picked to begin with. What each
+ * means comes at the last step, before it happens. No seat yet: one link to get one, and setup goes on meanwhile.
+ */
+function seatHtml(): string {
+  const rows = SEATS.map((s, i) => `<button class="seat-choice${state.picked === s.key ? " on" : ""}" role="radio" aria-checked="${state.picked === s.key}" data-seat="${s.key}" title="${esc(s.name)} (${i + 1})">
+      <span class="radio" aria-hidden="true"></span><span class="step-name">${esc(s.name)}</span>
+    </button>`).join("");
+  const get = `<p class="setup-needs">No seat yet? <button class="text-link" data-action="seats" title="Agent seats on imd.fun (G)">Get one</button></p>`;
+  const go = `<button id="go" class="primary big" data-action="keep" title="Continue (Enter)"><span class="label">Continue</span></button>`;
+  return `<div class="question">
+      <h1>Where's the agent seat?</h1>
+      <p class="setup-intro">Your agent needs one to take jobs.</p>
+      <div class="seat-choices" role="radiogroup" aria-label="Where's the agent seat?">${rows}</div>
+    </div>
+    ${foot(get, go, false)}`;
 }
 
 const errorLine = () => state.error ? `<div class="note bad" role="status" title="${esc(state.errorDetail ?? "")}">${esc(state.error)}</div>` : "";
@@ -304,9 +456,16 @@ function agentHtml(): string {
     ${foot(`${register}${errorLine()}`, button(nextStep()), !running)}`;
 }
 
+/** The seat, as answered, under the step that connects it. */
+const SEAT_WORDS: Record<Seat, string> = { own: "Seat in your wallet", friend: "Seat in a friend's wallet", lend: "Seat on imdLend" };
+
+/** Step 5 waiting on its button: the one moment Change shows. */
+const changeable = () => nextStep() === "pair" && !state.busy;
+
 function html(): string {
   const screen = screenOf();
   if (screen === "intro") return introHtml();
+  if (screen === "seat") return seatHtml();
   if (screen === "agent") return agentHtml();
   const at = state.at;
   const next = nextStep();
@@ -317,14 +476,16 @@ function html(): string {
     { key: "pull", done: Boolean(at?.image), doneWords: "Installed", about: "The sealed box your agent works in." },
     { key: "install", done: Boolean(at?.worker), doneWords: "Installed", about: "The IMD worker and Claude Code, in the sealed box." },
     { key: "signin", done: Boolean(at?.claude), doneWords: "Connected", about: "The AI your agent thinks with. Sign in once." },
-    { key: "pair", done: Boolean(state.token), doneWords: `Connected · Agent #${state.token}`, about: "Approve with the wallet that holds your seat." },
+    { key: "pair", done: Boolean(state.token), doneWords: `Connected · Agent #${state.token}`, about: state.busy === "pair" && state.pairing ? approving() : SEAT_WORDS[seat()] },
   ];
-  const list = steps.map((s, i) => `<div class="line step${s.done ? " done" : s.key === next ? " next" : ""}" id="step-${s.key}">
+  const change = ` · <button class="text-link" data-action="change-seat" title="Change where your seat is (C)">Change</button>`;
+  const list = steps.map((s, i) => `<div class="line step${s.done ? " complete" : s.key === next ? " next" : ""}" id="step-${s.key}">
       <span class="step-num" aria-hidden="true">${s.done ? CHECK : `<b>${i + 1}</b>`}</span>
-      <span class="step-lines"><span class="step-name">${esc(NAMES[s.key])}</span><span class="sub">${esc(s.done ? s.doneWords : s.about)}</span></span>
+      <span class="step-lines"><span class="step-name">${esc(NAMES[s.key])}</span><span class="sub">${esc(s.done ? s.doneWords : s.about)}${s.key === "pair" && changeable() ? change : ""}</span></span>
     </div>`).join("");
+  const page = seat() === "lend" ? "Open imdLend" : seat() === "friend" ? "Copy link" : "Open page";
   const pairing = state.busy === "pair" && state.pairing
-    ? `<div class="pairing"><div class="code">${esc(state.pairing.code.slice(0, 4))} ${esc(state.pairing.code.slice(4))}</div><div class="actions"><button class="pill" data-action="pair-cancel" title="Cancel (Esc)">Cancel</button><button class="pill" data-action="pair-open" title="Open page (Enter)">Open page</button></div></div>`
+    ? `<div class="pairing"><div class="code">${esc(state.pairing.code.slice(0, 4))} ${esc(state.pairing.code.slice(4))}</div><div class="actions"><button class="pill" data-action="pair-cancel" title="Cancel (Esc)">Cancel</button><button class="pill" data-action="pair-open" title="${page} (Enter)">${page}</button></div></div>`
     : "";
   const help = nextHelp(next);
   const go = at ? button(next) : `<button id="go" class="primary big busy" disabled><span class="spinner"></span><span class="label">Looking at this computer…</span></button>`;
@@ -386,28 +547,59 @@ function render(): void {
   }
 }
 
+/** An answer picked on the seat screen, by click, number or arrow. */
+function pick(seat: Seat): void {
+  state.picked = seat;
+  render();
+}
+
 root.addEventListener("click", (event) => {
-  const action = (event.target as HTMLElement).closest<HTMLElement>("[data-action]")?.dataset.action;
+  const target = event.target as HTMLElement;
+  const seat = target.closest<HTMLElement>("[data-seat]")?.dataset.seat as Seat | undefined;
+  if (seat) return pick(seat);
+  const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action === "begin") return begin();
+  if (action === "keep") return keep();
+  if (action === "change-seat") return ask("change");
   if (action === "seats") return void api.openSeats();
   if (action === "claude-plans") return void api.openClaudePlans();
   if (action === "step") return void step();
   if (action === "done") return void api.setupDone();
   if (action === "docker-terms") return void api.openDockerTerms();
   if (action === "help") return void api.openSetupHelp();
-  if (action === "pair-open" && state.pairing) return void api.openPairing(state.pairing.url);
-  if (action === "pair-cancel") return void api.boxPairCancel();
+  if (action === "pair-open") return openApproval();
+  if (action === "pair-cancel") return cancelPairing();
   if (action === "register" && state.register) return void api.openPairing(state.register);
 });
 
+/** The seat screen by keys: 1 to 3 or the arrows pick, G gets a seat, Enter goes on, Escape goes back without a change. */
+function seatKey(event: KeyboardEvent): void {
+  const number = Number(event.key);
+  if (number >= 1 && number <= SEATS.length) return pick(SEATS[number - 1]!.key);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const at = SEATS.findIndex((s) => s.key === state.picked) + (event.key === "ArrowDown" ? 1 : -1);
+    return pick(SEATS[(at + SEATS.length) % SEATS.length]!.key);
+  }
+  if (event.key === "g") return void api.openSeats();
+  if (event.key === "Enter") return keep();
+  if (event.key === "Escape") {
+    // the first time, back to the first screen; from the steps, back to them as they were
+    if (state.asking === "first") state.intro = true;
+    state.asking = null;
+    render();
+  }
+}
+
 window.addEventListener("keydown", (event) => {
   if (event.key === "?") return void api.openSetupHelp();
-  if (event.key === "s" && onIntro()) return void api.openSeats();
+  if (screenOf() === "seat") return seatKey(event);
   if (event.key === "c" && onIntro()) return void api.openClaudePlans();
+  if (event.key === "c" && changeable()) return ask("change");
   // while the wallet's page is out, Enter opens it again and Escape stops pairing
   if (state.busy === "pair" && state.pairing) {
-    if (event.key === "Enter") return void api.openPairing(state.pairing.url);
-    if (event.key === "Escape") return void api.boxPairCancel();
+    if (event.key === "Enter") return openApproval();
+    if (event.key === "Escape") return cancelPairing();
   }
   if (event.key !== "Enter") return;
   if (onIntro()) return begin();
@@ -416,5 +608,6 @@ window.addEventListener("keydown", (event) => {
 });
 
 render();
-void check();
+// a code already out comes back first, so Connect never shows over it
+void resume().then(check);
 void api.freeSpace().then((bytes) => { state.free = bytes; render(); }).catch(() => undefined);
