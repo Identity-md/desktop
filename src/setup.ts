@@ -49,8 +49,12 @@ const state = {
   expires: null as number | null,
   /** Whether the code went onto the clipboard, for imdLend's page to take. */
   copied: false,
-  /** Pairing stopped by Cancel: its end is no error. */
+  /** Pairing or Claude's sign-in stopped by Cancel: its end is no error. */
   cancelled: false,
+  /** Claude's sign-in page open in the browser, the code pasted here from it, and whether Claude Code is checking it. */
+  signinOpen: false,
+  code: "",
+  checking: false,
   /** A pairing this window found already waiting, opened again after its code went out: its end comes as an event. */
   resumed: false,
   /** Where the seat is, as answered; null until asked. */
@@ -101,13 +105,12 @@ async function check(): Promise<void> {
   if (state.token) void loadFace(state.token, render);
   state.running = (await api.boxState().catch(() => null))?.state === "running";
   if (state.busy === "docker" && state.at?.docker === "running") state.busy = null;
-  if (state.busy === "signin" && state.at?.claude) state.busy = null;
   render();
   // the panel's row: where setup has got
   const next = nextStep();
   const order: Step[] = ["docker", "pull", "install", "signin", "pair"];
   void emit("setup-progress", next && next !== "start" ? `Step ${order.indexOf(next) + 1} of 5 · ${NAMES[next]}` : next === "start" ? "Ready to start" : null);
-  if (state.busy === "docker" || state.busy === "signin") timer = setTimeout(() => void check(), 2500);
+  if (state.busy === "docker") timer = setTimeout(() => void check(), 2500);
   // reopened after WSL's restart on a Docker installed before it: setup carries on by itself
   else if (windows && !startedDocker && !state.intro && state.at?.docker === "stopped") {
     startedDocker = true;
@@ -118,7 +121,7 @@ async function check(): Promise<void> {
 /** Takes the next step: installs or opens Docker, downloads the box, installs the worker, opens Claude's sign-in, pairs, starts. */
 async function step(): Promise<void> {
   const next = nextStep();
-  if (!next || (state.busy && state.busy !== "docker" && state.busy !== "signin")) return;
+  if (!next || (state.busy && state.busy !== "docker")) return;
   state.error = null;
   state.busy = next;
   state.words = {};
@@ -142,10 +145,7 @@ async function step(): Promise<void> {
       state.since.docker = Date.now();
       return void check();
     }
-    if (next === "signin") {
-      await api.boxSignIn();
-      return void check();
-    }
+    if (next === "signin") await api.boxSignIn();
     if (next === "pull") await api.boxPull();
     if (next === "install") await api.boxInstall();
     if (next === "pair") state.register = (await api.boxPair(settings.runtime ?? "claude")).register;
@@ -154,7 +154,7 @@ async function step(): Promise<void> {
       state.started = true;
     }
   } catch (error) {
-    if (!(next === "pair" && state.cancelled)) {
+    if (!((next === "pair" || next === "signin") && state.cancelled)) {
       state.errorDetail = String(error).replace(/^Error: /, "");
       state.error = setupErrorWords(state.errorDetail);
     }
@@ -164,6 +164,9 @@ async function step(): Promise<void> {
   state.expires = null;
   state.copied = false;
   state.cancelled = false;
+  state.signinOpen = false;
+  state.code = "";
+  state.checking = false;
   await check();
 }
 
@@ -239,6 +242,34 @@ void listen<{ code: string; url: string }>("box-pairing", (event) => {
   void api.pairingExpires(code).then((at) => { if (state.pairing?.code === code) { state.expires = at; render(); } }).catch(() => undefined);
   render();
 });
+
+// Claude's sign-in page is open in the browser: the code it ends on is pasted here
+void listen("box-signin-page", () => {
+  state.signinOpen = true;
+  render();
+  document.querySelector<HTMLInputElement>("#setup [data-field=code]")?.focus();
+});
+
+/** Hands Claude Code the code pasted from its page. The sign-in then ends by itself, signed in or saying why not. */
+function sendCode(): void {
+  const code = state.code.trim();
+  if (!code || state.checking) return;
+  state.checking = true;
+  state.error = null;
+  render();
+  void api.boxSignInCode(code).catch((error) => {
+    state.checking = false;
+    state.errorDetail = String(error).replace(/^Error: /, "");
+    state.error = setupErrorWords(state.errorDetail);
+    render();
+  });
+}
+
+/** Cancel, while Claude's page is out: the sign-in stops, and the step stands as it was. */
+function cancelSignIn(): void {
+  state.cancelled = true;
+  void api.boxSignInCancel();
+}
 
 /** Where the seat is: as answered, or the person's own wallet until then. */
 const seat = (): Seat => state.seat ?? "own";
@@ -317,10 +348,15 @@ function button(next: Step | null): string {
     const label = next === "docker" ? docker(state.at, false).act : next === "start" ? `Start Agent #${state.token}` : NAMES[next];
     return `<button id="go" class="primary big" data-action="step" title="${esc(label)} (Enter)"><span class="label">${esc(label)}</span></button>`;
   }
+  // a code pasted from Claude's page: the button hands it over
+  if (next === "signin" && state.signinOpen && state.code.trim() && !state.checking) {
+    return `<button id="go" class="primary big" data-action="signin-code" title="Connect Claude (Enter)"><span class="label">Connect Claude</span></button>`;
+  }
+  const signin = state.checking ? "Checking the code…" : state.signinOpen ? "Waiting for Claude's code…" : "Opening Claude's sign-in…";
   const words = next === "docker" ? docker(state.at, true).busy : next === "pull" ? state.words.pull ?? "Starting the download…" : next === "install" ? state.words.install ?? "Installing…"
-    : next === "signin" ? "Waiting for you to sign in…" : next === "pair" ? state.words.pair ?? (seat() === "friend" ? "Waiting for your friend…" : "Waiting for your wallet…") : "Starting…";
-  // the code counts down, where every other step counts up
-  const clock = next === "pair" && state.pairing && state.expires ? left() : elapsed(next);
+    : next === "signin" ? signin : next === "pair" ? state.words.pair ?? (seat() === "friend" ? "Waiting for your friend…" : "Waiting for your wallet…") : "Starting…";
+  // the code counts down, where every other step counts up; signing in waits on the person, with no clock to hurry them
+  const clock = next === "pair" && state.pairing && state.expires ? left() : next === "signin" ? "" : elapsed(next);
   const [, got, total] = words.match(/([\d,]+) of ([\d,]+) MB/) ?? [];
   const share = got && total ? Math.min(100, (100 * Number(got.replace(/,/g, ""))) / Number(total.replace(/,/g, ""))) : null;
   return `<button id="go" class="primary big busy" disabled>${share === null ? `<span class="spinner"></span>` : `<span class="fill" style="width: ${share.toFixed(1)}%"></span>`}<span class="label">${esc(clock ? words.replace(/…$/, "") : words)}${clock}</span></button>`;
@@ -332,9 +368,8 @@ function nextHelp(next: Step | null): string {
   const busy = state.busy === next;
   if (next === "docker") return docker(state.at, busy).help;
   if (next === "pull" && busy && state.words.pull === "Unpacking…") return `Docker is unpacking the box. On an older ${computer} this takes a few minutes.`;
-  // on a Mac, the sign-in opens in Terminal, which the Mac asks about the first time: the one prompt to allow
-  if (next === "signin" && mac) return busy ? "Choose Allow if your Mac asks, then sign in through the Terminal window. This step finishes by itself." : "If your Mac asks to let IMD Agents control Terminal, choose Allow. Claude's sign-in opens there.";
-  if (next === "signin" && busy) return "A terminal window opened inside the box. Sign in there, and this step finishes by itself.";
+  // the page, said before it opens; once it's out, step 4's own line says what to do there
+  if (next === "signin" && !busy) return "Claude's sign-in opens in your browser.";
   // the page that approves the seat, said before it opens; once it's out, step 5's own line says what to do there
   if (next === "pair" && !busy && seat() === "lend") return "imdLend opens next, with your code filled in. Approve it there.";
   if (next === "pair" && !busy && seat() === "own") return "Your browser opens next. Approve there with the wallet that holds your seat.";
@@ -475,7 +510,7 @@ function html(): string {
     { key: "docker", done: at?.docker === "running", doneWords: "Running", about: docker(at, false).about },
     { key: "pull", done: Boolean(at?.image), doneWords: "Installed", about: "The sealed box your agent works in." },
     { key: "install", done: Boolean(at?.worker), doneWords: "Installed", about: "The IMD worker and Claude Code, in the sealed box." },
-    { key: "signin", done: Boolean(at?.claude), doneWords: "Connected", about: "The AI your agent thinks with. Sign in once." },
+    { key: "signin", done: Boolean(at?.claude), doneWords: "Connected", about: state.busy === "signin" && state.signinOpen ? "Sign in on Claude's page, then paste its code below." : "The AI your agent thinks with. Sign in once." },
     { key: "pair", done: Boolean(state.token), doneWords: `Connected · Agent #${state.token}`, about: state.busy === "pair" && state.pairing ? approving() : SEAT_WORDS[seat()] },
   ];
   const change = ` · <button class="text-link" data-action="change-seat" title="Change where your seat is (C)">Change</button>`;
@@ -487,10 +522,13 @@ function html(): string {
   const pairing = state.busy === "pair" && state.pairing
     ? `<div class="pairing"><div class="code">${esc(state.pairing.code.slice(0, 4))} ${esc(state.pairing.code.slice(4))}</div><div class="actions"><button class="pill" data-action="pair-cancel" title="Cancel (Esc)">Cancel</button><button class="pill" data-action="pair-open" title="${page} (Enter)">${page}</button></div></div>`
     : "";
+  const signin = state.busy === "signin" && state.signinOpen
+    ? `<div class="pairing"><label class="code-label" for="claude-code">Code from Claude</label><input id="claude-code" class="code-input" data-field="code" value="${esc(state.code)}" placeholder="Paste it here" spellcheck="false" autocomplete="off"${state.checking ? " disabled" : ""}><div class="actions"><button class="pill" data-action="signin-cancel" title="Cancel (Esc)">Cancel</button><button class="pill" data-action="signin-open" title="Open Claude's page again">Open Claude's page</button></div></div>`
+    : "";
   const help = nextHelp(next);
   const go = at ? button(next) : `<button id="go" class="primary big busy" disabled><span class="spinner"></span><span class="label">Looking at this computer…</span></button>`;
   return `<section class="steps">${list}</section>
-    ${foot(`${pairing}${help ? `<p class="step-help">${help}</p>` : ""}${errorLine()}`, go, true)}`;
+    ${foot(`${pairing}${signin}${help ? `<p class="step-help">${help}</p>` : ""}${errorLine()}`, go, true)}`;
 }
 
 const root = document.getElementById("setup")!;
@@ -553,6 +591,18 @@ function pick(seat: Seat): void {
   render();
 }
 
+/** The code Claude's page ends on: its own code, then # and the sign-in's state. */
+const CLAUDE_CODE = /^[\w-]{10,}#[\w-]{10,}$/;
+
+// the code as it's typed, for the button to offer Connect Claude; a whole one pasted goes straight in
+root.addEventListener("input", (event) => {
+  const field = (event.target as HTMLElement).closest<HTMLInputElement>("[data-field=code]");
+  if (!field) return;
+  state.code = field.value;
+  if ((event as InputEvent).inputType === "insertFromPaste" && CLAUDE_CODE.test(state.code.trim())) return sendCode();
+  render();
+});
+
 root.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
   const seat = target.closest<HTMLElement>("[data-seat]")?.dataset.seat as Seat | undefined;
@@ -569,6 +619,9 @@ root.addEventListener("click", (event) => {
   if (action === "help") return void api.openSetupHelp();
   if (action === "pair-open") return openApproval();
   if (action === "pair-cancel") return cancelPairing();
+  if (action === "signin-code") return sendCode();
+  if (action === "signin-open") return void api.boxSignInOpen().catch(() => undefined);
+  if (action === "signin-cancel") return cancelSignIn();
   if (action === "register" && state.register) return void api.openPairing(state.register);
 });
 
@@ -592,6 +645,13 @@ function seatKey(event: KeyboardEvent): void {
 }
 
 window.addEventListener("keydown", (event) => {
+  // while Claude's page is out, keys go to the code: Enter hands it over, or opens the page again with none pasted
+  // yet, and Escape stops the sign-in
+  if (state.busy === "signin" && state.signinOpen) {
+    if (event.key === "Enter") return void (state.code.trim() ? sendCode() : api.boxSignInOpen().catch(() => undefined));
+    if (event.key === "Escape") return cancelSignIn();
+    return;
+  }
   if (event.key === "?") return void api.openSetupHelp();
   if (screenOf() === "seat") return seatKey(event);
   if (event.key === "c" && onIntro()) return void api.openClaudePlans();

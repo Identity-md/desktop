@@ -177,6 +177,9 @@ describe("numbers", () => {
     // pairing's own endings, as `imd pair` writes them
     expect(setupErrorWords("pairing code expired before it was signed")).toBe("The code ran out before it was approved. Connect again for a new one.");
     expect(setupErrorWords("pairing was attempted but not accepted — check the browser tab")).toMatch(/^The approval didn't go through/);
+    // Claude Code's sign-in turning down a code, as `claude auth login` writes it; one that can't reach Claude is the network
+    expect(setupErrorWords("Login failed: Request failed with status code 400")).toMatch(/^Claude didn't take that code/);
+    expect(setupErrorWords("Login failed: getaddrinfo ENOTFOUND platform.claude.com")).toMatch(/^This computer can't reach the internet/);
     // one it does not know: Docker's error, not the line after it
     expect(setupErrorWords("docker: Error response from daemon: range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available\nRun 'docker run --help' for more information")).toBe("range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available");
     expect(setupErrorWords("")).toBe("Something went wrong. Try again.");

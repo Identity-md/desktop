@@ -402,6 +402,8 @@ export function setupErrorWords(raw: string): string {
     [/no space left on device/i, "Docker is out of disk space. Raise its disk limit in Docker's settings or delete images you don't use, then try again."],
     [/computed checksum did not match|sha256sums?: .*failed|: FAILED$/im, "The worker's download didn't match its published checksum, so nothing was installed. Try again."],
     [/no such host|could not resolve|network is unreachable|i\/o timeout|tls handshake timeout|connection reset|eai_again|enotfound|etimedout/i, "This computer can't reach the internet right now. Check the connection, then try again."],
+    // Claude Code's sign-in, turning down the code pasted from its page
+    [/^login failed/im, "Claude didn't take that code. Connect again, then paste the code from the page that opens."],
     [/\bdenied\b|unauthorized|authentication required/i, "GitHub refused the box download. Try again in a few minutes."],
     [/^timed out$/i, "That took too long. Check the connection, then try again."],
     // `imd pair`'s own two endings short of paired: the code ran out, or the approval was refused

@@ -615,6 +615,8 @@ const BOX_PAIRING: &str = "imd-worker-pair";
 const BOX_UNLINKING: &str = "imd-worker-unlink";
 /// The one-off box that updates the worker before a pairing, named as the others are.
 const BOX_UPDATING: &str = "imd-worker-update";
+/// The one-off box that signs in to Claude, named so that a cancel can stop it.
+const BOX_SIGNING_IN: &str = "imd-worker-signin";
 /// Docker Desktop's installer for this computer's chip, straight from Docker, so Install Docker downloads it rather
 /// than opening a page that asks which chip it is for; on Linux, Docker's page.
 fn docker_download() -> String {
@@ -1549,51 +1551,114 @@ async fn box_install(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Claude's sign-in is Claude's own, in a terminal: a window opens on Claude Code inside the box,
-/// with one line saying what to type. The panel sees it done when the sign-in file appears.
+/// Claude's sign-in, Claude Code's own: `claude auth login` in a one-off box, with no terminal. Its page opens in this
+/// computer's browser, and the code that page ends on is pasted into setup (`box_sign_in_code`). Without a terminal,
+/// Claude Code prints the page's link whole on one line, where a terminal breaks it across lines and a click on it, or
+/// a paste into Safari, opens only part of it. Ends once Claude Code has the sign-in, kept in the box's volume, or
+/// with why not.
 #[tauri::command]
-fn box_sign_in() -> Result<(), String> {
-    // what to answer, said before Claude Code asks: after the sign-in it asks whether to trust the box's home,
-    // and No ends the session with the sign-in kept. No apostrophes: it is echoed inside single quotes
-    let say = "Sign in to Claude for your IMD agent, in your browser. When it then asks whether you trust this folder, choose No, exit. Your sign-in stays in the box.";
-    #[cfg(unix)]
-    let (docker, flags) = (
-        docker().ok_or("Docker is not installed")?.to_string_lossy().to_string(),
-        // quoted, for the seccomp profile's path, which a temporary folder can put a space in
-        box_flags().iter().map(|flag| format!("'{flag}'")).collect::<Vec<_>>().join(" "),
-    );
-    #[cfg(target_os = "macos")]
-    {
-        let line = format!("clear; echo '{say}'; echo; '{docker}' run -it --rm {flags} {BOX_IMAGE} claude; exit");
-        let script = format!("tell application \"Terminal\"\n  activate\n  do script \"{}\"\nend tell", line.replace('\\', "\\\\").replace('"', "\\\""));
-        let out = Command::new("osascript").args(["-e", &script]).output().map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            // -1743: the Mac's Automation prompt was answered Don't Allow, and Terminal never opens
-            let said = String::from_utf8_lossy(&out.stderr);
-            return Err(if said.contains("-1743") {
-                "Your Mac didn't let IMD Agents open Terminal. Allow it in System Settings, Privacy & Security, Automation, then try again.".into()
-            } else {
-                format!("Terminal didn't open: {}", said.trim())
-            });
+async fn box_sign_in(app: tauri::AppHandle) -> Result<(), String> {
+    let _busy = Busy::new();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = run_docker(&["rm", "-f", BOX_SIGNING_IN], Duration::from_secs(30));
+        // one left waiting, its window closed, would hold the app's own updates back: it stops by itself
+        let round = SIGN_IN_ROUND.fetch_add(1, Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(SIGN_IN_WAITS);
+            if SIGN_IN_ROUND.load(Ordering::SeqCst) == round {
+                SIGN_IN_STOPPED.store(round, Ordering::SeqCst);
+                let _ = run_docker(&["rm", "-f", BOX_SIGNING_IN], Duration::from_secs(30));
+            }
+        });
+        let mut args: Vec<String> = vec!["run".into(), "-i".into(), "--rm".into(), "--name".into(), BOX_SIGNING_IN.into()];
+        args.extend(box_flags());
+        args.extend([BOX_IMAGE, "claude", "auth", "login", "--claudeai"].iter().map(|s| s.to_string()));
+        let signed = sign_in_with(&args, |page| {
+            *SIGN_IN_PAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(page.to_string());
+            let _ = app.emit("box-signin-page", ());
+            let _ = app.opener().open_url(page, None::<&str>);
+        });
+        signed.map_err(|why| if SIGN_IN_STOPPED.load(Ordering::SeqCst) == round { "timed out".into() } else { why })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// How long a sign-in waits for its code before it stops.
+const SIGN_IN_WAITS: Duration = Duration::from_secs(15 * 60);
+/// Which sign-in is the latest, so a stop meant for one never ends the next, and which one was stopped for waiting.
+static SIGN_IN_ROUND: AtomicU64 = AtomicU64::new(0);
+static SIGN_IN_STOPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Claude Code's sign-in, run by Docker with `args`: its page handed to `opened` once it prints it, its input kept for
+/// the code, and its own words on the way out if it doesn't sign in.
+fn sign_in_with(args: &[String], opened: impl Fn(&str)) -> Result<(), String> {
+    use std::io::{BufRead, Read};
+    let mut command = docker_command().ok_or("Docker is not installed")?;
+    command.args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    *SIGN_IN_INPUT.lock().unwrap_or_else(|e| e.into_inner()) = child.stdin.take();
+    // read beside the output, so neither pipe fills while the other is waited on
+    let stderr = child.stderr.take();
+    let errors = std::thread::spawn(move || {
+        let mut said = String::new();
+        if let Some(mut err) = stderr {
+            let _ = err.read_to_string(&mut said);
+        }
+        said
+    });
+    if let Some(stdout) = child.stdout.take() {
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(page) = line.split_once("visit: ").map(|(_, link)| link.trim()).filter(|link| claude_page(link)) {
+                opened(page);
+            }
         }
     }
-    // a console window of its own, in Terminal or the classic console as Windows is set: Docker's CLI run in it
-    // directly, so each argument reaches it whole, and the box says what to answer before Claude Code starts
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-        let mut command = docker_command().ok_or("Docker is not installed")?;
-        command.creation_flags(CREATE_NEW_CONSOLE).args(["run", "-it", "--rm"]).args(box_flags());
-        command.args([BOX_IMAGE, "sh", "-c", &format!("echo '{say}'; echo; exec claude")]);
-        command.spawn().map_err(|e| e.to_string())?;
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        return Ok(());
     }
-    #[cfg(target_os = "linux")]
-    {
-        let line = format!("echo '{say}'; echo; '{docker}' run -it --rm {flags} {BOX_IMAGE} claude");
-        Command::new("x-terminal-emulator").args(["-e", "sh", "-c", &line]).status().map_err(|e| e.to_string())?;
+    // "Login failed: …", or Docker's own error, comes on stderr
+    let errors = errors.join().unwrap_or_default();
+    Err(errors.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("Claude's sign-in stopped").to_string())
+}
+
+/// Claude's own sign-in page, the only one a sign-in opens: https, on Claude's or Anthropic's own host, in one plain line.
+fn claude_page(link: &str) -> bool {
+    let host = link.strip_prefix("https://").and_then(|rest| rest.split(['/', '?', '#']).next()).unwrap_or_default();
+    link.len() < 4096 && link.chars().all(|c| c.is_ascii_graphic()) && ["claude.com", "claude.ai", "platform.claude.com", "console.anthropic.com"].contains(&host)
+}
+
+/// The sign-in's input, while it waits for the code its page shows.
+static SIGN_IN_INPUT: std::sync::Mutex<Option<std::process::ChildStdin>> = std::sync::Mutex::new(None);
+/// The page the sign-in opened, for Open page to open again: the webview never names one.
+static SIGN_IN_PAGE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The code Claude's page ended on, pasted into setup, handed to the sign-in waiting for it.
+#[tauri::command]
+fn box_sign_in_code(code: String) -> Result<(), String> {
+    use std::io::Write;
+    let code = code.trim();
+    if code.is_empty() || code.len() > 1024 || !code.chars().all(|c| c.is_ascii_graphic()) {
+        return Err("That isn't the code from Claude's page. Copy it there, then paste it here.".into());
     }
-    Ok(())
+    let mut waiting = SIGN_IN_INPUT.lock().unwrap_or_else(|e| e.into_inner());
+    let input = waiting.as_mut().ok_or("Claude's sign-in has ended. Connect again.")?;
+    input.write_all(format!("{code}\n").as_bytes()).and_then(|()| input.flush()).map_err(|_| "Claude's sign-in has ended. Connect again.".to_string())
+}
+
+/// Opens the sign-in's page again, as it was: a tab closed by mistake needs no new sign-in.
+#[tauri::command]
+fn box_sign_in_open(app: tauri::AppHandle) -> Result<(), String> {
+    let page = SIGN_IN_PAGE.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or("no sign-in page")?;
+    app.opener().open_url(page, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Stops a sign-in waiting for its code.
+#[tauri::command]
+async fn box_sign_in_cancel() {
+    SIGN_IN_INPUT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let _ = tauri::async_runtime::spawn_blocking(|| run_docker(&["rm", "-f", BOX_SIGNING_IN], Duration::from_secs(30))).await;
 }
 
 #[derive(Serialize, Clone)]
@@ -2235,7 +2300,7 @@ async fn open_setup(app: tauri::AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     // it opens where the panel was, its outer edge on the panel's: under the menu bar on a Mac, over the taskbar's
-    // icons on Windows. What setup opens (Docker's installer, the password box, Terminal) comes up in the middle,
+    // icons on Windows. What setup opens (Docker's installer, the password box) comes up in the middle,
     // beside it rather than over it
     match screen.filter(|_| cfg!(any(target_os = "macos", target_os = "windows"))) {
         Some(screen) => {
@@ -2605,7 +2670,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
-            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
+            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_sign_in_code, box_sign_in_open, box_sign_in_cancel, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
             docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound, set_theme,
             restart_pc, set_open_at_login
         ])
@@ -2839,6 +2904,52 @@ mod tests {
         for holder in ["0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40", "0x047f606fd5b2baa5f5c6c4ab8958e45cb6b054b7", "0x0000ec93127baa929e58e97dd0095a2bfb38ec1d"] {
             assert_eq!(tauri::async_runtime::block_on(super::lend_vault(holder.into())), Ok(None), "{holder}");
         }
+    }
+
+    #[test]
+    fn opens_only_claudes_own_sign_in_page() {
+        assert!(super::claude_page("https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code"));
+        assert!(super::claude_page("https://claude.ai/oauth/authorize?code=true"));
+        for not in [
+            "http://claude.com/cai/oauth/authorize",
+            "https://claude.com.example.com/cai/oauth/authorize",
+            "https://claude.com@example.com/",
+            "https://example.com/?https://claude.com/",
+            "https://claude.com/cai/oauth/authorize?code=true and more",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert!(!super::claude_page(not), "{not}");
+        }
+    }
+
+    /// `claude auth login` in a throwaway box with the app's flags: its page read whole off one line, the code handed
+    /// to it, and Claude's own words when it turns the code down. Needs Docker, the box with its worker installed, and
+    /// the network.
+    #[test]
+    #[ignore]
+    fn signs_in_through_a_real_claude_code() {
+        use std::time::Duration;
+        let volume = "imd-signin-test";
+        let _ = super::run_docker(&["volume", "rm", "-f", volume], Duration::from_secs(30));
+        // the worker's install, with nothing signed in
+        let from = format!("{}:/from:ro", super::BOX_VOLUME);
+        let to = format!("{volume}:/to");
+        let copied = super::run_docker(&["run", "--rm", "-u", "root", "--entrypoint", "sh", "-v", &from, "-v", &to, super::BOX_IMAGE, "-c", "cp -a /from/.npm-global /to/ && chown imd:imd /to"], Duration::from_secs(180));
+        assert!(copied.is_some_and(|(ok, _)| ok), "the worker's install copied");
+        let home = format!("{}:/home/imd", super::BOX_VOLUME);
+        let mut args: Vec<String> = vec!["run".into(), "-i".into(), "--rm".into(), "--name".into(), "imd-signin-test".into()];
+        args.extend(super::box_flags().into_iter().map(|flag| if flag == home { format!("{volume}:/home/imd") } else { flag }));
+        args.extend([super::BOX_IMAGE, "claude", "auth", "login", "--claudeai"].iter().map(|s| s.to_string()));
+        let page = std::sync::Mutex::new(None::<String>);
+        let ended = super::sign_in_with(&args, |opened| {
+            *page.lock().unwrap() = Some(opened.to_string());
+            super::box_sign_in_code("notarealcode#notarealstate".into()).expect("the code goes in");
+        });
+        let _ = super::run_docker(&["volume", "rm", "-f", volume], Duration::from_secs(30));
+        let page = page.into_inner().unwrap().expect("a page");
+        assert!(page.starts_with("https://claude.com/cai/oauth/authorize?") && page.contains("code_challenge_method=S256&state="), "{page}");
+        assert_eq!(ended, Err("Login failed: Request failed with status code 400".into()));
     }
 
     #[test]

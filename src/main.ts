@@ -131,11 +131,19 @@ let records = new Map<string, AgentRecord>();
 const history = new Map<string, { rows: WorkRow[]; capped: boolean }>();
 let lastRecords = 0;
 let lastHistory = 0;
-/** The device key whose seat was last asked: the same key on the same box is the same seat. */
+/**
+ * The device key whose seat was last asked, and when. The same key keeps its seat until the seat moves, as a lent one
+ * does when its owner takes it back, so it's asked again every minute.
+ */
 let lastDeviceKey: string | null = null;
+let lastSeatAsked = 0;
 let lastRewards = 0;
-/** When seats in imdLend vaults were last read: every five minutes, or on a full read. */
+/**
+ * When seats in imdLend vaults were last read, and which seats the connected wallets and this computer held then: read
+ * every five minutes, on a full read, or as soon as a seat leaves or comes back.
+ */
 let lastLend = 0;
+let lastHolding = "";
 let lastSwarm = 0;
 let lastRelease = 0;
 /** Each seat watched by its number: its holder, and whether it was up when its record was last read. */
@@ -168,12 +176,16 @@ async function refresh(full = false): Promise<void> {
     const box = await api.boxState().catch(() => null);
     state.pairingOut = Boolean(await api.pairingPending().catch(() => null));
     if (box && !(state.box?.state === "starting" || state.box?.state === "stopping") ) state.box = box;
-    if (box?.deviceKey && (full || box.deviceKey !== lastDeviceKey || !state.localToken)) {
+    if (box?.deviceKey && (full || box.deviceKey !== lastDeviceKey || !state.localToken || Date.now() - lastSeatAsked > 60_000)) {
       lastDeviceKey = box.deviceKey;
+      lastSeatAsked = Date.now();
       // a read that fails changes nothing; one that says no seat lets the old one go
       const token = await api.deviceSeat(box.deviceKey).catch(() => undefined);
       if (token !== undefined) state.unpaired = token === null;
+      const gone = state.localToken;
       if (token === null && state.localToken) { state.localToken = null; state.localOwner = null; settings.localToken = null; settings.localOwner = null; save(); }
+      // its pairing over, the box can only restart and be turned away: it stops, and the panel says why
+      if (token === null && box.state === "running") void stopSeatless(gone);
       if (token && token !== state.localToken) { state.localToken = token; state.localOwner = null; settings.localToken = token; save(); }
     }
     // Without a box there is no computer's own agent to show apart.
@@ -205,8 +217,10 @@ async function refresh(full = false): Promise<void> {
       const info = seatInfo.get(tokenId);
       if (info && !seats.some((s) => s.tokenId === tokenId)) seats.push({ tokenId, wallet: info.owner, online: info.online });
     }
-    if (full || Date.now() - lastLend > 300_000) {
+    const holding = [...held.filter(({ wallet }) => linked(wallet)).map(({ wallet, tokens }) => `${wallet}:${tokens.map((t) => t.tokenId).join()}`), `here:${state.localToken ?? ""}`].join(" ");
+    if (full || Date.now() - lastLend > 300_000 || holding !== lastHolding) {
       lastLend = Date.now();
+      lastHolding = holding;
       await readLendings(held);
     }
     // a connected wallet's seat out on imdLend stays in the list, held by its vault
@@ -620,6 +634,25 @@ async function readLendings(held: Array<{ wallet: string; tokens: Array<{ tokenI
   lend.keep(found.keys());
   state.lendings = found;
   if (changed) save();
+}
+
+/**
+ * This computer's box, its pairing over, as when a lent seat goes back to its owner: stopped, since the network turns
+ * it away and Docker would only start it again and again. Connect pairs it again.
+ */
+let stoppingSeatless = false;
+async function stopSeatless(tokenId: string | null): Promise<void> {
+  if (stoppingSeatless) return;
+  stoppingSeatless = true;
+  try {
+    await api.boxStop();
+    state.note = { text: tokenId ? `Agent #${tokenId} isn't paired to this computer anymore, so it stopped here.` : "This computer's agent isn't paired to a seat anymore, so it stopped.", bad: false };
+  } catch {
+    // asked again with the seat, in a minute
+  }
+  stoppingSeatless = false;
+  state.box = await api.boxState().catch(() => state.box);
+  render();
 }
 
 /** The wallet holding this computer's agent is an imdLend vault: read so, or as setup was told the seat came from there. */
@@ -1142,8 +1175,12 @@ const lentTitle = (tokenId: string) => { const lent = state.lendings.get(tokenId
 /** A seat its holder can lend from here: held by a wallet connected to this app, which proved by signing that it's theirs. */
 const lendable = (agent: Agent) => linked(agent.wallet);
 
-/** What a friend gets: where the app is, what to pick, and to send back the link it makes, for the wallet here to approve. */
-const inviteText = (tokenId: string) => `I'm lending you my IMD agent seat #${tokenId}. Get IMD Agents at https://imd.fun/app. When setup asks where the seat is, pick "In a friend's wallet". At the end it copies a link: send it to me right away and I'll approve it.`;
+/**
+ * What a friend gets: where the app is, what to pick, and to send back the link it makes, for the wallet here to approve.
+ * Said for a friend who has the app as well as one who hasn't: either way the seat question comes with setting a computer
+ * up, and a computer runs one seat, so it's one not running an agent yet.
+ */
+const inviteText = (tokenId: string) => `I'm lending you my IMD agent seat #${tokenId}. In IMD Agents (https://imd.fun/app), set up a computer that isn't running an agent yet, and pick "In a friend's wallet" when it asks where the seat is. Send me the link it copies right away and I'll approve it.`;
 
 /** Where a seat runs: on this computer, which serves it whether its box is up or not; on another; or nowhere. */
 function runsOn(agent: Agent): "here" | "elsewhere" | null {

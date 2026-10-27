@@ -27,16 +27,18 @@ export function installMock({ fixtures, scenario }) {
   // the job lands 2.5 s in, and the page reads again as R does
   if (scenario.lands) setTimeout(() => { window.__landed = true; window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" })); }, 2500);
   const deviceKey = "d5e40d01".padEnd(64, "0");
-  // a seat in an imdLend vault: `lending: { tokenId, vault, owner, operator, owner_bps, endsIn }`, endsIn in seconds, past its end when below 0
+  // a seat in an imdLend vault: `lending: { tokenId, vault, owner, operator, owner_bps, endsIn }`, endsIn in seconds, past its end when below 0;
+  // `window.__withdrawn = true` puts it back in its owner's wallet
+  const vaulted = () => (window.__withdrawn ? null : scenario.lending);
   const lending = scenario.lending;
   const answer = (path) => {
     // the seat's holder is its vault, and its lender's wallet no longer holds it
-    if (lending && path === `/seats/${lending.tokenId}?work=0&reviews=0&collaborators=0`) {
+    if (vaulted() && path === `/seats/${lending.tokenId}?work=0&reviews=0&collaborators=0`) {
       const base = window.__fixtures.api[path]?.body ?? window.__fixtures.api[`/seats/${lending.tokenId}?work=100&reviews=0&collaborators=0`]?.body ?? {};
       return { status: 200, body: { ...structuredClone(base), owner: lending.vault, online: true } };
     }
-    // the box's pairing, retired when its seat moved on: `unpaired: true`
-    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: scenario.unpaired ? "stale" : "active", tokenId: local } } };
+    // the box's pairing, retired when its seat moved on: `unpaired: true`, or `window.__unpaired = true` once open
+    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: scenario.unpaired || window.__unpaired ? "stale" : "active", tokenId: local } } };
     const hit = window.__fixtures.api[path];
     if (!hit) return { status: 404, body: null };
     const body = structuredClone(hit.body);
@@ -56,7 +58,7 @@ export function installMock({ fixtures, scenario }) {
       body.standing.working = 1;
       body.standing.running = [{ jobId: "film-job", objective: w.objective, nodeKey: w.nodeKey, since: new Date(Date.now() - w.minutes * 60_000).toISOString() }];
     }
-    if (lending && path === `/pair/wallet/${lending.owner}` && body?.tokens) body.tokens = body.tokens.filter((t) => t.tokenId !== lending.tokenId);
+    if (vaulted() && path === `/pair/wallet/${lending.owner}` && body?.tokens) body.tokens = body.tokens.filter((t) => t.tokenId !== lending.tokenId);
     // a job accepted a moment after opening: `lands: { tokenId: "22", by: 1 }`, counted once the page asks again
     if (window.__landed && path === `/seats/${scenario.lands.tokenId}?work=100&reviews=0&collaborators=0` && body) body.accepted = (body.accepted ?? 0) + (scenario.lands.by ?? 1);
     // without a box, a wallet has seats only when it is watched or linked: the welcome stays empty
@@ -66,6 +68,8 @@ export function installMock({ fixtures, scenario }) {
   };
   const box = { state: scenario.box, installed: scenario.box !== "no-docker", device_key: scenario.box === "running" ? deviceKey : null };
   const handlers = {};
+  /** Claude's sign-in under way, to end when a code is pasted or it's cancelled. */
+  let signingIn = null;
   window.__emit = (event, payload) => { const id = handlers[event]; if (id) window[`_${id}`]({ event, id: 1, payload }); };
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "panel" }, currentWebview: { windowLabel: "panel", label: "panel" } },
@@ -99,7 +103,15 @@ export function installMock({ fixtures, scenario }) {
           const now = Math.floor(Date.now() / 1000);
           return { started_at: now - 7 * 86400 + lending.endsIn, ends_at: now + lending.endsIn };
         }
-        case "docker_open": case "box_sign_in": case "open_pairing": return null;
+        case "docker_open": case "open_pairing": return null;
+        // Claude's sign-in: its page opens a moment on, then it waits for the code pasted from it
+        case "box_sign_in":
+          setTimeout(() => window.__emit("box-signin-page", null), 300);
+          return new Promise((done, failed) => { signingIn = { done, failed }; });
+        case "box_sign_in_code":
+          setTimeout(() => { if (scenario.setup) scenario.setup = { ...scenario.setup, claude: true }; signingIn?.done(null); }, 1500);
+          return null;
+        case "box_sign_in_cancel": signingIn?.failed("Input ended before a code was pasted. Sign in again and paste the code shown."); return null;
         case "box_pull": case "box_install": return new Promise((done) => setTimeout(done, 60_000));
         case "box_pair":
           setTimeout(() => window.__emit("box-pairing", { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" }), 300);

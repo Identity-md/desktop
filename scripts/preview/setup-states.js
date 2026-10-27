@@ -2,7 +2,8 @@
 // Each opens the real setup page (setup-state.html) with the Rust side stood in for, then presses and says
 // what the app would to get there: `click` presses the button, `press` clicks what each selector names, in turn,
 // `words` is the app's progress line for a step, `hang` keeps a command waiting, `resolve` answers one at once, `fail`
-// makes one fail as Docker would, and `seat` is where the seat was said to be, "own" unless the state says otherwise.
+// makes one fail as Docker would, `code` is pasted into Claude's sign-in and `send` hands it over, and `seat` is
+// where the seat was said to be, "own" unless the state says otherwise.
 // A state with `os` is only that computer's.
 import { installMock } from "./mock.mjs";
 import { forceTheme, holdStill, ready } from "./preview.js";
@@ -44,7 +45,9 @@ export const STATES = [
   { id: "agent", group: "Install IMD Agent", name: "Install IMD Agent", setup: box, about: "The box is in. The IMD worker goes inside it." },
   { id: "agent-installing", group: "Install IMD Agent", name: "Installing", setup: box, click: true, hang: ["box_install"], words: ["install", "Installing Claude Code…"], about: "Claude Code, the IMD worker, then its browser, each in turn, inside the box." },
   { id: "claude", group: "Connect Claude", name: "Connect Claude", setup: agent, about: "The AI the agent thinks with, signed in once." },
-  { id: "claude-waiting", group: "Connect Claude", name: "Waiting for sign-in", setup: agent, click: true, about: "Terminal opens Claude's sign-in inside the box. It says to choose No, exit when Claude asks about trusting the folder." },
+  { id: "claude-waiting", group: "Connect Claude", name: "Waiting for sign-in", setup: agent, click: true, about: "Claude's sign-in opened in the browser, from Claude Code in the box with no terminal. The page ends on a code, which goes in the field under its name: pasted whole, it goes straight in. Enter opens the page again, Esc cancels." },
+  { id: "claude-code", group: "Connect Claude", name: "Code typed", setup: agent, click: true, code: "Kq3vW9sTzX0aPbR7mN2cYd5LhE8uJf1Gk4iOp6Vx#Tz8qL2mN5bV7cX1", about: "A code typed in rather than pasted: the button hands it to Claude Code, as Enter does." },
+  { id: "claude-checking", group: "Connect Claude", name: "Checking the code", setup: agent, click: true, code: "Kq3vW9sTzX0aPbR7mN2cYd5LhE8uJf1Gk4iOp6Vx#Tz8qL2mN5bV7cX1", send: true, hang: ["box_sign_in_code"], about: "Claude Code trading the code for its sign-in, a second or two. Signed in, the step is done." },
   { id: "pair", group: "Connect IMD Agent", name: "Connect IMD Agent", setup: claude, about: "Pairs this box with a seat in the wallet: the line above the button says the browser opens next. Change (C) asks where the seat is again." },
   { id: "pair-code", group: "Connect IMD Agent", name: "Pairing code", setup: claude, click: true, about: "The pairing page opened in the browser. The button counts down to the code's own end, as the network sets it. Enter opens the page again, Esc cancels." },
   { id: "pair-friend", group: "Connect IMD Agent", name: "A friend's seat", setup: claude, seat: "friend", about: "Step 5 for a friend's seat: a link comes next, for the friend to approve before the code runs out." },
@@ -59,6 +62,7 @@ export const STATES = [
   { id: "done", group: "Your agent", name: "Running", setup: paired, box: "running", about: "Lit: it runs. Done closes the window onto the panel." },
   { id: "error-docker", group: "If a step fails", name: "Docker's download", setup: none, click: true, fail: { docker_install: "Docker's download answered 503 Service Unavailable. Try again in a few minutes." }, about: "The longest foot there is: Docker's terms line and an error over the button." },
   { id: "error-expired", group: "If a step fails", name: "Code ran out", setup: claude, click: true, fail: { box_pair: "pairing code expired before it was signed" }, about: "Five minutes passed before the wallet approved: the button asks for a new code." },
+  { id: "error-claude", group: "If a step fails", name: "Code turned down", setup: agent, click: true, fail: { box_sign_in: "Login failed: Request failed with status code 400" }, about: "Claude Code didn't take the code, as when it's mistyped or from an older page: Connect again opens a new page." },
   { id: "error", group: "If a step fails", name: "Out of disk space", setup: docker, click: true, fail: { box_pull: "Error: no space left on device" }, about: "A failed step says what happened and what to do, under the button." },
 ];
 
@@ -111,7 +115,17 @@ export function stage(id, theme, os, fixtures) {
     if (!button) return void setTimeout(go, 40);
     if (s.click) button.click();
     if (s.words) setTimeout(() => window.__emit("setup-step-progress", { step: s.words[0], words: s.words[1] }), 60);
+    if (s.code) return void paste();
     setTimeout(ready, 100);
+  };
+  // a code pasted from Claude's page once its field is there, and handed over if the state says so
+  const paste = () => {
+    const field = document.querySelector("#setup [data-field=code]");
+    if (!field) return void setTimeout(paste, 40);
+    field.value = s.code;
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    if (s.send) setTimeout(() => document.querySelector("#setup [data-action=signin-code]")?.click(), 60);
+    setTimeout(ready, 160);
   };
   const drawn = () => (document.getElementById("setup").childElementCount ? ready() : setTimeout(drawn, 40));
   // each selector clicked once it's there, in turn
