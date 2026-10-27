@@ -182,7 +182,10 @@ async function refresh(full = false): Promise<void> {
       // a read that fails changes nothing; one that says no seat lets the old one go
       const token = await api.deviceSeat(box.deviceKey).catch(() => undefined);
       if (token !== undefined) state.unpaired = token === null;
+      const gone = state.localToken;
       if (token === null && state.localToken) { state.localToken = null; state.localOwner = null; settings.localToken = null; settings.localOwner = null; save(); }
+      // its pairing over, the box can only restart and be turned away: it stops, and the panel says why
+      if (token === null && box.state === "running") void stopSeatless(gone);
       if (token && token !== state.localToken) { state.localToken = token; state.localOwner = null; settings.localToken = token; save(); }
     }
     // Without a box there is no computer's own agent to show apart.
@@ -631,6 +634,25 @@ async function readLendings(held: Array<{ wallet: string; tokens: Array<{ tokenI
   lend.keep(found.keys());
   state.lendings = found;
   if (changed) save();
+}
+
+/**
+ * This computer's box, its pairing over, as when a lent seat goes back to its owner: stopped, since the network turns
+ * it away and Docker would only start it again and again. Connect pairs it again.
+ */
+let stoppingSeatless = false;
+async function stopSeatless(tokenId: string | null): Promise<void> {
+  if (stoppingSeatless) return;
+  stoppingSeatless = true;
+  try {
+    await api.boxStop();
+    state.note = { text: tokenId ? `Agent #${tokenId} isn't paired to this computer anymore, so it stopped here.` : "This computer's agent isn't paired to a seat anymore, so it stopped.", bad: false };
+  } catch {
+    // asked again with the seat, in a minute
+  }
+  stoppingSeatless = false;
+  state.box = await api.boxState().catch(() => state.box);
+  render();
 }
 
 /** The wallet holding this computer's agent is an imdLend vault: read so, or as setup was told the seat came from there. */
