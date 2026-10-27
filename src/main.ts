@@ -1142,8 +1142,12 @@ const lentTitle = (tokenId: string) => { const lent = state.lendings.get(tokenId
 /** A seat its holder can lend from here: held by a wallet connected to this app, which proved by signing that it's theirs. */
 const lendable = (agent: Agent) => linked(agent.wallet);
 
-/** What a friend gets: where the app is, what to pick, and to send back the link it makes, for the wallet here to approve. */
-const inviteText = (tokenId: string) => `I'm lending you my IMD agent seat #${tokenId}. Get IMD Agents at https://imd.fun/app. When setup asks where the seat is, pick "In a friend's wallet". At the end it copies a link: send it to me right away and I'll approve it.`;
+/**
+ * What a friend gets: where the app is, what to pick, and to send back the link it makes, for the wallet here to approve.
+ * Said for a friend who has the app as well as one who hasn't: either way the seat question comes with setting a computer
+ * up, and a computer runs one seat, so it's one not running an agent yet.
+ */
+const inviteText = (tokenId: string) => `I'm lending you my IMD agent seat #${tokenId}. In IMD Agents (https://imd.fun/app), set up a computer that isn't running an agent yet, and pick "In a friend's wallet" when it asks where the seat is. Send me the link it copies right away and I'll approve it.`;
 
 /** Where a seat runs: on this computer, which serves it whether its box is up or not; on another; or nowhere. */
 function runsOn(agent: Agent): "here" | "elsewhere" | null {
