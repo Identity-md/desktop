@@ -131,11 +131,19 @@ let records = new Map<string, AgentRecord>();
 const history = new Map<string, { rows: WorkRow[]; capped: boolean }>();
 let lastRecords = 0;
 let lastHistory = 0;
-/** The device key whose seat was last asked: the same key on the same box is the same seat. */
+/**
+ * The device key whose seat was last asked, and when. The same key keeps its seat until the seat moves, as a lent one
+ * does when its owner takes it back, so it's asked again every minute.
+ */
 let lastDeviceKey: string | null = null;
+let lastSeatAsked = 0;
 let lastRewards = 0;
-/** When seats in imdLend vaults were last read: every five minutes, or on a full read. */
+/**
+ * When seats in imdLend vaults were last read, and which seats the connected wallets and this computer held then: read
+ * every five minutes, on a full read, or as soon as a seat leaves or comes back.
+ */
 let lastLend = 0;
+let lastHolding = "";
 let lastSwarm = 0;
 let lastRelease = 0;
 /** Each seat watched by its number: its holder, and whether it was up when its record was last read. */
@@ -168,8 +176,9 @@ async function refresh(full = false): Promise<void> {
     const box = await api.boxState().catch(() => null);
     state.pairingOut = Boolean(await api.pairingPending().catch(() => null));
     if (box && !(state.box?.state === "starting" || state.box?.state === "stopping") ) state.box = box;
-    if (box?.deviceKey && (full || box.deviceKey !== lastDeviceKey || !state.localToken)) {
+    if (box?.deviceKey && (full || box.deviceKey !== lastDeviceKey || !state.localToken || Date.now() - lastSeatAsked > 60_000)) {
       lastDeviceKey = box.deviceKey;
+      lastSeatAsked = Date.now();
       // a read that fails changes nothing; one that says no seat lets the old one go
       const token = await api.deviceSeat(box.deviceKey).catch(() => undefined);
       if (token !== undefined) state.unpaired = token === null;
@@ -205,8 +214,10 @@ async function refresh(full = false): Promise<void> {
       const info = seatInfo.get(tokenId);
       if (info && !seats.some((s) => s.tokenId === tokenId)) seats.push({ tokenId, wallet: info.owner, online: info.online });
     }
-    if (full || Date.now() - lastLend > 300_000) {
+    const holding = [...held.filter(({ wallet }) => linked(wallet)).map(({ wallet, tokens }) => `${wallet}:${tokens.map((t) => t.tokenId).join()}`), `here:${state.localToken ?? ""}`].join(" ");
+    if (full || Date.now() - lastLend > 300_000 || holding !== lastHolding) {
       lastLend = Date.now();
+      lastHolding = holding;
       await readLendings(held);
     }
     // a connected wallet's seat out on imdLend stays in the list, held by its vault

@@ -27,16 +27,18 @@ export function installMock({ fixtures, scenario }) {
   // the job lands 2.5 s in, and the page reads again as R does
   if (scenario.lands) setTimeout(() => { window.__landed = true; window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" })); }, 2500);
   const deviceKey = "d5e40d01".padEnd(64, "0");
-  // a seat in an imdLend vault: `lending: { tokenId, vault, owner, operator, owner_bps, endsIn }`, endsIn in seconds, past its end when below 0
+  // a seat in an imdLend vault: `lending: { tokenId, vault, owner, operator, owner_bps, endsIn }`, endsIn in seconds, past its end when below 0;
+  // `window.__withdrawn = true` puts it back in its owner's wallet
+  const vaulted = () => (window.__withdrawn ? null : scenario.lending);
   const lending = scenario.lending;
   const answer = (path) => {
     // the seat's holder is its vault, and its lender's wallet no longer holds it
-    if (lending && path === `/seats/${lending.tokenId}?work=0&reviews=0&collaborators=0`) {
+    if (vaulted() && path === `/seats/${lending.tokenId}?work=0&reviews=0&collaborators=0`) {
       const base = window.__fixtures.api[path]?.body ?? window.__fixtures.api[`/seats/${lending.tokenId}?work=100&reviews=0&collaborators=0`]?.body ?? {};
       return { status: 200, body: { ...structuredClone(base), owner: lending.vault, online: true } };
     }
-    // the box's pairing, retired when its seat moved on: `unpaired: true`
-    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: scenario.unpaired ? "stale" : "active", tokenId: local } } };
+    // the box's pairing, retired when its seat moved on: `unpaired: true`, or `window.__unpaired = true` once open
+    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: scenario.unpaired || window.__unpaired ? "stale" : "active", tokenId: local } } };
     const hit = window.__fixtures.api[path];
     if (!hit) return { status: 404, body: null };
     const body = structuredClone(hit.body);
@@ -56,7 +58,7 @@ export function installMock({ fixtures, scenario }) {
       body.standing.working = 1;
       body.standing.running = [{ jobId: "film-job", objective: w.objective, nodeKey: w.nodeKey, since: new Date(Date.now() - w.minutes * 60_000).toISOString() }];
     }
-    if (lending && path === `/pair/wallet/${lending.owner}` && body?.tokens) body.tokens = body.tokens.filter((t) => t.tokenId !== lending.tokenId);
+    if (vaulted() && path === `/pair/wallet/${lending.owner}` && body?.tokens) body.tokens = body.tokens.filter((t) => t.tokenId !== lending.tokenId);
     // a job accepted a moment after opening: `lands: { tokenId: "22", by: 1 }`, counted once the page asks again
     if (window.__landed && path === `/seats/${scenario.lands.tokenId}?work=100&reviews=0&collaborators=0` && body) body.accepted = (body.accepted ?? 0) + (scenario.lands.by ?? 1);
     // without a box, a wallet has seats only when it is watched or linked: the welcome stays empty
