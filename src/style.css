@@ -137,6 +137,7 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 /* a word beside the name for what wants its owner: an older worker */
 .tag { flex: none; align-self: center; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; }
 .tag.warn { color: var(--warn-ink); background: color-mix(in srgb, var(--warn) 18%, transparent); }
+.tag.lent { color: var(--ink-2); background: var(--card-hover); }
 .status, .job { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .status { font-size: 12px; color: var(--ink-2); }
 .job { margin-top: 1px; font-size: 11px; color: var(--ink-3); }
@@ -218,6 +219,7 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 .care-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .care-row.warn .care-text, .care-row.bad .care-text { color: var(--ink); }
 .care-row.control .care-text { font-size: 13px; color: var(--ink); }
+
 .care-row.warn .care-text::before, .care-row.bad .care-text::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 7px 1px 0; border-radius: 50%; background: var(--warn); }
 .care-row.bad .care-text::before { background: var(--danger); }
 .care-row .pill:disabled { opacity: 0.6; }
@@ -228,6 +230,7 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 .command .link { margin-right: 0; }
 .tray-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 0.5px solid var(--line); font-size: 11px; color: var(--ink-2); }
 .facts { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tray-foot .links { display: flex; flex: none; gap: 2px; }
 .link { flex: none; padding: 2px 6px; margin-right: -6px; border-radius: 6px; font-size: 11px; font-weight: 600; color: var(--ink-2); transition: background-color 0.15s, color 0.15s; }
 .link:hover { color: var(--ink); background: var(--card-hover); }
 

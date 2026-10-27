@@ -18,7 +18,7 @@ export function installMock({ fixtures, scenario }) {
   // this computer's agent: the first seat the wallet holds, as in panel-states.js, or with no wallet read, #12
   const local = fixtures.api[`/pair/wallet/${fixtures.wallet}`]?.body?.tokens?.[0]?.tokenId ?? "12";
   // seats watched by number, names given, and what the last run learned: `seats: ["22"]`, `names: { "22": "Mac mini" }`, `localOwner`, `shown`
-  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, seats: scenario.seats ?? [], wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: scenario.names ?? {}, runtime: "claude", localToken: scenario.box === "no-docker" || scenario.fresh ? null : local, localOwner: scenario.localOwner ?? null, shown: scenario.shown ?? 0 }));
+  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, seats: scenario.seats ?? [], wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: scenario.names ?? {}, runtime: "claude", localToken: scenario.box === "no-docker" || scenario.fresh ? null : local, localOwner: scenario.localOwner ?? null, shown: scenario.shown ?? 0, held: scenario.remembered ?? {} }));
   // where setup was told the seat came from, as `seat: "lend"`; unset, nothing a setup state left behind carries over
   if (scenario.seat) localStorage.setItem("imd-agents:seat", scenario.seat); else if (!scenario.setup) localStorage.removeItem("imd-agents:seat");
   // what the panel showed when it last closed: `seen: { today, accepted, usd }`
@@ -27,7 +27,14 @@ export function installMock({ fixtures, scenario }) {
   // the job lands 2.5 s in, and the page reads again as R does
   if (scenario.lands) setTimeout(() => { window.__landed = true; window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" })); }, 2500);
   const deviceKey = "d5e40d01".padEnd(64, "0");
+  // a seat in an imdLend vault: `lending: { tokenId, vault, owner, operator, owner_bps, endsIn }`, endsIn in seconds, past its end when below 0
+  const lending = scenario.lending;
   const answer = (path) => {
+    // the seat's holder is its vault, and its lender's wallet no longer holds it
+    if (lending && path === `/seats/${lending.tokenId}?work=0&reviews=0&collaborators=0`) {
+      const base = window.__fixtures.api[path]?.body ?? window.__fixtures.api[`/seats/${lending.tokenId}?work=100&reviews=0&collaborators=0`]?.body ?? {};
+      return { status: 200, body: { ...structuredClone(base), owner: lending.vault, online: true } };
+    }
     // the box's pairing, retired when its seat moved on: `unpaired: true`
     if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: scenario.unpaired ? "stale" : "active", tokenId: local } } };
     const hit = window.__fixtures.api[path];
@@ -49,6 +56,7 @@ export function installMock({ fixtures, scenario }) {
       body.standing.working = 1;
       body.standing.running = [{ jobId: "film-job", objective: w.objective, nodeKey: w.nodeKey, since: new Date(Date.now() - w.minutes * 60_000).toISOString() }];
     }
+    if (lending && path === `/pair/wallet/${lending.owner}` && body?.tokens) body.tokens = body.tokens.filter((t) => t.tokenId !== lending.tokenId);
     // a job accepted a moment after opening: `lands: { tokenId: "22", by: 1 }`, counted once the page asks again
     if (window.__landed && path === `/seats/${scenario.lands.tokenId}?work=100&reviews=0&collaborators=0` && body) body.accepted = (body.accepted ?? 0) + (scenario.lands.by ?? 1);
     // without a box, a wallet has seats only when it is watched or linked: the welcome stays empty
@@ -82,6 +90,15 @@ export function installMock({ fixtures, scenario }) {
         case "box_setup_state": return scenario.setup ?? { docker: "running", image: true, worker: true, claude: true, device_key: deviceKey };
         // a pairing code already out, setup's window closed on it: `pending: true`
         case "pairing_pending": return scenario.pending ? { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" } : null;
+        // taken off its seat: the box gone, its pairing revoked
+        case "box_unlink": return new Promise((done) => setTimeout(() => { scenario.unpaired = true; box.state = "stopped"; done(); }, 1500));
+        case "lend_vault":
+          return lending && args.holder.toLowerCase() === lending.vault ? { owner: lending.owner, operator: lending.operator, owner_bps: lending.owner_bps } : null;
+        case "lend_span": {
+          if (!lending || args.vault.toLowerCase() !== lending.vault || args.seat !== lending.tokenId) return null;
+          const now = Math.floor(Date.now() / 1000);
+          return { started_at: now - 7 * 86400 + lending.endsIn, ends_at: now + lending.endsIn };
+        }
         case "docker_open": case "box_sign_in": case "open_pairing": return null;
         case "box_pull": case "box_install": return new Promise((done) => setTimeout(done, 60_000));
         case "box_pair":

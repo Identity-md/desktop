@@ -246,7 +246,7 @@ const seat = (): Seat => state.seat ?? "own";
 /**
  * Where the code goes to be approved. A seat in the wallet: the network's own page, with the code in its link. A
  * friend's: that link, onto the clipboard, to send them, since their wallet isn't here. A seat from imdLend: imdLend's
- * page, which can't take a code from its link, so the code goes onto the clipboard to paste there.
+ * pairing page, with the code in its link too.
  */
 function openApproval(): void {
   const pairing = state.pairing;
@@ -254,7 +254,7 @@ function openApproval(): void {
   const copied = () => { if (state.pairing === pairing) { state.copied = true; render(); } };
   if (seat() === "friend") return void api.copyPairing(pairing.url).then(copied).catch(() => undefined);
   if (seat() === "own") return void api.openPairing(pairing.url).catch(() => undefined);
-  void api.openLend("pair", pairing.code).then((done) => { if (done) copied(); }).catch(() => undefined);
+  void api.openLend("pair", { code: pairing.code }).catch(() => undefined);
 }
 
 /** What's left of the code's time, as " · 4:59", once the network has said when it runs out. */
@@ -336,7 +336,7 @@ function nextHelp(next: Step | null): string {
   if (next === "signin" && mac) return busy ? "Choose Allow if your Mac asks, then sign in through the Terminal window. This step finishes by itself." : "If your Mac asks to let IMD Agents control Terminal, choose Allow. Claude's sign-in opens there.";
   if (next === "signin" && busy) return "A terminal window opened inside the box. Sign in there, and this step finishes by itself.";
   // the page that approves the seat, said before it opens; once it's out, step 5's own line says what to do there
-  if (next === "pair" && !busy && seat() === "lend") return "imdLend opens next with the code copied. Paste it there and approve.";
+  if (next === "pair" && !busy && seat() === "lend") return "imdLend opens next, with your code filled in. Approve it there.";
   if (next === "pair" && !busy && seat() === "own") return "Your browser opens next. Approve there with the wallet that holds your seat.";
   // how long the link lasts is the network's to say: the button counts it down, from the code's own end
   if (next === "pair" && !busy && seat() === "friend") return "Next, a link to send your friend. They approve it with their wallet.";
@@ -345,7 +345,7 @@ function nextHelp(next: Step | null): string {
 
 /** Step 5's line while its code waits: what to do on the page that's out, where the code's room leaves none below. */
 function approving(): string {
-  if (seat() === "lend") return state.copied ? "Code copied. Paste it on imdLend and approve." : "Enter this code on imdLend and approve.";
+  if (seat() === "lend") return "Approve it on imdLend with the wallet that took the seat.";
   if (seat() === "friend") return state.copied ? "Link copied. Send it to your friend to approve." : "Copy the link and send it to your friend.";
   return "Approve in your browser with your seat's wallet.";
 }
