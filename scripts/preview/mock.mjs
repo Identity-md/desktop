@@ -66,6 +66,8 @@ export function installMock({ fixtures, scenario }) {
   };
   const box = { state: scenario.box, installed: scenario.box !== "no-docker", device_key: scenario.box === "running" ? deviceKey : null };
   const handlers = {};
+  /** Claude's sign-in under way, to end when a code is pasted or it's cancelled. */
+  let signingIn = null;
   window.__emit = (event, payload) => { const id = handlers[event]; if (id) window[`_${id}`]({ event, id: 1, payload }); };
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "panel" }, currentWebview: { windowLabel: "panel", label: "panel" } },
@@ -99,7 +101,15 @@ export function installMock({ fixtures, scenario }) {
           const now = Math.floor(Date.now() / 1000);
           return { started_at: now - 7 * 86400 + lending.endsIn, ends_at: now + lending.endsIn };
         }
-        case "docker_open": case "box_sign_in": case "open_pairing": return null;
+        case "docker_open": case "open_pairing": return null;
+        // Claude's sign-in: its page opens a moment on, then it waits for the code pasted from it
+        case "box_sign_in":
+          setTimeout(() => window.__emit("box-signin-page", null), 300);
+          return new Promise((done, failed) => { signingIn = { done, failed }; });
+        case "box_sign_in_code":
+          setTimeout(() => { if (scenario.setup) scenario.setup = { ...scenario.setup, claude: true }; signingIn?.done(null); }, 1500);
+          return null;
+        case "box_sign_in_cancel": signingIn?.failed("Input ended before a code was pasted. Sign in again and paste the code shown."); return null;
         case "box_pull": case "box_install": return new Promise((done) => setTimeout(done, 60_000));
         case "box_pair":
           setTimeout(() => window.__emit("box-pairing", { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" }), 300);

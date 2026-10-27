@@ -561,6 +561,26 @@ body.setup-window { padding: 0; overflow: auto; background: var(--bg); }
 .pairing { margin-top: 16px; text-align: center; }
 .pairing .code { margin: 0 0 8px; }
 .pairing .actions { justify-content: center; }
+/* the code Claude's page ends on, pasted in under its name: one long line, in the code's own type, its prompt in the panel's */
+.code-label { display: block; margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.code-input {
+  display: block;
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 9px 12px;
+  font: 500 14px/1.2 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  text-align: center;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.code-input::placeholder { font: 14px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; color: var(--ink-3); }
+.code-input:focus { border-color: var(--ink-3); }
+.code-input:disabled { color: var(--ink-2); }
 
 /* the seat screen: the question in the middle of the room, its answers as rows whose circles the steps' echo */
 .question { margin: auto 0; }

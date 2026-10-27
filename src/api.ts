@@ -140,7 +140,12 @@ export const openClaudePlans = () => invoke<void>("open_claude_plans");
 /** Bytes free on the disk Docker and the box will use, or null where the app can't tell. */
 export const freeSpace = () => invoke<number | null>("free_space");
 export const boxInstall = () => invoke<void>("box_install");
+/** Claude's sign-in, its page opened in the browser as the `box-signin-page` event says; ends signed in, or with why not. */
 export const boxSignIn = () => invoke<void>("box_sign_in");
+/** The code Claude's page ended on, for the sign-in waiting for it. */
+export const boxSignInCode = (code: string) => invoke<void>("box_sign_in_code", { code });
+export const boxSignInOpen = () => invoke<void>("box_sign_in_open");
+export const boxSignInCancel = () => invoke<void>("box_sign_in_cancel");
 /** Pairs the box, then starts it; its code arrives first as the `box-pairing` event, and its end as `box-pair-ended`. */
 export const boxPair = (runtime: string) => invoke<{ token_id: string | null; register: string | null }>("box_pair", { runtime });
 /** The pairing under way, if setup is opened again while its code waits. */

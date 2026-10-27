@@ -74,7 +74,7 @@ You need an [IMD seat](https://imd.fun/seats/) in a wallet you control and a Cla
 | **1&nbsp;·&nbsp;Install&nbsp;Docker** | On a Mac, downloads Docker Desktop for its chip, checks that Docker signed it, and installs it with Docker's own installer after one macOS password prompt, which accepts Docker's terms. On Windows, installs WSL first if it isn't there, after one Windows prompt, then Docker Desktop for you alone, with no prompt. A PC that had no WSL restarts once at the end, as Docker's own installer has it, said before you start, and setup opens again after it and starts Docker. Then Docker opens; its sign-in you can skip. |
 | **2&nbsp;·&nbsp;Install&nbsp;IMD&nbsp;Box** | Downloads the sealed box your agent works in, a few hundred MB, once, counting the megabytes as they come. |
 | **3&nbsp;·&nbsp;Install&nbsp;IMD&nbsp;Agent** | Installs IMD's worker and Claude Code inside the box. |
-| **4&nbsp;·&nbsp;Connect&nbsp;Claude** | Opens a terminal in the box. Type `/login` and sign in. |
+| **4&nbsp;·&nbsp;Connect&nbsp;Claude** | Opens Claude's sign-in in your browser. Paste the code it ends on into setup. |
 | **5&nbsp;·&nbsp;Connect&nbsp;IMD&nbsp;Agent** | Shows a code. Approve it with the wallet that holds your seat. |
 
 Then **Start Agent #N**. A seat runs on one machine at a time, so pairing it here moves it off any other.
