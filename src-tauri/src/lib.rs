@@ -26,6 +26,9 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
 const API: &str = "https://api.imd.fun";
+/// The same plane under Railway's own name, which the worker also falls back to when api.imd.fun
+/// stops resolving (as it did on 23 October 2026, while the domain was on hold).
+const API_FALLBACK: &str = "https://api-imd.up.railway.app";
 const EXPLORER: &str = "https://explorer.imd.fun";
 const KEY_SERVICE: &str = "fun.imd.agents";
 const KEY_ACCOUNT: &str = "app-key";
@@ -38,6 +41,26 @@ const BOX_VOLUME: &str = "imd-worker-home";
 /// Where reads and writes go. The public network unless a developer points it elsewhere.
 fn api_base() -> String {
     std::env::var("IMD_API").ok().filter(|v| v.starts_with("http")).unwrap_or_else(|| API.into())
+}
+
+/// Sends a call to the API, and once more to the plane's Railway name when api.imd.fun could not be
+/// reached at all. Only a call that never connected is sent again, so no write arrives twice; a
+/// developer's IMD_API is never swapped.
+async fn api_send(call: impl Fn(&str) -> reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+    let base = api_base();
+    send_or_fall_back(&base, api_fallback(&base), call).await
+}
+
+/// The plane's other name, for the public network only.
+fn api_fallback(base: &str) -> Option<&'static str> {
+    (base == API).then_some(API_FALLBACK)
+}
+
+async fn send_or_fall_back(base: &str, fallback: Option<&str>, call: impl Fn(&str) -> reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+    match (call(base).send().await, fallback) {
+        (Err(e), Some(fallback)) if e.is_connect() => call(fallback).send().await,
+        (sent, _) => sent,
+    }
 }
 
 fn explorer_base() -> String {
@@ -144,14 +167,14 @@ struct Answer {
 }
 
 /// A path on the IMD API, and nothing that could leave it: no scheme, no host, no climbing.
-fn api_path(path: &str) -> Result<String, String> {
+fn api_path(path: &str) -> Result<&str, String> {
     let ok = path.starts_with('/')
         && !path.starts_with("//")
         && !path.contains("..")
         && !path.contains('\\')
         && path.len() < 512
         && path.chars().all(|c| c.is_ascii_graphic());
-    if ok { Ok(format!("{}{}", api_base(), path)) } else { Err("not an API path".into()) }
+    if ok { Ok(path) } else { Err("not an API path".into()) }
 }
 
 async fn answer(response: reqwest::Response) -> Answer {
@@ -166,8 +189,9 @@ async fn answer(response: reqwest::Response) -> Answer {
     Answer { status: status.as_u16(), body }
 }
 
-/// A read of the network, logged when it fails: no answer at all, or an answer of the network's own error.
-async fn read(url: String) -> Answer {
+/// A read of the network, logged when it fails: no answer at all, or an answer of the network's own error. One that
+/// never connected goes once more to `fallback`, the same read on the plane's other name.
+async fn read(mut url: String, fallback: Option<String>) -> Answer {
     let mut sent = http().get(&url).send().await;
     // a connection the network closed as it sat idle fails the first read on it: once more, on a new one. Not after
     // a timeout, which would only wait as long again
@@ -175,6 +199,15 @@ async fn read(url: String) -> Answer {
         if !e.is_timeout() {
             log_failure(&format!("GET {url}: tried again: {}", causes(e)));
             sent = http().get(&url).send().await;
+        }
+    }
+    if let Some(other) = fallback {
+        if let Err(e) = &sent {
+            if e.is_connect() {
+                log_failure(&format!("GET {url}: tried {other}: {}", causes(e)));
+                sent = http().get(&other).send().await;
+                url = other;
+            }
         }
     }
     match sent {
@@ -194,8 +227,9 @@ async fn read(url: String) -> Answer {
 /// A public read: agents, standings, records, rewards. Status 0 when the network did not answer.
 #[tauri::command]
 async fn api_get(path: String) -> Answer {
-    let Ok(url) = api_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
-    read(url).await
+    let Ok(path) = api_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
+    let base = api_base();
+    read(format!("{base}{path}"), api_fallback(&base).map(|other| format!("{other}{path}"))).await
 }
 
 /// The explorer's two public reads of a wallet's rewards, which the plane does not price: which are
@@ -218,7 +252,7 @@ fn ens_like(name: &str) -> bool {
 #[tauri::command]
 async fn explorer_get(path: String) -> Answer {
     let Ok(url) = explorer_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
-    read(url).await
+    read(url, None).await
 }
 
 /// An agent's face, as SVG text. Only the by-token art, and only SVG of a sane size.
@@ -227,7 +261,7 @@ async fn agent_svg(token_id: String) -> Option<String> {
     if token_id.is_empty() || token_id.len() > 78 || !token_id.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    let response = http().get(format!("{}/agents/by-token/{token_id}.svg", api_base())).send().await.ok()?;
+    let response = api_send(|base| http().get(format!("{base}/agents/by-token/{token_id}.svg"))).await.ok()?;
     let svg = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -322,7 +356,7 @@ fn machine_model() -> String {
 async fn link_start(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     let key = load_key(true)?.ok_or("no key")?;
     let body = serde_json::json!({ "appKey": public_key(&key), "name": app_name() });
-    let response = http().post(format!("{}/app-links", api_base())).json(&body).send().await.map_err(|_| "The network did not answer".to_string())?;
+    let response = api_send(|base| http().post(format!("{base}/app-links")).json(&body)).await.map_err(|_| "The network did not answer".to_string())?;
     let answer = answer(response).await;
     match answer.status {
         200 => {
@@ -368,7 +402,7 @@ async fn seat_pause(token_id: String, paused: bool, relay_origin: String) -> Ans
         "key": public_key(&key), "paused": paused, "nonce": nonce, "issuedAt": issued_at,
         "relayOrigin": relay_origin, "signature": sign(&key, &text),
     }});
-    match http().post(format!("{}/seats/{token_id}/pause", api_base())).json(&body).send().await {
+    match api_send(|base| http().post(format!("{base}/seats/{token_id}/pause")).json(&body)).await {
         Ok(response) => answer(response).await,
         Err(_) => Answer { status: 0, body: serde_json::Value::Null },
     }
@@ -383,7 +417,7 @@ async fn unlink(relay_origin: String) -> Result<(), String> {
         let body = serde_json::json!({ "app": {
             "key": public_key(&key), "nonce": nonce, "issuedAt": issued_at, "relayOrigin": relay_origin, "signature": sign(&key, &text),
         }});
-        let status = http().post(format!("{}/app-links/unlink", api_base())).json(&body).send().await
+        let status = api_send(|base| http().post(format!("{base}/app-links/unlink")).json(&body)).await
             .map(|r| r.status().as_u16()).map_err(|_| "The network did not answer; try again".to_string())?;
         // A link the network no longer has is as gone as one it just removed.
         if status != 200 && status != 404 {
@@ -1789,8 +1823,8 @@ fn update_worker() {
 /// Opens the page a pairing code is approved on: the network's own pairing page, never another.
 #[tauri::command]
 fn open_pairing(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    let base = format!("{}/pair?", api_base());
-    let ok = url.starts_with(&base) && url.len() < 256 && url.chars().all(|c| c.is_ascii_graphic()) && !url.contains("..");
+    // a worker that fell back to the plane's Railway name prints its pairing page there
+    let ok = [api_base().as_str(), API_FALLBACK].iter().any(|base| url.starts_with(&format!("{base}/pair?"))) && url.len() < 256 && url.chars().all(|c| c.is_ascii_graphic()) && !url.contains("..");
     if !ok {
         return Err("not a pairing page".into());
     }
@@ -1807,9 +1841,10 @@ fn copy_pairing(url: String) -> Result<(), String> {
     copy_text(&url)
 }
 
-/// The network's pairing page for one code, exactly as `imd pair` prints it.
+/// The network's pairing page for one code, exactly as `imd pair` prints it: on the Railway name when the worker fell
+/// back to it.
 fn pairing_link(url: &str) -> bool {
-    url.strip_prefix(&format!("{}/pair?code=", api_base())).is_some_and(pairing_code)
+    [api_base().as_str(), API_FALLBACK].iter().any(|base| url.strip_prefix(&format!("{base}/pair?code=")).is_some_and(pairing_code))
 }
 
 /// imdLend, the market where seats are lent, which the network doesn't run.
@@ -2963,7 +2998,8 @@ mod tests {
     #[test]
     fn a_friend_is_sent_only_the_networks_pairing_link() {
         assert!(super::pairing_link("https://api.imd.fun/pair?code=QX7M4KD2"));
-        for not in ["https://imd.fun.evil/pair?code=QX7M4KD2", "https://api.imd.fun/pair?code=QX7M4KD2&x=1", "https://api.imd.fun/pair?register=12", "QX7M4KD2"] {
+        assert!(super::pairing_link("https://api-imd.up.railway.app/pair?code=QX7M4KD2"));
+        for not in ["https://imd.fun.evil/pair?code=QX7M4KD2", "https://api-imd.up.railway.app.evil/pair?code=QX7M4KD2", "https://api.imd.fun/pair?code=QX7M4KD2&x=1", "https://api.imd.fun/pair?register=12", "QX7M4KD2"] {
             assert!(!super::pairing_link(not), "{not}");
         }
     }
@@ -3111,6 +3147,38 @@ mod tests {
         assert!(kept.ends_with("no answer: line two\n") && kept.as_bytes()[4] == b'-' && kept.contains("Z GET "), "{kept}");
         assert_eq!(std::fs::metadata(dir.join("imd-agents.old.log")).unwrap().len(), 1_000_001);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_call_that_never_connected_goes_to_the_fallback_once() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let up = format!("http://{}", server.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in server.incoming().flatten() {
+                let _ = stream.read(&mut [0u8; 4096]);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok");
+            }
+        });
+        // a port nothing listens on any more, as a name that no longer resolves fails: before connecting
+        let down = format!("http://{}", std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap());
+        let sent = AtomicUsize::new(0);
+        let call = |base: &str| {
+            sent.fetch_add(1, Ordering::SeqCst);
+            http().get(format!("{base}/health"))
+        };
+        tauri::async_runtime::block_on(async {
+            let response = send_or_fall_back(&down, Some(up.as_str()), call).await.expect("the fallback answers");
+            assert_eq!(response.status(), 200);
+            assert_eq!(sent.swap(0, Ordering::SeqCst), 2);
+            assert!(send_or_fall_back(&down, None, call).await.is_err(), "a developer's IMD_API is not swapped");
+            assert_eq!(sent.swap(0, Ordering::SeqCst), 1);
+            send_or_fall_back(&up, Some(down.as_str()), call).await.expect("the API answers");
+            assert_eq!(sent.swap(0, Ordering::SeqCst), 1, "a call that connected is not sent again");
+            assert!(http().get("http://api.imd.invalid/health").send().await.unwrap_err().is_connect(), "a name that doesn't resolve never connects either");
+            assert_eq!(read(format!("{down}/health"), Some(format!("{up}/health"))).await.status, 200, "a read goes there too");
+            assert_eq!(read(format!("{down}/health"), None).await.status, 0);
+        });
     }
 
     /// Against the live network and this computer's Docker: `cargo test -- --ignored --nocapture`.
