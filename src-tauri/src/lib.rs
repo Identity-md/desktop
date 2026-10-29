@@ -48,8 +48,12 @@ fn api_base() -> String {
 /// developer's IMD_API is never swapped.
 async fn api_send(call: impl Fn(&str) -> reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
     let base = api_base();
-    let fallback = (base == API).then_some(API_FALLBACK);
-    send_or_fall_back(&base, fallback, call).await
+    send_or_fall_back(&base, api_fallback(&base), call).await
+}
+
+/// The plane's other name, for the public network only.
+fn api_fallback(base: &str) -> Option<&'static str> {
+    (base == API).then_some(API_FALLBACK)
 }
 
 async fn send_or_fall_back(base: &str, fallback: Option<&str>, call: impl Fn(&str) -> reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
@@ -185,8 +189,9 @@ async fn answer(response: reqwest::Response) -> Answer {
     Answer { status: status.as_u16(), body }
 }
 
-/// A read of the network, logged when it fails: no answer at all, or an answer of the network's own error.
-async fn read(url: String) -> Answer {
+/// A read of the network, logged when it fails: no answer at all, or an answer of the network's own error. One that
+/// never connected goes once more to `fallback`, the same read on the plane's other name.
+async fn read(mut url: String, fallback: Option<String>) -> Answer {
     let mut sent = http().get(&url).send().await;
     // a connection the network closed as it sat idle fails the first read on it: once more, on a new one. Not after
     // a timeout, which would only wait as long again
@@ -194,6 +199,15 @@ async fn read(url: String) -> Answer {
         if !e.is_timeout() {
             log_failure(&format!("GET {url}: tried again: {}", causes(e)));
             sent = http().get(&url).send().await;
+        }
+    }
+    if let Some(other) = fallback {
+        if let Err(e) = &sent {
+            if e.is_connect() {
+                log_failure(&format!("GET {url}: tried {other}: {}", causes(e)));
+                sent = http().get(&other).send().await;
+                url = other;
+            }
         }
     }
     match sent {
@@ -214,7 +228,8 @@ async fn read(url: String) -> Answer {
 #[tauri::command]
 async fn api_get(path: String) -> Answer {
     let Ok(path) = api_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
-    read(format!("{}{path}", api_base())).await
+    let base = api_base();
+    read(format!("{base}{path}"), api_fallback(&base).map(|other| format!("{other}{path}"))).await
 }
 
 /// The explorer's two public reads of a wallet's rewards, which the plane does not price: which are
@@ -237,7 +252,7 @@ fn ens_like(name: &str) -> bool {
 #[tauri::command]
 async fn explorer_get(path: String) -> Answer {
     let Ok(url) = explorer_path(&path) else { return Answer { status: 400, body: serde_json::Value::Null } };
-    read(url).await
+    read(url, None).await
 }
 
 /// An agent's face, as SVG text. Only the by-token art, and only SVG of a sane size.
@@ -3158,6 +3173,9 @@ mod tests {
             assert_eq!(sent.swap(0, Ordering::SeqCst), 1);
             send_or_fall_back(&up, Some(down.as_str()), call).await.expect("the API answers");
             assert_eq!(sent.swap(0, Ordering::SeqCst), 1, "a call that connected is not sent again");
+            assert!(http().get("http://api.imd.invalid/health").send().await.unwrap_err().is_connect(), "a name that doesn't resolve never connects either");
+            assert_eq!(read(format!("{down}/health"), Some(format!("{up}/health"))).await.status, 200, "a read goes there too");
+            assert_eq!(read(format!("{down}/health"), None).await.status, 0);
         });
     }
 
