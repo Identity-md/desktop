@@ -1841,9 +1841,10 @@ fn copy_pairing(url: String) -> Result<(), String> {
     copy_text(&url)
 }
 
-/// The network's pairing page for one code, exactly as `imd pair` prints it.
+/// The network's pairing page for one code, exactly as `imd pair` prints it: on the Railway name when the worker fell
+/// back to it.
 fn pairing_link(url: &str) -> bool {
-    url.strip_prefix(&format!("{}/pair?code=", api_base())).is_some_and(pairing_code)
+    [api_base().as_str(), API_FALLBACK].iter().any(|base| url.strip_prefix(&format!("{base}/pair?code=")).is_some_and(pairing_code))
 }
 
 /// imdLend, the market where seats are lent, which the network doesn't run.
@@ -2997,7 +2998,8 @@ mod tests {
     #[test]
     fn a_friend_is_sent_only_the_networks_pairing_link() {
         assert!(super::pairing_link("https://api.imd.fun/pair?code=QX7M4KD2"));
-        for not in ["https://imd.fun.evil/pair?code=QX7M4KD2", "https://api.imd.fun/pair?code=QX7M4KD2&x=1", "https://api.imd.fun/pair?register=12", "QX7M4KD2"] {
+        assert!(super::pairing_link("https://api-imd.up.railway.app/pair?code=QX7M4KD2"));
+        for not in ["https://imd.fun.evil/pair?code=QX7M4KD2", "https://api-imd.up.railway.app.evil/pair?code=QX7M4KD2", "https://api.imd.fun/pair?code=QX7M4KD2&x=1", "https://api.imd.fun/pair?register=12", "QX7M4KD2"] {
             assert!(!super::pairing_link(not), "{not}");
         }
     }
