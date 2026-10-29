@@ -1,27 +1,44 @@
 // The app's Rust side, stood in for in the browser: real public data from fixtures.json, a box in a given
 // state, and events the page listens for, which a script can send with window.__emit(name, payload).
-export async function mockApp(context, { fixtures, scenario, owner, scheme, zoom = 1 }) {
-  await context.addInitScript(installMock, { fixtures, scenario, owner, scheme, zoom });
+export async function mockApp(context, { fixtures, scenario }) {
+  await context.addInitScript(installMock, { fixtures, scenario });
 }
 
 /** The stand-in itself, run before the page's own scripts: by Playwright through mockApp, or by a page that imports it. */
-export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
+export function installMock({ fixtures, scenario }) {
+  // the clock reads as it did when the fixtures were read, so every "today", "ago" and fortnight is as it was then
+  if (fixtures.readAt) {
+    const shift = Date.parse(fixtures.readAt) - Date.now();
+    const Real = Date;
+    globalThis.Date = class extends Real {
+      constructor(...args) { super(...(args.length ? args : [Real.now() + shift])); }
+      static now() { return Real.now() + shift; }
+    };
+  }
+  // this computer's agent: the first seat the wallet holds, as in panel-states.js, or with no wallet read, #12
+  const local = fixtures.api[`/pair/wallet/${fixtures.wallet}`]?.body?.tokens?.[0]?.tokenId ?? "12";
   // seats watched by number, names given, and what the last run learned: `seats: ["22"]`, `names: { "22": "Mac mini" }`, `localOwner`, `shown`
-  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, seats: scenario.seats ?? [], wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: scenario.names ?? {}, runtime: "claude", localToken: scenario.box === "no-docker" ? null : "12", localOwner: scenario.localOwner ?? null, shown: scenario.shown ?? 0 }));
+  localStorage.setItem("imd-agents:settings", JSON.stringify({ watching: scenario.watching, seats: scenario.seats ?? [], wallets: scenario.linked, relayOrigin: "https://api.imd.fun", names: scenario.names ?? {}, runtime: "claude", localToken: scenario.box === "no-docker" || scenario.fresh ? null : local, localOwner: scenario.localOwner ?? null, shown: scenario.shown ?? 0, held: scenario.remembered ?? {} }));
+  // where setup was told the seat came from, as `seat: "lend"`; unset, nothing a setup state left behind carries over
+  if (scenario.seat) localStorage.setItem("imd-agents:seat", scenario.seat); else if (!scenario.setup) localStorage.removeItem("imd-agents:seat");
   // what the panel showed when it last closed: `seen: { today, accepted, usd }`
   if (scenario.seen) localStorage.setItem("imd-agents:seen", JSON.stringify(scenario.seen)); else localStorage.removeItem("imd-agents:seen");
-  // a desktop behind the panel, so its shadow shows
-  document.addEventListener("DOMContentLoaded", () => {
-    document.documentElement.style.background = scheme === "dark" ? "#0e0e10" : "#e6e6eb";
-    // a film is recorded at one pixel per point: drawn larger, it stays sharp
-    if (zoom !== 1) Object.assign(document.body.style, { transform: `scale(${zoom})`, transformOrigin: "0 0" });
-  });
   window.__fixtures = fixtures;
   // the job lands 2.5 s in, and the page reads again as R does
   if (scenario.lands) setTimeout(() => { window.__landed = true; window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" })); }, 2500);
   const deviceKey = "d5e40d01".padEnd(64, "0");
+  // a seat in an imdLend vault: `lending: { tokenId, vault, owner, operator, owner_bps, endsIn }`, endsIn in seconds, past its end when below 0;
+  // `window.__withdrawn = true` puts it back in its owner's wallet
+  const vaulted = () => (window.__withdrawn ? null : scenario.lending);
+  const lending = scenario.lending;
   const answer = (path) => {
-    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: "active", tokenId: "12" } } };
+    // the seat's holder is its vault, and its lender's wallet no longer holds it
+    if (vaulted() && path === `/seats/${lending.tokenId}?work=0&reviews=0&collaborators=0`) {
+      const base = window.__fixtures.api[path]?.body ?? window.__fixtures.api[`/seats/${lending.tokenId}?work=100&reviews=0&collaborators=0`]?.body ?? {};
+      return { status: 200, body: { ...structuredClone(base), owner: lending.vault, online: true } };
+    }
+    // the box's pairing, retired when its seat moved on: `unpaired: true`, or `window.__unpaired = true` once open
+    if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: scenario.unpaired || window.__unpaired ? "stale" : "active", tokenId: local } } };
     const hit = window.__fixtures.api[path];
     if (!hit) return { status: 404, body: null };
     const body = structuredClone(hit.body);
@@ -41,6 +58,7 @@ export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
       body.standing.working = 1;
       body.standing.running = [{ jobId: "film-job", objective: w.objective, nodeKey: w.nodeKey, since: new Date(Date.now() - w.minutes * 60_000).toISOString() }];
     }
+    if (vaulted() && path === `/pair/wallet/${lending.owner}` && body?.tokens) body.tokens = body.tokens.filter((t) => t.tokenId !== lending.tokenId);
     // a job accepted a moment after opening: `lands: { tokenId: "22", by: 1 }`, counted once the page asks again
     if (window.__landed && path === `/seats/${scenario.lands.tokenId}?work=100&reviews=0&collaborators=0` && body) body.accepted = (body.accepted ?? 0) + (scenario.lands.by ?? 1);
     // without a box, a wallet has seats only when it is watched or linked: the welcome stays empty
@@ -50,6 +68,8 @@ export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
   };
   const box = { state: scenario.box, installed: scenario.box !== "no-docker", device_key: scenario.box === "running" ? deviceKey : null };
   const handlers = {};
+  /** Claude's sign-in under way, to end when a code is pasted or it's cancelled. */
+  let signingIn = null;
   window.__emit = (event, payload) => { const id = handlers[event]; if (id) window[`_${id}`]({ event, id: 1, payload }); };
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "panel" }, currentWebview: { windowLabel: "panel", label: "panel" } },
@@ -72,7 +92,26 @@ export function installMock({ fixtures, scenario, owner, scheme, zoom = 1 }) {
         case "worker_releases": return { status: 200, body: window.__fixtures.releases ?? [] };
         // setting a box up: how far it has got (`setup` in the scenario), and steps that take their time
         case "box_setup_state": return scenario.setup ?? { docker: "running", image: true, worker: true, claude: true, device_key: deviceKey };
-        case "docker_open": case "box_sign_in": case "open_pairing": return null;
+        // a pairing code already out, setup's window closed on it: `pending: true`
+        case "pairing_pending": return scenario.pending ? { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" } : null;
+        // taken off its seat: the box gone, its pairing revoked
+        case "box_unlink": return new Promise((done) => setTimeout(() => { scenario.unpaired = true; box.state = "stopped"; done(); }, 1500));
+        case "lend_vault":
+          return lending && args.holder.toLowerCase() === lending.vault ? { owner: lending.owner, operator: lending.operator, owner_bps: lending.owner_bps } : null;
+        case "lend_span": {
+          if (!lending || args.vault.toLowerCase() !== lending.vault || args.seat !== lending.tokenId) return null;
+          const now = Math.floor(Date.now() / 1000);
+          return { started_at: now - 7 * 86400 + lending.endsIn, ends_at: now + lending.endsIn };
+        }
+        case "docker_open": case "open_pairing": return null;
+        // Claude's sign-in: its page opens a moment on, then it waits for the code pasted from it
+        case "box_sign_in":
+          setTimeout(() => window.__emit("box-signin-page", null), 300);
+          return new Promise((done, failed) => { signingIn = { done, failed }; });
+        case "box_sign_in_code":
+          setTimeout(() => { if (scenario.setup) scenario.setup = { ...scenario.setup, claude: true }; signingIn?.done(null); }, 1500);
+          return null;
+        case "box_sign_in_cancel": signingIn?.failed("Input ended before a code was pasted. Sign in again and paste the code shown."); return null;
         case "box_pull": case "box_install": return new Promise((done) => setTimeout(done, 60_000));
         case "box_pair":
           setTimeout(() => window.__emit("box-pairing", { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" }), 300);

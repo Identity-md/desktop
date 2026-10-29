@@ -7,8 +7,9 @@ permissions:
 # each platform has its own runner. Run it from the Actions tab: macOS runners bill at ten times the
 # minutes, so it does not run on every push while the repository is private.
 #
-# Unsigned until the secrets are added. Then, as Skillet does: an Apple Developer ID certificate and
-# notarisation for macOS, and Azure Trusted Signing (tauri.windows-signing.conf.json) for Windows.
+# Unsigned: releases are signed and published from the maintainer's Mac by scripts/release.mjs, which builds the
+# Windows installer there too. On Windows the installer is also installed and the app opened, and a picture of
+# the screen kept, for a look at it on Windows itself.
 on:
   workflow_dispatch:
 
@@ -35,5 +36,29 @@ jobs:
         with:
           name: imd-agents-${{ matrix.name }}
           path: src-tauri/target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 14
+      # installed for this user alone, as a person's double-click would, then opened by hand: the panel opens over the
+      # taskbar's corner, and the screen is photographed with it
+      - name: Install and open it
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList '/S' -Wait
+          Start-Process "$env:LOCALAPPDATA\IMD Agents\imd-agents.exe"
+          Start-Sleep -Seconds 20
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $shot = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
+          [System.Drawing.Graphics]::FromImage($shot).CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+          New-Item -ItemType Directory -Force shots | Out-Null
+          $shot.Save("$PWD/shots/first-open.png")
+          if (-not (Get-Process imd-agents -ErrorAction SilentlyContinue)) { throw "IMD Agents isn't running" }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.name == 'windows'
+        with:
+          name: imd-agents-windows-first-open
+          path: shots/
           if-no-files-found: error
           retention-days: 14

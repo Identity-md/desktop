@@ -359,8 +359,16 @@ export function tookJob(before: Map<string, string[]> | null, now: Map<string, s
 export function watchParts(value: string): { parts: string[]; odd: string | null } {
   const pieces = value.toLowerCase().split(/[\s,]+/).map((part) => part.replace(/^#/, "")).filter(Boolean);
   const parts = [...new Set(pieces.map((part) => (/^\d+$/.test(part) ? String(Number(part)) : part)))];
-  const odd = parts.find((part) => !/^[1-9]\d{0,5}$/.test(part) && !/^0x[0-9a-f]{40}$/.test(part) && !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(part)) ?? null;
+  const odd = parts.find((part) => !watchKind(part)) ?? null;
   return { parts, odd };
+}
+
+/** What one of those pieces is, by its whole shape: an ENS name can start 0x too, as 0xminion.eth does. */
+export function watchKind(part: string): "seat" | "wallet" | "name" | null {
+  if (/^[1-9]\d{0,5}$/.test(part)) return "seat";
+  if (/^0x[0-9a-f]{40}$/.test(part)) return "wallet";
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(part)) return "name";
+  return null;
 }
 
 /**
@@ -387,13 +395,20 @@ export function jailFix(detail: string): { why: string; command: string | null }
 export function setupErrorWords(raw: string): string {
   const text = raw.trim();
   const known: Array<[RegExp, string]> = [
+    // Windows: the engine's pipe shut to this user, or not there while Docker isn't running
+    [/pipe.*access is denied/i, "This Windows user can't use Docker. Add it to the docker-users group, sign out and in again, then try again."],
     [/permission denied.*docker daemon socket/i, "This user can't use Docker. Add it to the docker group, log in again, then try again."],
-    [/cannot connect to the docker daemon|is the docker daemon running|docker is not installed/i, "Docker isn't running. Open Docker, then try again."],
+    [/cannot connect to the docker daemon|is the docker daemon running|docker is not installed|error during connect.*pipe/i, "Docker isn't running. Open Docker, then try again."],
     [/no space left on device/i, "Docker is out of disk space. Raise its disk limit in Docker's settings or delete images you don't use, then try again."],
     [/computed checksum did not match|sha256sums?: .*failed|: FAILED$/im, "The worker's download didn't match its published checksum, so nothing was installed. Try again."],
     [/no such host|could not resolve|network is unreachable|i\/o timeout|tls handshake timeout|connection reset|eai_again|enotfound|etimedout/i, "This computer can't reach the internet right now. Check the connection, then try again."],
+    // Claude Code's sign-in, turning down the code pasted from its page
+    [/^login failed/im, "Claude didn't take that code. Connect again, then paste the code from the page that opens."],
     [/\bdenied\b|unauthorized|authentication required/i, "GitHub refused the box download. Try again in a few minutes."],
     [/^timed out$/i, "That took too long. Check the connection, then try again."],
+    // `imd pair`'s own two endings short of paired: the code ran out, or the approval was refused
+    [/pairing code expired/i, "The code ran out before it was approved. Connect again for a new one."],
+    [/attempted but not accepted/i, "The approval didn't go through. Check the page in your browser, then connect again."],
   ];
   for (const [pattern, words] of known) if (pattern.test(text)) return words;
   const lines = text.split("\n").map((line) => line.trim()).filter((line) => line && !/^Run '.*--help'/.test(line));

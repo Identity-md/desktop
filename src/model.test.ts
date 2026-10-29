@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tookJob, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -142,6 +142,12 @@ describe("numbers", () => {
     expect(watchParts("14 25 vitalik").odd).toBe("vitalik");
     expect(watchParts("0").odd).toBe("0");
     expect(watchParts("  ").parts).toEqual([]);
+    // a name that starts like an address is still a name
+    expect(watchParts("0xminion.eth 0xE085327c5AD2F77147F10973Fed45Fb19d734F7e")).toEqual({ parts: ["0xminion.eth", "0xe085327c5ad2f77147f10973fed45fb19d734f7e"], odd: null });
+    expect(watchKind("0xminion.eth")).toBe("name");
+    expect(watchKind("0xe085327c5ad2f77147f10973fed45fb19d734f7e")).toBe("wallet");
+    expect(watchKind("14")).toBe("seat");
+    expect(watchKind("0xe085")).toBe(null);
   });
 
   it("names the command that fixes an agent's sandbox on its machine, from what the fleet's workers said", () => {
@@ -163,8 +169,17 @@ describe("numbers", () => {
     expect(setupErrorWords("failed to register layer: write /usr/lib/x86_64-linux-gnu/libLLVM.so: no space left on device")).toMatch(/^Docker is out of disk space/);
     expect(setupErrorWords("Cannot connect to the Docker daemon at unix:///Users/me/.docker/run/docker.sock. Is the docker daemon running?")).toBe("Docker isn't running. Open Docker, then try again.");
     expect(setupErrorWords("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock")).toMatch(/^This user can't use Docker/);
+    // Windows: Docker Desktop not running, and its pipe shut to this user
+    expect(setupErrorWords('error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.51/info": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.')).toBe("Docker isn't running. Open Docker, then try again.");
+    expect(setupErrorWords('error during connect: Get "http://%2F%2F.%2Fpipe%2Fdocker_engine/v1.51/version": open //./pipe/docker_engine: Access is denied.')).toMatch(/^This Windows user can't use Docker/);
     expect(setupErrorWords("identitymd-worker.tgz: FAILED\nsha256sum: WARNING: 1 computed checksum did NOT match")).toMatch(/didn't match its published checksum/);
     expect(setupErrorWords("timed out")).toBe("That took too long. Check the connection, then try again.");
+    // pairing's own endings, as `imd pair` writes them
+    expect(setupErrorWords("pairing code expired before it was signed")).toBe("The code ran out before it was approved. Connect again for a new one.");
+    expect(setupErrorWords("pairing was attempted but not accepted — check the browser tab")).toMatch(/^The approval didn't go through/);
+    // Claude Code's sign-in turning down a code, as `claude auth login` writes it; one that can't reach Claude is the network
+    expect(setupErrorWords("Login failed: Request failed with status code 400")).toMatch(/^Claude didn't take that code/);
+    expect(setupErrorWords("Login failed: getaddrinfo ENOTFOUND platform.claude.com")).toMatch(/^This computer can't reach the internet/);
     // one it does not know: Docker's error, not the line after it
     expect(setupErrorWords("docker: Error response from daemon: range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available\nRun 'docker run --help' for more information")).toBe("range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available");
     expect(setupErrorWords("")).toBe("Something went wrong. Try again.");

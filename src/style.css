@@ -137,6 +137,7 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 /* a word beside the name for what wants its owner: an older worker */
 .tag { flex: none; align-self: center; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; }
 .tag.warn { color: var(--warn-ink); background: color-mix(in srgb, var(--warn) 18%, transparent); }
+.tag.lent { color: var(--ink-2); background: var(--card-hover); }
 .status, .job { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .status { font-size: 12px; color: var(--ink-2); }
 .job { margin-top: 1px; font-size: 11px; color: var(--ink-3); }
@@ -218,6 +219,7 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 .care-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .care-row.warn .care-text, .care-row.bad .care-text { color: var(--ink); }
 .care-row.control .care-text { font-size: 13px; color: var(--ink); }
+
 .care-row.warn .care-text::before, .care-row.bad .care-text::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 7px 1px 0; border-radius: 50%; background: var(--warn); }
 .care-row.bad .care-text::before { background: var(--danger); }
 .care-row .pill:disabled { opacity: 0.6; }
@@ -228,6 +230,7 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 .command .link { margin-right: 0; }
 .tray-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 0.5px solid var(--line); font-size: 11px; color: var(--ink-2); }
 .facts { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tray-foot .links { display: flex; flex: none; gap: 2px; }
 .link { flex: none; padding: 2px 6px; margin-right: -6px; border-radius: 6px; font-size: 11px; font-weight: 600; color: var(--ink-2); transition: background-color 0.15s, color 0.15s; }
 .link:hover { color: var(--ink); background: var(--card-hover); }
 
@@ -478,8 +481,9 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 /* the number trimmed to its cap height and baseline, so it centres in the circle by its ink, not its line */
 .step-num b { display: block; font-weight: inherit; text-box: trim-both cap alphabetic; }
 .step.next .step-num { color: var(--bg); background: var(--ink); box-shadow: none; }
-.step.done .step-num { color: var(--on); background: color-mix(in srgb, var(--on) 16%, transparent); box-shadow: none; animation: pop 0.45s var(--spring) both; }
-.step:not(.done):not(.next) { opacity: 0.45; }
+/* `complete`, not the panel's `done`, whose rows sit 8 px wider */
+.step.complete .step-num { color: var(--on); background: color-mix(in srgb, var(--on) 16%, transparent); box-shadow: none; animation: pop 0.45s var(--spring) both; }
+.step:not(.complete):not(.next) { opacity: 0.45; }
 .step-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .step-name { font-weight: 600; }
 .check { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; color: var(--on); background: color-mix(in srgb, var(--on) 16%, transparent); animation: pop 0.45s var(--spring) both; }
@@ -557,6 +561,41 @@ body.setup-window { padding: 0; overflow: auto; background: var(--bg); }
 .pairing { margin-top: 16px; text-align: center; }
 .pairing .code { margin: 0 0 8px; }
 .pairing .actions { justify-content: center; }
+/* the code Claude's page ends on, pasted in under its name: one long line, in the code's own type, its prompt in the panel's */
+.code-label { display: block; margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.code-input {
+  display: block;
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 9px 12px;
+  font: 500 14px/1.2 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  text-align: center;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.code-input::placeholder { font: 14px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; color: var(--ink-3); }
+.code-input:focus { border-color: var(--ink-3); }
+.code-input:disabled { color: var(--ink-2); }
+
+/* the seat screen: the question in the middle of the room, its answers as rows whose circles the steps' echo */
+.question { margin: auto 0; }
+.question + .setup-foot { margin-top: 0; }
+.question h1, .question .setup-intro { text-align: center; }
+.seat-choice { position: relative; display: grid; grid-template-columns: 26px 1fr; gap: 12px; align-items: center; width: 100%; min-height: 52px; padding: 8px; border-radius: 12px; text-align: left; transition: background-color 0.15s; }
+.seat-choice:hover { background: var(--hover); }
+.seat-choice:active { background: var(--press); }
+.seat-choice:focus-visible { outline-offset: -2px; }
+.seat-choice + .seat-choice::before { content: ""; position: absolute; top: 0; right: 8px; left: 46px; height: 0.5px; background: var(--line); transition: opacity 0.15s; }
+/* a lit row has no rule above or below it */
+.seat-choice:hover::before, .seat-choice:hover + .seat-choice::before { opacity: 0; }
+/* a radio drawn as the steps draw their circles: a ring, and picked, the ring fills in ink to a dot */
+.radio { width: 22px; height: 22px; margin: 0 2px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--off); transition: box-shadow 0.3s var(--spring); }
+.seat-choice.on .radio { box-shadow: inset 0 0 0 7px var(--ink); }
 /* a step that failed says so under the button, centred like the line it takes the place of */
 .setup-page .note { text-align: center; text-wrap: pretty; }
 

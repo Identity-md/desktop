@@ -1959,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "imd-agents"
-version = "0.1.12"
+version = "0.1.17"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -1979,6 +1979,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
