@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { localPhase, tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -161,6 +161,12 @@ describe("numbers", () => {
     expect(fix("claude's sandbox cannot jail reads on Windows; run the worker under WSL")).toBeNull();
     expect(fix("codex sandbox did not hold the jail (exit 1): bwrap: execvp codex-linux-sandbox: No such file or directory")).toBe("imd update");
     expect(jailFix("claude's sandbox cannot jail reads on Windows").why).toMatch(/WSL/);
+  });
+
+  it("says Docker is starting only when the switch had to start it", () => {
+    const box = { installed: true, deviceKey: null };
+    expect(localPhase({ ...box, state: "starting", dockerClosed: true }, null)).toEqual({ kind: "changing", words: "Starting Docker…" });
+    expect(localPhase({ ...box, state: "starting", dockerClosed: false }, null)).toEqual({ kind: "changing", words: "Starting…" });
   });
 
   it("says a failed setup step in plain words, from what Docker said", () => {

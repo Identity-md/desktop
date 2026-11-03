@@ -25,7 +25,7 @@ export type Agent = {
 };
 
 /** The box on this computer, as the app reads it from Docker. */
-export type Box = { state: "running" | "stopped" | "docker-down" | "no-docker" | "starting" | "stopping"; installed: boolean; deviceKey: string | null };
+export type Box = { state: "running" | "stopped" | "docker-down" | "no-docker" | "starting" | "stopping"; installed: boolean; deviceKey: string | null; dockerClosed?: boolean };
 
 export type Phase =
   | { kind: "working"; jobs: number }
@@ -55,7 +55,7 @@ export function phaseOf(agent: Agent, now = new Date()): Phase {
 /** The box's own state wins for this computer's agent: Docker closed, the box off, or between the two. */
 export function localPhase(box: Box, agent: Agent | null, now = new Date()): Phase {
   if (box.state === "docker-down") return { kind: "docker-down" };
-  if (box.state === "starting") return { kind: "changing", words: "Starting…" };
+  if (box.state === "starting") return { kind: "changing", words: box.dockerClosed ? "Starting Docker…" : "Starting…" };
   if (box.state === "stopping") return { kind: "changing", words: "Stopping…" };
   if (box.state !== "running") return { kind: "off" };
   return agent ? phaseOf({ ...agent, online: true }, now) : { kind: "changing", words: "Connecting…" };

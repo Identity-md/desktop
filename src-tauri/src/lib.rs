@@ -2049,16 +2049,28 @@ fn sealed(inspect: &str) -> bool {
     options.contains("seccomp=") && masked == "0"
 }
 
-/// Starts the box, made new each time, so it always has the flags above.
+/// Starts Docker if its engine isn't answering and waits until it is, so the box's switch is all it takes. Five minutes, as
+/// Docker can stop to ask for a password first (a Mac after a reboot, 2026-11-03). A Docker too old to have this command, or
+/// one that never comes up, is left to `docker run` to report.
+fn wake_docker() {
+    if !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
+        let _ = run_docker(&["desktop", "start", "--timeout", "300"], Duration::from_secs(310));
+    }
+}
+
+/// Starts the box, made new each time, so it always has the flags above: Docker first, if it is closed.
 #[tauri::command]
 async fn box_start(runtime: String) -> Result<(), String> {
     if !RUNTIMES.contains(&runtime.as_str()) {
         return Err("unknown runtime".into());
     }
     let _busy = Busy::new();
-    tauri::async_runtime::spawn_blocking(move || run_box(&runtime))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        wake_docker();
+        run_box(&runtime)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Stops the box: the job it holds goes back to the network, as `./box stop` does.

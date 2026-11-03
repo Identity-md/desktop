@@ -104,6 +104,8 @@ export function installMock({ fixtures, scenario }) {
           return { started_at: now - 7 * 86400 + lending.endsIn, ends_at: now + lending.endsIn };
         }
         case "docker_open": case "open_pairing": return null;
+        // a box started with Docker closed waits on Docker
+        case "box_start": return box.state === "docker-down" ? new Promise(() => {}) : null;
         // Claude's sign-in: its page opens a moment on, then it waits for the code pasted from it
         case "box_sign_in":
           setTimeout(() => window.__emit("box-signin-page", null), 300);
