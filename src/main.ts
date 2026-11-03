@@ -95,7 +95,7 @@ const state = {
   updating: false,
   /** An ENS name being looked up, while the explorer finds its wallet. */
   resolving: false,
-  note: null as { text: string; bad: boolean } | null,
+  note: null as { text: string; bad: boolean; box?: boolean } | null,
   sending: new Set<string>(),
   openAtLogin: false,
   /** A fix just copied, which its button says for a moment. */
@@ -176,6 +176,8 @@ async function refresh(full = false): Promise<void> {
     const box = await api.boxState().catch(() => null);
     state.pairingOut = Boolean(await api.pairingPending().catch(() => null));
     if (box && !(state.box?.state === "starting" || state.box?.state === "stopping") ) state.box = box;
+    // the switch gave up waiting on Docker, which came up after all and brought the box back
+    if (box?.state === "running" && state.note?.box) state.note = null;
     if (box?.deviceKey && (full || box.deviceKey !== lastDeviceKey || !state.localToken || Date.now() - lastSeatAsked > 60_000)) {
       lastDeviceKey = box.deviceKey;
       lastSeatAsked = Date.now();
@@ -385,12 +387,12 @@ async function toggle(agent: Agent): Promise<void> {
   state.note = null;
   if (agent.tokenId === state.localToken && state.box?.installed) {
     const on = state.box.state === "running";
-    state.box = { ...state.box, state: on ? "stopping" : "starting" };
+    state.box = { ...state.box, state: on ? "stopping" : "starting", dockerClosed: state.box.state === "docker-down" };
     render();
     try {
       if (on) await api.boxStop(); else await api.boxStart(settings.runtime);
     } catch (error) {
-      state.note = { text: String(error), bad: true };
+      state.note = { text: setupErrorWords(String(error)), bad: true, box: true };
     }
     state.box = await api.boxState();
     await refresh();
