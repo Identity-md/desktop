@@ -596,24 +596,30 @@ struct BoxState {
 
 /// The running box's id and its worker's device key, once read.
 static DEVICE_KEY: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
-/// The running box's id, once read as made with the flags this app gives a box.
-static CURRENT_BOX: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// The running box's id and the box image's, once the box was read as made the way this app makes one now.
+static CURRENT_BOX: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
 
-/// Whether the box was made with the flags this app gives one. They are a box's for its life, so one that was is asked
-/// once, not on every look. A read that fails says yes: nothing is done about a box not known to need it.
-fn box_current(id: &str) -> bool {
+/// Whether the box was made the way this app makes one now: from the box image here, with the flags above. Both are a
+/// box's for its life, so one that was is asked once per image, not on every look. A read that fails says yes: nothing
+/// is done about a box not known to need it.
+fn box_current(id: &str, image: &str) -> bool {
     let mut known = CURRENT_BOX.lock().unwrap_or_else(|e| e.into_inner());
-    if known.as_deref() == Some(id) {
+    if known.as_ref().is_some_and(|(box_id, box_image)| box_id == id && box_image == image) {
         return true;
     }
     match run_docker(&["inspect", "--format", BOX_MADE, BOX_NAME], Duration::from_secs(10)) {
-        Some((true, out)) if !sealed(&out) => false,
+        Some((true, out)) if !made_current(&out, image) => false,
         Some((true, _)) => {
-            *known = Some(id.to_string());
+            *known = Some((id.to_string(), image.to_string()));
             true
         }
         _ => true,
     }
+}
+
+/// The id of an image here, by its name.
+fn image_id(name: &str) -> Option<String> {
+    run_docker(&["image", "inspect", "--format", "{{.Id}}", name], Duration::from_secs(10)).filter(|(ok, _)| *ok).map(|(_, id)| id)
 }
 
 #[tauri::command]
@@ -630,12 +636,13 @@ async fn box_state() -> BoxState {
         if !inspected.as_ref().is_some_and(|(ok, _)| *ok) && !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
             return BoxState { state: "docker-down", installed: true, device_key: None, current: true };
         }
-        let installed = run_docker(&["image", "inspect", "--format", "{{.Id}}", BOX_IMAGE], Duration::from_secs(10)).is_some_and(|(ok, _)| ok);
+        let image = image_id(BOX_IMAGE);
+        let installed = image.is_some();
         let (container, running) = match &inspected {
             Some((true, out)) => out.split_once(' ').map(|(id, up)| (id.to_string(), up == "true")).unwrap_or_default(),
             _ => (String::new(), false),
         };
-        let current = !running || box_current(&container);
+        let current = !running || image.as_deref().is_none_or(|image| box_current(&container, image));
         // The worker's key is the box's for its life: asked once per box, not on every look.
         let device_key = if running {
             let mut known = DEVICE_KEY.lock().unwrap_or_else(|e| e.into_inner());
@@ -2057,20 +2064,33 @@ const RUNTIMES: [&str; 4] = ["claude", "codex", "claude,grok", "codex,grok"];
 /// Makes the box and starts it, exactly as `./box start` does: nothing of this computer mounted, every
 /// capability dropped but the few the firewall needs before it hands over to the worker's own user.
 fn run_box(runtime: &str) -> Result<(), String> {
+    // the image the box it replaces was made from, let go of once this one runs
+    let before = run_docker(&["inspect", "--format", "{{.Image}}", BOX_NAME], Duration::from_secs(10)).filter(|(ok, _)| *ok).map(|(_, image)| image);
     let _ = run_docker(&["rm", "-f", BOX_NAME], Duration::from_secs(30));
     let mut args: Vec<String> = ["run", "-d", "--name", BOX_NAME, "--restart", "unless-stopped"].iter().map(|s| s.to_string()).collect();
     args.extend(box_flags());
     args.extend([BOX_IMAGE, "imd", "start", "--runtime", runtime, "--auto-update"].iter().map(|s| s.to_string()));
     match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(120)) {
-        Some((true, _)) => Ok(()),
+        Some((true, _)) => {
+            if let Some(before) = before {
+                let_go_of(&before, &image_id(BOX_IMAGE).unwrap_or_default());
+            }
+            Ok(())
+        }
         Some((false, why)) => Err(docker_failure(why, "could not start")),
         None => Err("Docker is not installed".into()),
     }
 }
 
-/// What `docker inspect` is asked, for `sealed` to read, in an inspect of its own: a template that also asks `.Id` is run
-/// on Docker's raw JSON, where a box with no init has no such key and the whole read fails.
-const BOX_MADE: &str = "{{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}} {{.HostConfig.Init}}";
+/// What `docker inspect` is asked about how a box was made: its image, then its flags for `sealed`. In an inspect of its
+/// own: a template that also asks `.Id` is run on Docker's raw JSON, where a box with no init has no such key and the
+/// whole read fails.
+const BOX_MADE: &str = "{{.Image}} {{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}} {{.HostConfig.Init}}";
+
+/// Whether a box, as `BOX_MADE` reads it, was made from `image` with the flags above.
+fn made_current(inspect: &str, image: &str) -> bool {
+    inspect.split(' ').next() == Some(image) && sealed(inspect)
+}
 
 /// Whether a box was made with the flags this app gives one, read from `docker inspect` as its security
 /// options, how many paths of /proc it masks and its init: a seccomp profile of its own, none masked, and
@@ -2149,8 +2169,8 @@ async fn box_unlink() -> Result<(), String> {
 
 /// Restarts this computer's agent: the same box, started again. It runs with `--auto-update`, so a
 /// restart is also how it takes the newest worker. A box made without the flags above, as an older
-/// IMD Agents made them, is made again with them, so Restart is also what lets its read jail start
-/// and what stops it filling with dead processes.
+/// IMD Agents made them, or from an older box image, is made again from today's, so Restart is also
+/// what lets its read jail start, stops it filling with dead processes, and takes a newer box.
 #[tauri::command]
 async fn box_restart(runtime: String) -> Result<(), String> {
     if !RUNTIMES.contains(&runtime.as_str()) {
@@ -2159,14 +2179,15 @@ async fn box_restart(runtime: String) -> Result<(), String> {
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
         let made = run_docker(&["inspect", "--format", BOX_MADE, BOX_NAME], Duration::from_secs(10));
+        let image = image_id(BOX_IMAGE).unwrap_or_default();
         match made {
             None => Err("Docker is not installed".into()),
-            Some((true, out)) if sealed(&out) => match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
+            Some((true, out)) if made_current(&out, &image) => match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
                 Some((true, _)) => Ok(()),
                 Some((false, why)) => Err(why),
                 None => Err("Docker is not installed".into()),
             },
-            // made without these flags, or gone: the worker stops as a restart stops it, and the box is made again
+            // made otherwise, or gone: the worker stops as a restart stops it, and the box is made again
             _ => {
                 let _ = run_docker(&["stop", "--time", "30", BOX_NAME], Duration::from_secs(60));
                 run_box(&runtime)
@@ -2193,9 +2214,9 @@ fn runtime_of(command: &str) -> Option<String> {
 /// Set when a box can't be brought up to the flags above: it stays as it is until the app next starts.
 static BOX_STAYS: AtomicBool = AtomicBool::new(false);
 
-/// What a box made without the flags above runs on, when it can be made again with them right now. The panel asks once
-/// the network says it holds no job; the worker's own heartbeat has the last word. A one-off box with those flags starts
-/// first, so a Docker that refuses them leaves the running box working rather than gone, and a box started on something
+/// What a box made otherwise than this app makes one now runs on, when it can be made again right now. The panel asks once
+/// the network says it holds no job; the worker's own heartbeat has the last word. A one-off box made the new way starts
+/// first, so a Docker that refuses it leaves the running box working rather than gone, and a box started on something
 /// this app doesn't start is left alone.
 #[tauri::command]
 async fn box_renewal() -> Option<String> {
@@ -2213,16 +2234,11 @@ async fn box_renewal() -> Option<String> {
             BOX_STAYS.store(true, Ordering::SeqCst);
             return None;
         };
-        let _ = run_docker(&["rm", "-f", BOX_TRYING], Duration::from_secs(30));
-        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_TRYING.into()];
-        args.extend(box_flags());
-        args.extend([BOX_IMAGE.to_string(), "true".into()]);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        match run_docker(&args, Duration::from_secs(60))? {
-            (true, _) => Some(runtime),
-            (false, why) => {
+        match box_tries(BOX_IMAGE) {
+            Ok(()) => Some(runtime),
+            Err(why) => {
                 BOX_STAYS.store(true, Ordering::SeqCst);
-                log_failure(&format!("a box with today's flags: {}", why.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("failed")));
+                log_failure(&format!("a box made as this app makes one: {why}"));
                 None
             }
         }
@@ -2230,6 +2246,84 @@ async fn box_renewal() -> Option<String> {
     .await
     .ok()
     .flatten()
+}
+
+/// A one-off box from `image` with the flags above, asked for the worker's help: proof that a box made so starts on
+/// this computer and that its worker runs in it, before a running box is made that way.
+fn box_tries(image: &str) -> Result<(), String> {
+    let _ = run_docker(&["rm", "-f", BOX_TRYING], Duration::from_secs(30));
+    let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_TRYING.into()];
+    args.extend(box_flags());
+    args.extend([image.to_string(), "imd".into(), "help".into()]);
+    match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(60)) {
+        Some((true, _)) => Ok(()),
+        Some((false, why)) => Err(why.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("failed").to_string()),
+        None => Err("Docker is not installed".into()),
+    }
+}
+
+/// Whether an image came from the published box, by the digests Docker keeps for it: a box built on this computer, as
+/// `./box build` builds one, has none of the registry's, and is its builder's to update.
+fn from_published(digests: &str) -> bool {
+    digests.contains("ghcr.io/")
+}
+
+/// A newer published box refused, by its id: not tried again while the app runs.
+static REFUSED_IMAGE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The box as it is published: downloaded when newer, tried in a one-off box, and only then named as the image a box is
+/// made from. The panel then makes the box again from it once it holds no job, as it does for new flags. One that fails
+/// is left unnamed, and the box goes on as it is.
+fn take_newer_box() {
+    let _busy = Busy::new();
+    let Some(here) = image_id(BOX_IMAGE) else { return };
+    let digests = run_docker(&["image", "inspect", "--format", "{{json .RepoDigests}}", BOX_IMAGE], Duration::from_secs(10));
+    if !digests.is_some_and(|(ok, digests)| ok && from_published(&digests)) {
+        return;
+    }
+    if !run_docker(&["pull", BOX_PUBLISHED], Duration::from_secs(30 * 60)).is_some_and(|(ok, _)| ok) {
+        return;
+    }
+    let Some(newest) = image_id(BOX_PUBLISHED) else { return };
+    let mut refused = REFUSED_IMAGE.lock().unwrap_or_else(|e| e.into_inner());
+    if newest == here || refused.as_deref() == Some(newest.as_str()) {
+        return;
+    }
+    if let Err(why) = box_tries(&newest) {
+        log_failure(&format!("the published box {newest}: {why}"));
+        *refused = Some(newest);
+        return;
+    }
+    if let Some((false, why)) = run_docker(&["tag", &newest, BOX_IMAGE], Duration::from_secs(30)) {
+        log_failure(&format!("naming the published box {newest}: {why}"));
+    }
+}
+
+/// Twice a day, from two minutes after the app starts, once the app is quiet: the newest published box, as
+/// `take_newer_box` takes it. A box is a few hundred megabytes, and a month's security fixes are in the next one.
+fn watch_box_image(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2 * 60)).await;
+        loop {
+            while !quiet(&app) {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+            let _ = tauri::async_runtime::spawn_blocking(take_newer_box).await;
+            tokio::time::sleep(Duration::from_secs(12 * 60 * 60)).await;
+        }
+    });
+}
+
+/// The image a box was made from, once a box runs from `now` instead: removed when nothing names it and no box uses
+/// it, so each newer box doesn't leave the last one's gigabyte behind. Anything still named or in use stays.
+fn let_go_of(old: &str, now: &str) {
+    if old.is_empty() || old == now {
+        return;
+    }
+    let named = run_docker(&["image", "inspect", "--format", "{{len .RepoTags}}", old], Duration::from_secs(10));
+    if named.is_some_and(|(ok, tags)| ok && tags == "0") {
+        let _ = run_docker(&["image", "rm", old], Duration::from_secs(60));
+    }
 }
 
 /// The worker's newest releases, from the public list daemons update from: newest first, with when
@@ -2866,6 +2960,7 @@ pub fn run() {
             bring_out_tray_icon(app.handle());
 
             opened_with(app.handle(), &std::env::args().collect::<Vec<_>>());
+            watch_box_image(app.handle().clone());
             // A release build only: one run from source is not an install to replace.
             if !cfg!(debug_assertions) {
                 watch_for_updates(app.handle().clone());
@@ -3252,7 +3347,28 @@ mod tests {
             assert!(ok, "{out}");
             assert!(out.ends_with(if init { " 0 true" } else { " 0 <nil>" }), "{name}");
             assert_eq!(super::sealed(&out), init, "{name}");
+            let image = super::image_id(super::BOX_IMAGE).expect("a box image here");
+            assert_eq!(super::made_current(&out, &image), init, "{name}");
+            assert!(!super::made_current(&out, "sha256:another"), "{name}");
         }
+    }
+
+    #[test]
+    fn a_box_is_current_only_from_this_image_with_these_flags() {
+        let made = r#"sha256:aaa ["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0 true"#;
+        assert!(super::made_current(made, "sha256:aaa"));
+        assert!(!super::made_current(made, "sha256:bbb"));
+        assert!(!super::made_current(&made.replace(" 0 true", " 0 <nil>"), "sha256:aaa"));
+        assert!(!super::made_current("", "sha256:aaa"));
+    }
+
+    #[test]
+    fn only_a_published_box_is_updated_from_the_registry() {
+        assert!(super::from_published(r#"["ghcr.io/identity-md/box@sha256:5eb3"]"#));
+        assert!(super::from_published(r#"["imd-worker-box@sha256:f6dc","ghcr.io/identity-md/box@sha256:5eb3"]"#));
+        // built here, as `./box build` builds it: Docker's own digest of it, or none
+        assert!(!super::from_published(r#"["imd-worker-box@sha256:f6dc"]"#));
+        assert!(!super::from_published("[]"));
     }
 
     #[test]
