@@ -22,6 +22,7 @@
         "decorations": false,
         "transparent": true,
         "visible": false,
+        "backgroundThrottling": "disabled",
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "shadow": false,

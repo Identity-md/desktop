@@ -1765,6 +1765,7 @@ void refresh(true);
 void api.appVersion().then((version) => { appVersion = version; render(); }, () => {});
 // the swarm's line moves on every few seconds while anyone can see it
 setInterval(() => { if (!document.hidden && !closing && state.view === "home") tick(); }, 3600);
-// every 10 seconds while the panel is open, every minute while it is not: the icon stays true either way
+// every 10 seconds while the panel is open, every minute while it is not: the icon stays true either way. On a Mac this
+// takes backgroundThrottling in tauri.conf.json: a panel opened at login and never shown read once in 3.5 minutes without it.
 const poll = () => { void refresh(); setTimeout(poll, document.hasFocus() ? 10_000 : 60_000); };
 setTimeout(poll, 10_000);
