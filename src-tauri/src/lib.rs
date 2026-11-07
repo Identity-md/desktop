@@ -687,6 +687,9 @@ fn wide(text: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
 
 /// The flags every box runs with, as `./box` gives them: nothing of this computer mounted, every
 /// capability dropped but the few its firewall needs before it hands over to the worker's own user.
+/// `--init` starts a small process first, to clear what jobs leave behind: the worker can't, and what
+/// Claude's sandbox orphans (bwrap, socat) otherwise piles up, about 50 a day, toward `--pids-limit`.
+/// It alone stays root, and a job can neither read it nor signal it.
 fn box_flags() -> Vec<String> {
     [
         "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "SETPCAP", "--cap-add", "CHOWN",
@@ -696,7 +699,7 @@ fn box_flags() -> Vec<String> {
     .map(|s| s.to_string())
     .chain(jail_flags())
     .chain(["--cpus".to_string(), box_cpus()])
-    .chain(["--memory", "6g", "--pids-limit", "2048", "-v"].iter().map(|s| s.to_string()))
+    .chain(["--init", "--memory", "6g", "--pids-limit", "2048", "-v"].iter().map(|s| s.to_string()))
     .chain([format!("{BOX_VOLUME}:/home/imd")])
     .collect()
 }
@@ -2042,11 +2045,13 @@ fn run_box(runtime: &str) -> Result<(), String> {
 }
 
 /// Whether a box was made with the flags this app gives one, read from `docker inspect` as its security
-/// options and how many paths of /proc it masks: a seccomp profile of its own, and none masked. One made
-/// by an older IMD Agents has neither, and its worker's read jail cannot start.
+/// options, how many paths of /proc it masks and its init: a seccomp profile of its own, none masked, and
+/// an init. Without the first two, as an older IMD Agents made it, its worker's read jail cannot start;
+/// without the init, it fills with dead processes.
 fn sealed(inspect: &str) -> bool {
-    let (options, masked) = inspect.trim().rsplit_once(' ').unwrap_or(("", ""));
-    options.contains("seccomp=") && masked == "0"
+    let mut fields = inspect.trim().rsplitn(3, ' ');
+    let (init, masked, options) = (fields.next(), fields.next(), fields.next());
+    options.is_some_and(|options| options.contains("seccomp=")) && masked == Some("0") && init == Some("true")
 }
 
 /// Starts Docker if its engine isn't answering and waits until it is, so the box's switch is all it takes. Five minutes, as
@@ -2115,8 +2120,9 @@ async fn box_unlink() -> Result<(), String> {
 }
 
 /// Restarts this computer's agent: the same box, started again. It runs with `--auto-update`, so a
-/// restart is also how it takes the newest worker. A box made without the sandbox's flags, as an older
-/// IMD Agents made them, is made again with them, so Restart is also what lets its read jail start.
+/// restart is also how it takes the newest worker. A box made without the flags above, as an older
+/// IMD Agents made them, is made again with them, so Restart is also what lets its read jail start
+/// and what stops it filling with dead processes.
 #[tauri::command]
 async fn box_restart(runtime: String) -> Result<(), String> {
     if !RUNTIMES.contains(&runtime.as_str()) {
@@ -2124,7 +2130,7 @@ async fn box_restart(runtime: String) -> Result<(), String> {
     }
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
-        let made = run_docker(&["inspect", "--format", "{{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}}", BOX_NAME], Duration::from_secs(10));
+        let made = run_docker(&["inspect", "--format", "{{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}} {{.HostConfig.Init}}", BOX_NAME], Duration::from_secs(10));
         match made {
             None => Err("Docker is not installed".into()),
             Some((true, out)) if sealed(&out) => match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
@@ -2132,7 +2138,7 @@ async fn box_restart(runtime: String) -> Result<(), String> {
                 Some((false, why)) => Err(why),
                 None => Err("Docker is not installed".into()),
             },
-            // made without the sandbox's flags, or gone: the worker stops as a restart stops it, and the box is made again
+            // made without these flags, or gone: the worker stops as a restart stops it, and the box is made again
             _ => {
                 let _ = run_docker(&["stop", "--time", "30", BOX_NAME], Duration::from_secs(60));
                 run_box(&runtime)
@@ -3123,11 +3129,17 @@ mod tests {
     }
 
     #[test]
+    fn the_box_clears_what_jobs_leave_behind() {
+        assert!(box_flags().iter().any(|flag| flag == "--init"));
+    }
+
+    #[test]
     fn a_box_without_the_sandbox_flags_is_told_apart() {
-        // as `docker inspect` prints them: one made by this app, one by IMD Agents 0.1.0, one with /proc masked
-        assert!(super::sealed(r#"["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0"#));
-        assert!(!super::sealed(r#"["no-new-privileges:true"] 12"#));
-        assert!(!super::sealed(r#"["no-new-privileges:true","seccomp={}"] 12"#));
+        // as `docker inspect` prints them: one made by this app, one by IMD Agents 0.1.18, one by 0.1.0, one with /proc masked
+        assert!(super::sealed(r#"["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0 true"#));
+        assert!(!super::sealed(r#"["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0 <nil>"#));
+        assert!(!super::sealed(r#"["no-new-privileges:true"] 12 <nil>"#));
+        assert!(!super::sealed(r#"["no-new-privileges:true","seccomp={}"] 12 <nil>"#));
         assert!(!super::sealed(""));
     }
 
