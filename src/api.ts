@@ -100,14 +100,16 @@ export async function earnings(wallet: string): Promise<Earning[]> {
 export const agentSvg = (tokenId: string) => invoke<string | null>("agent_svg", { tokenId });
 
 export const boxState = async (): Promise<Box> => {
-  const raw = await invoke<{ state: Box["state"]; installed: boolean; device_key: string | null }>("box_state");
-  return { state: raw.state, installed: raw.installed, deviceKey: raw.device_key };
+  const raw = await invoke<{ state: Box["state"]; installed: boolean; device_key: string | null; current: boolean }>("box_state");
+  return { state: raw.state, installed: raw.installed, deviceKey: raw.device_key, current: raw.current };
 };
 export const boxStart = (runtime: string) => invoke<void>("box_start", { runtime });
 export const boxStop = () => invoke<void>("box_stop");
 /** Takes this computer off its seat: its box removed, then `imd unlink`, signed with its own key. */
 export const boxUnlink = () => invoke<void>("box_unlink");
 export const boxRestart = (runtime: string) => invoke<void>("box_restart", { runtime });
+/** What a box made without today's flags runs on, if it can be made again right now. */
+export const boxRenewal = () => invoke<string | null>("box_renewal");
 
 /** How far setting this computer's box up has got. On Windows Docker can wait on a restart, which finishes installing WSL. */
 export type Setup = { docker: "missing" | "stopped" | "running" | "restart" | "restart-wsl"; restart_ahead: boolean; image: boolean; worker: boolean; claude: boolean; device_key: string | null };

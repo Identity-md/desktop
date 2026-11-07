@@ -25,7 +25,7 @@ export type Agent = {
 };
 
 /** The box on this computer, as the app reads it from Docker. */
-export type Box = { state: "running" | "stopped" | "docker-down" | "no-docker" | "starting" | "stopping"; installed: boolean; deviceKey: string | null; dockerClosed?: boolean };
+export type Box = { state: "running" | "stopped" | "docker-down" | "no-docker" | "starting" | "stopping"; installed: boolean; deviceKey: string | null; dockerClosed?: boolean; current?: boolean };
 
 export type Phase =
   | { kind: "working"; jobs: number }
@@ -59,6 +59,15 @@ export function localPhase(box: Box, agent: Agent | null, now = new Date()): Pha
   if (box.state === "stopping") return { kind: "changing", words: "Stopping…" };
   if (box.state !== "running") return { kind: "off" };
   return agent ? phaseOf({ ...agent, online: true }, now) : { kind: "changing", words: "Connecting…" };
+}
+
+/**
+ * Whether the network says this computer's box can be made again: made without today's flags, its agent connected
+ * and holding no job. No read of its agent yet says nothing, so it waits.
+ */
+export function boxDue(box: Box | null, agent: Agent | undefined): boolean {
+  const s = agent?.standing;
+  return box?.state === "running" && box.current === false && s?.presence?.connected === true && !s.presence.stale && s.standing.working === 0;
 }
 
 const STEP_NAMES: Record<string, string> = {

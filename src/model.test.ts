@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { localPhase, tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { localPhase, tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -161,6 +161,26 @@ describe("numbers", () => {
     expect(fix("claude's sandbox cannot jail reads on Windows; run the worker under WSL")).toBeNull();
     expect(fix("codex sandbox did not hold the jail (exit 1): bwrap: execvp codex-linux-sandbox: No such file or directory")).toBe("imd update");
     expect(jailFix("claude's sandbox cannot jail reads on Windows").why).toMatch(/WSL/);
+  });
+
+  it("makes a box again only without today's flags, and only when the network says it holds no job", () => {
+    const box = { state: "running" as const, installed: true, deviceKey: null, current: false };
+    expect(boxDue(box, agent(standing()))).toBe(true);
+    // made with them, or a read that doesn't say
+    expect(boxDue({ ...box, current: true }, agent(standing()))).toBe(false);
+    expect(boxDue({ state: "running", installed: true, deviceKey: null }, agent(standing()))).toBe(false);
+    // at work
+    expect(boxDue(box, agent(standing({ working: 1 })))).toBe(false);
+    // not known to be idle: no read yet, or the network doesn't have it
+    expect(boxDue(box, undefined)).toBe(false);
+    expect(boxDue(box, agent(null))).toBe(false);
+    expect(boxDue(box, agent(standing({}, null)))).toBe(false);
+    expect(boxDue(box, agent(standing({}, { connected: false })))).toBe(false);
+    expect(boxDue(box, agent(standing({}, { stale: true })))).toBe(false);
+    // off, or already changing
+    expect(boxDue({ ...box, state: "stopped" }, agent(standing()))).toBe(false);
+    expect(boxDue({ ...box, state: "starting" }, agent(standing()))).toBe(false);
+    expect(boxDue(null, agent(standing()))).toBe(false);
   });
 
   it("says Docker is starting only when the switch had to start it", () => {

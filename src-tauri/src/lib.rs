@@ -590,30 +590,52 @@ struct BoxState {
     installed: bool,
     /// The worker's device key, while it runs: what the network knows this computer's agent by.
     device_key: Option<String>,
+    /// Whether it was made with the flags this app gives a box. No box is as good as one that was.
+    current: bool,
 }
 
 /// The running box's id and its worker's device key, once read.
 static DEVICE_KEY: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+/// The running box's id, once read as made with the flags this app gives a box.
+static CURRENT_BOX: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Whether the box was made with the flags this app gives one. They are a box's for its life, so one that was is asked
+/// once, not on every look. A read that fails says yes: nothing is done about a box not known to need it.
+fn box_current(id: &str) -> bool {
+    let mut known = CURRENT_BOX.lock().unwrap_or_else(|e| e.into_inner());
+    if known.as_deref() == Some(id) {
+        return true;
+    }
+    match run_docker(&["inspect", "--format", BOX_MADE, BOX_NAME], Duration::from_secs(10)) {
+        Some((true, out)) if !sealed(&out) => false,
+        Some((true, _)) => {
+            *known = Some(id.to_string());
+            true
+        }
+        _ => true,
+    }
+}
 
 #[tauri::command]
 async fn box_state() -> BoxState {
     tauri::async_runtime::spawn_blocking(|| {
         if docker().is_none() {
-            return BoxState { state: "no-docker", installed: false, device_key: None };
+            return BoxState { state: "no-docker", installed: false, device_key: None, current: true };
         }
         if !engine_listening() {
-            return BoxState { state: "docker-down", installed: true, device_key: None };
+            return BoxState { state: "docker-down", installed: true, device_key: None, current: true };
         }
         // The box answering means the engine does: Docker's own check only when there is no box to ask.
         let inspected = run_docker(&["inspect", "-f", "{{.Id}} {{.State.Running}}", BOX_NAME], Duration::from_secs(10));
         if !inspected.as_ref().is_some_and(|(ok, _)| *ok) && !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
-            return BoxState { state: "docker-down", installed: true, device_key: None };
+            return BoxState { state: "docker-down", installed: true, device_key: None, current: true };
         }
         let installed = run_docker(&["image", "inspect", "--format", "{{.Id}}", BOX_IMAGE], Duration::from_secs(10)).is_some_and(|(ok, _)| ok);
         let (container, running) = match &inspected {
             Some((true, out)) => out.split_once(' ').map(|(id, up)| (id.to_string(), up == "true")).unwrap_or_default(),
             _ => (String::new(), false),
         };
+        let current = !running || box_current(&container);
         // The worker's key is the box's for its life: asked once per box, not on every look.
         let device_key = if running {
             let mut known = DEVICE_KEY.lock().unwrap_or_else(|e| e.into_inner());
@@ -630,10 +652,10 @@ async fn box_state() -> BoxState {
         } else {
             None
         };
-        BoxState { state: if running { "running" } else { "stopped" }, installed, device_key }
+        BoxState { state: if running { "running" } else { "stopped" }, installed, device_key, current }
     })
     .await
-    .unwrap_or(BoxState { state: "no-docker", installed: false, device_key: None })
+    .unwrap_or(BoxState { state: "no-docker", installed: false, device_key: None, current: true })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -651,6 +673,8 @@ const BOX_UNLINKING: &str = "imd-worker-unlink";
 const BOX_UPDATING: &str = "imd-worker-update";
 /// The one-off box that signs in to Claude, named so that a cancel can stop it.
 const BOX_SIGNING_IN: &str = "imd-worker-signin";
+/// The one-off box that tries today's flags before a running box is made again with them, named as the others are.
+const BOX_TRYING: &str = "imd-worker-try";
 /// Docker Desktop's installer for this computer's chip, straight from Docker, so Install Docker downloads it rather
 /// than opening a page that asks which chip it is for; on Linux, Docker's page.
 fn docker_download() -> String {
@@ -2044,6 +2068,10 @@ fn run_box(runtime: &str) -> Result<(), String> {
     }
 }
 
+/// What `docker inspect` is asked, for `sealed` to read, in an inspect of its own: a template that also asks `.Id` is run
+/// on Docker's raw JSON, where a box with no init has no such key and the whole read fails.
+const BOX_MADE: &str = "{{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}} {{.HostConfig.Init}}";
+
 /// Whether a box was made with the flags this app gives one, read from `docker inspect` as its security
 /// options, how many paths of /proc it masks and its init: a seccomp profile of its own, none masked, and
 /// an init. Without the first two, as an older IMD Agents made it, its worker's read jail cannot start;
@@ -2130,7 +2158,7 @@ async fn box_restart(runtime: String) -> Result<(), String> {
     }
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
-        let made = run_docker(&["inspect", "--format", "{{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}} {{.HostConfig.Init}}", BOX_NAME], Duration::from_secs(10));
+        let made = run_docker(&["inspect", "--format", BOX_MADE, BOX_NAME], Duration::from_secs(10));
         match made {
             None => Err("Docker is not installed".into()),
             Some((true, out)) if sealed(&out) => match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
@@ -2147,6 +2175,61 @@ async fn box_restart(runtime: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The worker's heartbeat saying it holds no work: "alive 17m · idle · 0 submitted · …". Any other last line says
+/// nothing, and the box waits for the next.
+fn worker_idle(line: &str) -> bool {
+    line.split(" · ").nth(1) == Some("idle")
+}
+
+/// The runtime a box was started on, from `docker inspect`'s `.Config.Cmd`, if it is one this app starts.
+fn runtime_of(command: &str) -> Option<String> {
+    let words: Vec<String> = serde_json::from_str(command).ok()?;
+    let runtime = words.iter().position(|word| word == "--runtime").and_then(|at| words.get(at + 1))?;
+    RUNTIMES.contains(&runtime.as_str()).then(|| runtime.clone())
+}
+
+/// Set when a box can't be brought up to the flags above: it stays as it is until the app next starts.
+static BOX_STAYS: AtomicBool = AtomicBool::new(false);
+
+/// What a box made without the flags above runs on, when it can be made again with them right now. The panel asks once
+/// the network says it holds no job; the worker's own heartbeat has the last word. A one-off box with those flags starts
+/// first, so a Docker that refuses them leaves the running box working rather than gone, and a box started on something
+/// this app doesn't start is left alone.
+#[tauri::command]
+async fn box_renewal() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        if BOX_STAYS.load(Ordering::SeqCst) || BUSY.load(Ordering::SeqCst) > 0 {
+            return None;
+        }
+        let _busy = Busy::new();
+        run_docker(&["logs", "--tail", "1", BOX_NAME], Duration::from_secs(10)).filter(|(ok, line)| *ok && worker_idle(line))?;
+        let (ok, command) = run_docker(&["inspect", "--format", "{{json .Config.Cmd}}", BOX_NAME], Duration::from_secs(10))?;
+        if !ok {
+            return None;
+        }
+        let Some(runtime) = runtime_of(&command) else {
+            BOX_STAYS.store(true, Ordering::SeqCst);
+            return None;
+        };
+        let _ = run_docker(&["rm", "-f", BOX_TRYING], Duration::from_secs(30));
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_TRYING.into()];
+        args.extend(box_flags());
+        args.extend([BOX_IMAGE.to_string(), "true".into()]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match run_docker(&args, Duration::from_secs(60))? {
+            (true, _) => Some(runtime),
+            (false, why) => {
+                BOX_STAYS.store(true, Ordering::SeqCst);
+                log_failure(&format!("a box with today's flags: {}", why.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("failed")));
+                None
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The worker's newest releases, from the public list daemons update from: newest first, with when
@@ -2722,7 +2805,7 @@ pub fn run() {
         .plugin(tauri_plugin_nspanel_init())
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
-            box_state, box_start, box_stop, box_restart, worker_releases, open_explorer,
+            box_state, box_start, box_stop, box_restart, box_renewal, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_sign_in_code, box_sign_in_open, box_sign_in_cancel, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
             docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound, set_theme,
             restart_pc, set_open_at_login
@@ -3133,6 +3216,43 @@ mod tests {
     #[test]
     fn the_box_clears_what_jobs_leave_behind() {
         assert!(box_flags().iter().any(|flag| flag == "--init"));
+    }
+
+    #[test]
+    fn only_the_workers_heartbeat_says_it_is_idle() {
+        assert!(super::worker_idle("2026-11-07T04:37:02.243Z alive 17m · idle · 0 submitted · fleet 947 online, 1077 enrolled"));
+        assert!(!super::worker_idle("2026-11-07T04:37:02.243Z alive 17m · 1 task running · 0 submitted · fleet 947 online, 1077 enrolled"));
+        assert!(!super::worker_idle("2026-11-07T04:19:32.219Z admitted (session d5c6ffb2)"));
+        assert!(!super::worker_idle(""));
+    }
+
+    #[test]
+    fn a_box_keeps_the_runtime_it_was_started_on() {
+        assert_eq!(super::runtime_of(r#"["imd","start","--runtime","claude,grok","--auto-update"]"#).as_deref(), Some("claude,grok"));
+        assert_eq!(super::runtime_of(r#"["imd","start","--runtime","something-else"]"#), None);
+        assert_eq!(super::runtime_of(r#"["bash"]"#), None);
+        assert_eq!(super::runtime_of(""), None);
+    }
+
+    /// Real boxes, not started: how Docker says what each was made with, with and without an init.
+    #[test]
+    #[ignore]
+    fn docker_says_what_a_box_was_made_with() {
+        use std::time::Duration;
+        for (name, init) in [("imd-made-test-init", true), ("imd-made-test-none", false)] {
+            let _ = super::run_docker(&["rm", "-f", name], Duration::from_secs(30));
+            let mut args: Vec<String> = vec!["create".into(), "--name".into(), name.into()];
+            args.extend(super::box_flags().into_iter().filter(|flag| init || flag != "--init"));
+            args.extend([super::BOX_IMAGE.to_string(), "true".into()]);
+            let made = super::run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(30));
+            assert!(made.is_some_and(|(ok, _)| ok), "{name} made");
+            let read = super::run_docker(&["inspect", "--format", super::BOX_MADE, name], Duration::from_secs(10));
+            let _ = super::run_docker(&["rm", "-f", name], Duration::from_secs(30));
+            let (ok, out) = read.expect("docker answers");
+            assert!(ok, "{out}");
+            assert!(out.ends_with(if init { " 0 true" } else { " 0 <nil>" }), "{name}");
+            assert_eq!(super::sealed(&out), init, "{name}");
+        }
     }
 
     #[test]
