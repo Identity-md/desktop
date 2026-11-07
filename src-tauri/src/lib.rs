@@ -3002,7 +3002,9 @@ mod tests {
         let _ = super::run_docker(&["volume", "rm", "-f", volume], Duration::from_secs(30));
         let page = page.into_inner().unwrap().expect("a page");
         assert!(page.starts_with("https://claude.com/cai/oauth/authorize?") && page.contains("code_challenge_method=S256&state="), "{page}");
-        assert_eq!(ended, Err("Login failed: Request failed with status code 400".into()));
+        // the words after it are Claude Code's own, and change; this start is what the panel reads
+        let ended = ended.expect_err("a made-up code is turned down");
+        assert!(ended.starts_with("Login failed:"), "{ended}");
     }
 
     #[test]
