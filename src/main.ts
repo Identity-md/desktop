@@ -6,7 +6,7 @@ import * as api from "./api";
 import { lendingOn, lendReader, type Lending, type Terms } from "./lending";
 import { faceFor, loadFace } from "./masks";
 import { ctrl, mac, shift, windows } from "./platform";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
 
 // ---------------------------------------------------------------------------------------------
 // What the app remembers between runs: wallets, the network it signs for, names. Nothing secret:
@@ -320,6 +320,7 @@ async function refresh(full = false): Promise<void> {
   render();
   const local = state.agents.find((a) => a.tokenId === state.localToken);
   if (state.restartWhenIdle && local && phaseFor(local).kind !== "working") void restartLocal();
+  else if (!renewed && boxDue(state.box, local)) void renewLocal();
   if (flying) landed.forEach((gain, i) => setTimeout(() => fly(gain.tokenId, gain.by), i * 260));
   // heard whether or not the panel is open: work accepted over work taken, once a read
   if (settings.sounds && (landed.length || took)) void api.playSound(landed.length ? "paid" : "taken").catch(() => undefined);
@@ -357,7 +358,7 @@ function outdated(agent: Agent): boolean {
  * Restarts this computer's agent, which is also how it takes the newest worker. Working, it waits for
  * the job to finish, so nothing it is doing is thrown away.
  */
-async function restartLocal(): Promise<void> {
+async function restartLocal(runtime = settings.runtime): Promise<void> {
   const agent = state.agents.find((a) => a.tokenId === state.localToken);
   if (!agent || !state.box?.installed || state.box.state !== "running") return;
   if (phaseFor(agent).kind === "working") {
@@ -368,12 +369,26 @@ async function restartLocal(): Promise<void> {
   state.box = { ...state.box, state: "starting" };
   render();
   try {
-    await api.boxRestart(settings.runtime);
+    await api.boxRestart(runtime);
   } catch (error) {
     state.note = { text: String(error), bad: true };
   }
   state.box = await api.boxState().catch(() => state.box);
   await refresh(true);
+}
+
+/** One at a time, and once a run of the app: a box still without today's flags after this isn't made again every minute. */
+let renewed = false;
+
+/**
+ * Makes again a box made without today's flags, on the runtime it already runs, as the app and the worker update
+ * themselves: nothing to press, and never with a job on it.
+ */
+async function renewLocal(): Promise<void> {
+  renewed = true;
+  const runtime = await api.boxRenewal().catch(() => null);
+  if (runtime && boxDue(state.box, state.agents.find((a) => a.tokenId === state.localToken))) await restartLocal(runtime);
+  else renewed = false;
 }
 
 function phaseFor(agent: Agent): Phase {
@@ -1765,6 +1780,7 @@ void refresh(true);
 void api.appVersion().then((version) => { appVersion = version; render(); }, () => {});
 // the swarm's line moves on every few seconds while anyone can see it
 setInterval(() => { if (!document.hidden && !closing && state.view === "home") tick(); }, 3600);
-// every 10 seconds while the panel is open, every minute while it is not: the icon stays true either way
+// every 10 seconds while the panel is open, every minute while it is not: the icon stays true either way. On a Mac this
+// takes backgroundThrottling in tauri.conf.json: a panel opened at login and never shown read once in 3.5 minutes without it.
 const poll = () => { void refresh(); setTimeout(poll, document.hasFocus() ? 10_000 : 60_000); };
 setTimeout(poll, 10_000);
