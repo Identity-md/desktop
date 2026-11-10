@@ -2,7 +2,17 @@
 
 export type Standing = {
   enrollment: { status: string; tokenId: string } | null;
-  presence: { connected: boolean; stale: boolean; connectedAt?: string; lastHeartbeatAt: string; daemonVersion?: string; runtimes?: Array<{ id: string }>; jail?: { ok: boolean; detail: string } | null } | null;
+  presence: {
+    connected: boolean;
+    stale: boolean;
+    /** False while its worker turns work away itself: its runtime at a limit, its self-test failing, an update on its way in. */
+    acceptingWork?: boolean;
+    connectedAt?: string;
+    lastHeartbeatAt: string;
+    daemonVersion?: string;
+    runtimes?: Array<{ id: string }>;
+    jail?: { ok: boolean; detail: string } | null;
+  } | null;
   standing: {
     working: number;
     pausedUntil: string | null;
@@ -27,9 +37,17 @@ export type Agent = {
 /** The box on this computer, as the app reads it from Docker. */
 export type Box = { state: "running" | "stopped" | "docker-down" | "no-docker" | "starting" | "stopping"; installed: boolean; deviceKey: string | null; dockerClosed?: boolean; current?: boolean };
 
+/**
+ * Why a worker holds its own work, in its own words. Only its log says, so only this computer's agent has one:
+ * its runtime at a limit (`said` is the provider's line), its self-test failed, or a check still out.
+ */
+export type Hold = { kind: "limit" | "fault"; said: string } | { kind: "checking" };
+
 export type Phase =
   | { kind: "working"; jobs: number }
   | { kind: "ready" }
+  /** Connected, and turning work away itself: the network pauses nothing, so nothing above says it. */
+  | { kind: "holding"; hold: Hold | null }
   | { kind: "held" }
   | { kind: "paused"; until: Date }
   | { kind: "offline"; seen: Date | null }
@@ -37,8 +55,11 @@ export type Phase =
   | { kind: "changing"; words: string }
   | { kind: "docker-down" };
 
-/** One agent's state, in the order that matters: away, held by its holder, paused by the network, at work, ready. */
-export function phaseOf(agent: Agent, now = new Date()): Phase {
+/**
+ * One agent's state, in the order that matters: away, held by its holder, paused by the network, at work, holding
+ * its own work, ready. `hold` is why it holds, where its log is this computer's to read.
+ */
+export function phaseOf(agent: Agent, now = new Date(), hold: Hold | null = null): Phase {
   const s = agent.standing;
   const presence = s?.presence ?? null;
   if (!presence || presence.stale || !presence.connected) {
@@ -49,16 +70,78 @@ export function phaseOf(agent: Agent, now = new Date()): Phase {
   const until = s?.standing.pausedUntil ? new Date(s.standing.pausedUntil) : null;
   if (until && until > now && working === 0) return { kind: "paused", until };
   if (working > 0) return { kind: "working", jobs: working };
+  // the network pauses nothing here: the worker itself says it takes no work, and without this it read as ready
+  if (holdsWork(s)) return { kind: "holding", hold };
   return { kind: "ready" };
 }
 
+/** Whether an agent's worker is connected and turning work away itself, with no job on it. */
+export function holdsWork(s: Standing | null | undefined): boolean {
+  const presence = s?.presence;
+  return Boolean(presence && presence.connected && !presence.stale && presence.acceptingWork === false && (s?.standing.working ?? 0) === 0);
+}
+
 /** The box's own state wins for this computer's agent: Docker closed, the box off, or between the two. */
-export function localPhase(box: Box, agent: Agent | null, now = new Date()): Phase {
+export function localPhase(box: Box, agent: Agent | null, now = new Date(), hold: Hold | null = null): Phase {
   if (box.state === "docker-down") return { kind: "docker-down" };
   if (box.state === "starting") return { kind: "changing", words: box.dockerClosed ? "Starting Docker…" : "Starting…" };
   if (box.state === "stopping") return { kind: "changing", words: "Stopping…" };
   if (box.state !== "running") return { kind: "off" };
-  return agent ? phaseOf({ ...agent, online: true }, now) : { kind: "changing", words: "Connecting…" };
+  return agent ? phaseOf({ ...agent, online: true }, now, hold) : { kind: "changing", words: "Connecting…" };
+}
+
+/**
+ * Why this computer's worker holds its work, from the newest line its self-test wrote in its log, the stamp
+ * before it aside: "self-test: You've hit your weekly limit · resets Nov 13, 4am (UTC). Holding work for 11m".
+ * Null for a line that holds nothing, as a pass is, and for no line at all.
+ */
+export function holdOf(line: string | null | undefined): Hold | null {
+  const text = (line ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  const limit = /^self-test: (.+?)\.? Holding work for /.exec(text);
+  if (limit) return { kind: "limit", said: limit[1]!.trim().slice(0, 160) };
+  const fault = /^self-test failed, taking no work: (.+?)\.? Checking again in /.exec(text);
+  if (fault) return { kind: "fault", said: fault[1]!.trim().slice(0, 160) };
+  if (/^self-test: asking the runtime/.test(text)) return { kind: "checking" };
+  return null;
+}
+
+/**
+ * A limit's line read for what it limits and when it lifts: "You've hit your weekly limit · resets Nov 13, 4am (UTC)"
+ * is the weekly limit, lifting at that hour. The box's clock is UTC, so only a time said in UTC is read; the next
+ * such hour, or the next such day of the year, since the line names no year.
+ */
+export function limitOf(said: string, now = new Date()): { which: string | null; lifts: Date | null } {
+  const which = /\b(weekly|session|daily|monthly|5-hour|usage)\b[ -]limit/i.exec(said)?.[1]?.toLowerCase() ?? null;
+  const at = /resets\s+(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(UTC\)/i.exec(said);
+  if (!at) return { which: which === "usage" ? null : which, lifts: null };
+  const hour = (Number(at[3]) % 12) + (at[5]!.toLowerCase() === "pm" ? 12 : 0);
+  const minute = Number(at[4] ?? 0);
+  const month = at[1] ? MONTHS.indexOf(at[1].toLowerCase()) : -1;
+  let lifts: Date;
+  if (at[1] && month < 0) return { which: which === "usage" ? null : which, lifts: null };
+  if (month >= 0) {
+    lifts = new Date(Date.UTC(now.getUTCFullYear(), month, Number(at[2]), hour, minute));
+    // a day already a month behind is next year's
+    if (lifts.getTime() < now.getTime() - 30 * DAY) lifts = new Date(Date.UTC(now.getUTCFullYear() + 1, month, Number(at[2]), hour, minute));
+  } else {
+    lifts = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, minute));
+    if (lifts.getTime() <= now.getTime()) lifts = new Date(lifts.getTime() + DAY);
+  }
+  return { which: which === "usage" ? null : which, lifts: Number.isNaN(lifts.getTime()) ? null : lifts };
+}
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/**
+ * When something lifts, as someone here says it, in the room a row has: "3 PM" today, "Thu 11 PM" this week, "Nov 21"
+ * past it. At length, for a sentence: "at 3 PM", "Thursday at 11 PM", "Nov 21 at 11 PM". Minutes only where there are some.
+ */
+export function liftsAt(lifts: Date, now = new Date(), long = false): string {
+  const time = lifts.toLocaleTimeString([], lifts.getMinutes() === 0 ? { hour: "numeric" } : { hour: "numeric", minute: "2-digit" });
+  if (dayStart(lifts).getTime() === dayStart(now).getTime()) return long ? `at ${time}` : time;
+  if (lifts > now && lifts.getTime() - now.getTime() < 6 * DAY) return `${lifts.toLocaleDateString([], { weekday: long ? "long" : "short" })}${long ? " at" : ""} ${time}`;
+  const date = lifts.toLocaleDateString([], { month: "short", day: "numeric" });
+  return long ? `${date} at ${time}` : date;
 }
 
 /**
@@ -123,6 +206,7 @@ export function statusLine(phase: Phase, agent: Agent | null, now = new Date()):
       const runtime = agent?.standing?.presence?.runtimes?.[0]?.id;
       return runtime ? `Ready · ${capitalize(runtime)}` : "Ready";
     }
+    case "holding": return holdingLine(phase.hold, agent, now);
     case "held": return "Paused · takes no new work";
     case "paused": return `Paused by the network until ${phase.until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
     case "offline": return phase.seen ? `Offline · last seen ${ago(phase.seen, now)}` : "Offline";
@@ -132,12 +216,50 @@ export function statusLine(phase: Phase, agent: Agent | null, now = new Date()):
   }
 }
 
-/** The dot on the mask: green on, blue changing, orange held up by the network, grey off or away. */
+/** The runtime an agent's jobs run on, as its maker writes it: "Claude", "Codex". Null where the network did not say. */
+function runtimeName(agent: Agent | null): string | null {
+  const id = agent?.standing?.presence?.runtimes?.[0]?.id;
+  return id ? capitalize(id) : null;
+}
+
+/** A provider with no room for the request, which minutes clear: not a plan's limit, which its owner used up. */
+const NO_ROOM = /at capacity|overloaded|\b529\b/i;
+
+/** The line under an agent that holds its own work: what holds it, and when that lifts where its words say. */
+export function holdingLine(hold: Hold | null, agent: Agent | null, now = new Date()): string {
+  const runtime = runtimeName(agent);
+  if (hold?.kind === "limit") {
+    // which limit is its tray's to say: a row has room for whose it is and when it's back
+    const { which, lifts } = limitOf(hold.said, now);
+    if (!which && !lifts && NO_ROOM.test(hold.said)) return `${runtime ?? "Its runtime"} is at capacity`;
+    const what = runtime ? `At ${runtime}'s limit` : "At its limit";
+    return lifts && lifts > now ? `${what} · back ${liftsAt(lifts, now)}` : what;
+  }
+  if (hold?.kind === "fault") return `Not taking jobs · ${runtime ?? "its runtime"} failed its check`;
+  if (hold?.kind === "checking") return `Checking ${runtime ?? "its runtime"} before taking jobs`;
+  return "Not taking jobs right now";
+}
+
+/** The same at length, for its tray: what happened and what comes next, in the worker's own words where it has them. */
+export function holdingWords(hold: Hold | null, agent: Agent | null, now = new Date()): string {
+  const runtime = runtimeName(agent);
+  if (hold?.kind === "limit") {
+    const { which, lifts } = limitOf(hold.said, now);
+    if (!which && !lifts && NO_ROOM.test(hold.said)) return `${runtime ?? "Its runtime"} is at capacity. It asks again every few minutes, and takes jobs once it answers. ${runtime ?? "It"} said: ${hold.said}`;
+    const used = `${runtime ? `${runtime}'s` : "Its runtime's"}${which ? ` ${which}` : ""} limit is used up.`;
+    return lifts && lifts > now ? `${used} It takes jobs again ${liftsAt(lifts, now, true)}.` : `${used} It takes jobs again once that lifts. ${runtime ?? "It"} said: ${hold.said}`;
+  }
+  if (hold?.kind === "fault") return `${runtime ?? "Its runtime"} failed the check a worker runs before taking jobs: ${hold.said}`;
+  if (hold?.kind === "checking") return `Checking that ${runtime ?? "its runtime"} answers before it takes jobs. About a minute.`;
+  return "Its worker is connected but turning jobs away: at a limit, updating, or checking itself. Its log says which.";
+}
+
+/** The dot on the mask: green on, blue changing, orange held up by the network or by itself, grey off or away. */
 export function dotOf(phase: Phase): "on" | "changing" | "warn" | "off" {
   switch (phase.kind) {
     case "working": case "ready": return "on";
     case "changing": return "changing";
-    case "paused": case "docker-down": return "warn";
+    case "paused": case "docker-down": case "holding": return "warn";
     default: return "off";
   }
 }

@@ -6,7 +6,7 @@ import * as api from "./api";
 import { lendingOn, lendReader, type Lending, type Terms } from "./lending";
 import { faceFor, loadFace } from "./masks";
 import { ctrl, mac, shift, windows } from "./platform";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow, holdOf, holdsWork, holdingWords, type Hold } from "./model";
 
 // ---------------------------------------------------------------------------------------------
 // What the app remembers between runs: wallets, the network it signs for, names. Nothing secret:
@@ -85,6 +85,8 @@ const state = {
   release: null as { newest: string; accepted: string[]; order: string[] } | null,
   /** This computer's agent is to restart as soon as its job is done. */
   restartWhenIdle: false,
+  /** Why this computer's worker turns work away, from its own log, while the network says it does. */
+  hold: null as Hold | null,
   /** The agent whose tray is open, showing what it is doing and has done. */
   openAgent: null as string | null,
   /** What each wallet has ready to claim, and its worth in dollars once every reward has a price. */
@@ -238,6 +240,9 @@ async function refresh(full = false): Promise<void> {
     const reads = await Promise.all(seats.map((seat) => api.get<Agent["standing"]>(`/seats/${seat.tokenId}/standing?queue=0`)));
     if (reads.some((read) => read.status === 429)) coolUntil = Date.now() + 60_000;
     const standings = reads.map((read, i) => (read.status === 200 ? read.body : before.get(seats[i]!.tokenId) ?? null));
+    // this computer's worker turning work away, which the network pauses nothing for: its log says why, asked only then
+    const mine = standings[seats.findIndex((seat) => seat.tokenId === state.localToken)] ?? null;
+    state.hold = state.box?.state === "running" && holdsWork(mine) ? holdOf(await api.boxHold().catch(() => null)) : null;
     const running = new Map(seats.map((seat, i) => [seat.tokenId, (standings[i]?.standing.running ?? []).map((job) => job.jobId)]));
     if (tookJob(lastRunning, running)) took = true;
     lastRunning = running;
@@ -392,7 +397,7 @@ async function renewLocal(): Promise<void> {
 }
 
 function phaseFor(agent: Agent): Phase {
-  if (agent.tokenId === state.localToken && state.box) return localPhase(state.box, agent);
+  if (agent.tokenId === state.localToken && state.box) return localPhase(state.box, agent, new Date(), state.hold);
   return phaseOf(agent);
 }
 
@@ -838,10 +843,17 @@ function agentTrayHtml(agent: Agent): string {
   ].join("");
   return `<div class="agent-tray" id="tray-${esc(agent.tokenId)}">
     ${care ? `<div class="care">${care}</div>` : ""}
-    ${doing ? `<div class="tray-label">Now</div>${doing}` : `<div class="tray-label">Now</div><p class="idle">${esc(phaseFor(agent).kind === "ready" ? "Waiting for its next job." : statusLine(phaseFor(agent), agent))}</p>`}
+    ${doing ? `<div class="tray-label">Now</div>${doing}` : `<div class="tray-label">Now</div><p class="idle">${esc(nowWords(agent))}</p>`}
     ${done ? `<div class="tray-label">Lately</div>${done}` : ""}
     <div class="tray-foot"><span class="facts" title="${esc(record ? `${record.accepted} accepted, ${record.rejected} rejected, ${record.failed} failed` : "")}">${esc(facts)}</span><span class="links">${lendable(agent) ? `<button class="link" data-lend="${esc(agent.tokenId)}" title="Lend seat #${esc(agent.tokenId)}, to a friend or on imdLend (${shift("L")})">Lend seat</button>` : ""}<button class="link" data-explorer="/agents/${esc(agent.tokenId)}" title="Open on the explorer (O)">Explorer ›</button></span></div>
   </div>`;
+}
+
+/** What an agent with no job on it is doing, for its tray: waiting, or why it isn't, at more length than its row has room for. */
+function nowWords(agent: Agent): string {
+  const phase = phaseFor(agent);
+  if (phase.kind === "ready") return "Waiting for its next job.";
+  return phase.kind === "holding" ? holdingWords(phase.hold, agent) : statusLine(phase, agent);
 }
 
 /** Why a jailed agent takes fewer jobs and what fixes it: Restart here, or a command for its machine to copy. */
@@ -1024,7 +1036,7 @@ function noteHtml(): string {
 
 /** How the agents are, in a few words: "Both ready", "1 working · 1 ready", "1 ready · 1 offline". */
 function summaryOf(): string {
-  const word = (p: Phase) => (p.kind === "working" ? "working" : p.kind === "ready" ? "ready" : p.kind === "held" || p.kind === "paused" ? "paused" : p.kind === "offline" ? "offline" : p.kind === "changing" ? "starting" : "off");
+  const word = (p: Phase) => (p.kind === "working" ? "working" : p.kind === "ready" ? "ready" : p.kind === "held" || p.kind === "paused" || p.kind === "holding" ? "paused" : p.kind === "offline" ? "offline" : p.kind === "changing" ? "starting" : "off");
   const counts = new Map<string, number>();
   for (const agent of state.agents) counts.set(word(phaseFor(agent)), (counts.get(word(phaseFor(agent))) ?? 0) + 1);
   const n = state.agents.length;

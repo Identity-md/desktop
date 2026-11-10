@@ -110,6 +110,8 @@ export const boxUnlink = () => invoke<void>("box_unlink");
 export const boxRestart = (runtime: string) => invoke<void>("box_restart", { runtime });
 /** What a box made without today's flags runs on, if it can be made again right now. */
 export const boxRenewal = () => invoke<string | null>("box_renewal");
+/** The newest line the worker's self-test wrote in the box's log: why it holds its work, when it does. */
+export const boxHold = () => invoke<string | null>("box_hold");
 
 /** How far setting this computer's box up has got. On Windows Docker can wait on a restart, which finishes installing WSL. */
 export type Setup = { docker: "missing" | "stopped" | "running" | "restart" | "restart-wsl"; restart_ahead: boolean; image: boolean; worker: boolean; claude: boolean; device_key: string | null };
