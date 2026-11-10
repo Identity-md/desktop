@@ -2204,6 +2204,68 @@ fn worker_idle(line: &str) -> bool {
     line.split(" · ").nth(1) == Some("idle")
 }
 
+/// The newest line the worker's self-test wrote, its stamp aside: "self-test: You've hit your weekly limit · resets
+/// Nov 13, 4am (UTC). Holding work for 11m". The worker writes a hold as a warning and a pass as a plain line, so
+/// they come on two streams and only the stamp each begins with orders them.
+fn self_test_line(out: &str, err: &str) -> Option<String> {
+    out.lines()
+        .chain(err.lines())
+        .filter_map(|line| line.trim().split_once(' '))
+        .filter(|(stamp, words)| stamp.len() == 24 && stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T' && words.starts_with("self-test"))
+        .max_by(|a, b| a.0.cmp(b.0))
+        .map(|(_, words)| words.chars().filter(|c| !c.is_control()).take(300).collect())
+}
+
+/// Docker's CLI run for what it writes on both streams, each read as it comes so a long answer can't fill a pipe and
+/// stall; None when Docker is missing, refuses, or takes longer than `timeout`.
+fn docker_streams(args: &[&str], timeout: Duration) -> Option<(String, String)> {
+    use std::io::Read;
+    let mut command = docker_command()?;
+    command.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let (mut out, mut err) = (child.stdout.take()?, child.stderr.take()?);
+    let read_out = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = out.read_to_end(&mut text);
+        text
+    });
+    let read_err = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = err.read_to_end(&mut text);
+        text
+    });
+    let started = std::time::Instant::now();
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if started.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(40)),
+            Err(_) => break false,
+        }
+    };
+    let (out, err) = (read_out.join().ok()?, read_err.join().ok()?);
+    ok.then(|| (String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned()))
+}
+
+/// What the worker in this computer's box last said of its self-test, for the panel to say why an agent the network
+/// calls connected takes no work: its runtime at a limit, or its check failed. The log is the only place that says,
+/// and the panel asks only then. Four hours of an idle worker's lines, past the hour its longest wait between checks
+/// runs to.
+#[tauri::command]
+async fn box_hold() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (out, err) = docker_streams(&["logs", "--tail", "500", BOX_NAME], Duration::from_secs(10))?;
+        self_test_line(&out, &err)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// The runtime a box was started on, from `docker inspect`'s `.Config.Cmd`, if it is one this app starts.
 fn runtime_of(command: &str) -> Option<String> {
     let words: Vec<String> = serde_json::from_str(command).ok()?;
@@ -2899,7 +2961,7 @@ pub fn run() {
         .plugin(tauri_plugin_nspanel_init())
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
-            box_state, box_start, box_stop, box_restart, box_renewal, worker_releases, open_explorer,
+            box_state, box_start, box_stop, box_restart, box_renewal, box_hold, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_sign_in_code, box_sign_in_open, box_sign_in_cancel, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
             docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound, set_theme,
             restart_pc, set_open_at_login
@@ -3311,6 +3373,41 @@ mod tests {
     #[test]
     fn the_box_clears_what_jobs_leave_behind() {
         assert!(box_flags().iter().any(|flag| flag == "--init"));
+    }
+
+    /// This computer's box, asked what its worker's self-test last said: both streams of its log come back, a long
+    /// answer and all, and Docker refusing is no answer rather than a wait. Needs Docker and a box that has run.
+    #[test]
+    #[ignore]
+    fn reads_what_this_computers_worker_last_said_of_its_self_test() {
+        let (out, err) = super::docker_streams(&["logs", "--tail", "500", super::BOX_NAME], std::time::Duration::from_secs(10)).expect("the box's log");
+        println!("{} lines on one stream, {} on the other", out.lines().count(), err.lines().count());
+        assert!(out.lines().count() + err.lines().count() > 0);
+        println!("box_hold: {:?}", tauri::async_runtime::block_on(super::box_hold()));
+        assert!(tauri::async_runtime::block_on(super::box_hold()).is_some_and(|line| line.starts_with("self-test")));
+        assert_eq!(super::docker_streams(&["logs", "--tail", "1", "imd-no-such-box"], std::time::Duration::from_secs(10)), None);
+    }
+
+    #[test]
+    fn the_newest_self_test_line_is_found_across_both_streams() {
+        let passed = "2026-11-09T05:27:01.110Z self-test: passed 2m ago with 2.1.319 (Claude Code) on claude-fable-5-1; taking work, and checking again a day after that pass";
+        let alive = "2026-11-10T03:23:22.877Z alive 18m · idle · 0 submitted · fleet 1051 online, 1080 enrolled · holding work: rate limited or at capacity";
+        let held = "2026-11-10T03:10:47.656Z self-test: You've hit your weekly limit · resets Nov 13, 4am (UTC). Holding work for 11m";
+        let held_again = "2026-11-10T03:22:16.016Z self-test: You've hit your weekly limit · resets Nov 13, 4am (UTC). Holding work for 16m";
+        // a hold is a warning, on the other stream from the lines around it: the newest by its stamp, whichever stream it came on
+        let said = super::self_test_line(&format!("{passed}\n{alive}\n"), &format!("{held}\n{held_again}\n"));
+        assert_eq!(said.as_deref(), Some("self-test: You've hit your weekly limit · resets Nov 13, 4am (UTC). Holding work for 16m"));
+        // a pass after it is the newest, and holds nothing
+        let back = "2026-11-13T04:01:09.000Z self-test passed: ran one shell command; taking work again";
+        assert_eq!(super::self_test_line(&format!("{alive}\n{back}\n"), &format!("{held_again}\n")).as_deref(), Some("self-test passed: ran one shell command; taking work again"));
+        // nothing of the self-test's in the lines read, a line with no stamp, and a job's words that only mention one
+        assert_eq!(super::self_test_line(&format!("{alive}\n"), ""), None);
+        assert_eq!(super::self_test_line("self-test: no stamp before it\n", "2026-11-10T03:23:22.877Z   working: the self-test: of something else\n"), None);
+        assert_eq!(super::self_test_line("", ""), None);
+        // what it said reaches the panel as plain words, and no more of them than a line holds
+        let odd = format!("2026-11-10T03:22:16.016Z self-test: a\u{1b}[31mb{}", "x".repeat(400));
+        let said = super::self_test_line("", &odd).unwrap();
+        assert!(said.starts_with("self-test: a[31mb") && said.chars().count() == 300);
     }
 
     #[test]

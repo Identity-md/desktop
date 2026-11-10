@@ -52,6 +52,16 @@ export function installMock({ fixtures, scenario }) {
     if (scenario.outdated && path === `/seats/${scenario.outdated}/standing?queue=0` && body?.presence) body.presence.daemonVersion = "0.1.0+aca0ff06";
     // agents whose read jail does not hold: `jailed: ["12"]`
     if (scenario.jailed && body?.presence && scenario.jailed.some((t) => path === `/seats/${t}/standing?queue=0`)) body.presence.jail = { ok: false, detail: scenario.jailDetail ?? "Claude's sandbox needs bwrap and socat: run sudo imd sandbox once (it installs bubblewrap and socat), or install them yourself" };
+    // agents whose workers turn work away themselves, the network pausing nothing: `holding: ["12"]`; why, for this
+    // computer's, is `hold`, the line its box's log ends its self-test on
+    // every other agent takes work, whatever it was doing when the fixtures were read
+    if (path.endsWith("/standing?queue=0") && body?.standing) {
+      const holds = scenario.holding?.some((t) => path === `/seats/${t}/standing?queue=0`) ?? false;
+      if (holds) {
+        body.presence = { lastHeartbeatAt: new Date().toISOString(), runtimes: [{ id: "claude" }], ...body.presence, connected: true, stale: false, acceptingWork: false };
+        Object.assign(body.standing, { working: 0, running: [], pausedUntil: null, pausedByOwnerAt: null });
+      } else if (body.presence) body.presence.acceptingWork = true;
+    }
     // an agent at work: `working: { tokenId, nodeKey, objective, minutes }`
     const w = window.__working ?? scenario.working;
     if (w && path === `/seats/${w.tokenId}/standing?queue=0` && body?.standing) {
@@ -83,6 +93,7 @@ export function installMock({ fixtures, scenario }) {
         case "api_get": return answer(args.path);
         case "agent_svg": return fixtures.svg[args.tokenId] ?? null;
         case "box_state": return box;
+        case "box_hold": return scenario.hold ?? null;
         case "link_start": return { code: "K7QM4XJ2", expiresAt: new Date(Date.now() + 600000).toISOString(), relayOrigin: "https://api.imd.fun" };
         case "link_poll": return { status: 200, body: { status: "pending", wallet: null } };
         case "plugin:autostart|is_enabled": return true;

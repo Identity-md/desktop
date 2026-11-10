@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { localPhase, tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { limitOf, liftsAt, holdingWords, holdOf, dotOf, localPhase, tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -28,6 +28,114 @@ describe("an agent's state", () => {
     expect(statusLine(phaseOf(working, NOW), working, NOW)).toBe("Working on Site content check · 9 min");
     expect(statusLine({ kind: "held" }, null)).toBe("Paused · takes no new work");
     expect(stepTitle("audit_permissions")).toBe("Permissions audit");
+  });
+});
+
+describe("an agent holding its own work", () => {
+  const held = (presence: Partial<NonNullable<Standing["presence"]>> = {}, over: Partial<Standing["standing"]> = {}) => agent(standing(over, { acceptingWork: false, ...presence }));
+  // what Taylor's own agent's log and the network said on 2026-11-10 03:23Z, at Claude's weekly limit
+  const WEEKLY = "self-test: You've hit your weekly limit · resets Nov 13, 4am (UTC). Holding work for 16m";
+  const THEN = new Date("2026-11-10T03:23:00Z");
+
+  it("reads as holding, not ready, when its worker turns work away and the network pauses nothing", () => {
+    expect(phaseOf(held(), NOW)).toEqual({ kind: "holding", hold: null });
+    expect(phaseOf(agent(standing({}, { acceptingWork: true })), NOW).kind).toBe("ready");
+    expect(phaseOf(agent(standing()), NOW).kind).toBe("ready");
+    // a job on it, a pause, or being away each say more than that
+    expect(phaseOf(held({}, { working: 1 }), NOW).kind).toBe("working");
+    expect(phaseOf(held({}, { pausedUntil: "2026-10-13T12:10:00Z" }), NOW).kind).toBe("paused");
+    expect(phaseOf(held({}, { pausedByOwnerAt: "2026-10-13T11:00:00Z" }), NOW).kind).toBe("held");
+    expect(phaseOf(agent(standing({}, { acceptingWork: false, connected: false }), false), NOW).kind).toBe("offline");
+    expect(phaseOf(agent(standing({}, { acceptingWork: false, stale: true })), NOW).kind).toBe("ready");
+    expect(dotOf({ kind: "holding", hold: null })).toBe("warn");
+    expect(trayState([{ kind: "holding", hold: null }])).toBe("idle");
+  });
+
+  it("is this computer's to say why, from its box's log", () => {
+    const box = { state: "running" as const, installed: true, deviceKey: "k" };
+    expect(localPhase(box, held(), NOW, holdOf(WEEKLY))).toEqual({ kind: "holding", hold: { kind: "limit", said: "You've hit your weekly limit · resets Nov 13, 4am (UTC)" } });
+    // a worker that takes work is ready whatever an old line of its log says
+    expect(localPhase(box, agent(standing()), NOW, holdOf(WEEKLY)).kind).toBe("ready");
+  });
+
+  it("reads the worker's newest self-test line for what holds it", () => {
+    expect(holdOf(WEEKLY)).toEqual({ kind: "limit", said: "You've hit your weekly limit · resets Nov 13, 4am (UTC)" });
+    expect(holdOf("self-test failed, taking no work: Not logged in · Please run /login. Checking again in 10m, or at once on a restart")).toEqual({ kind: "fault", said: "Not logged in · Please run /login" });
+    expect(holdOf("self-test: asking the runtime to run one shell command on claude-fable-5-1 within a minute, before taking work")).toEqual({ kind: "checking" });
+    // a pass holds nothing, and neither does no line
+    expect(holdOf("self-test passed: ran one shell command; taking work again")).toBeNull();
+    expect(holdOf("self-test: passed 2m ago with 2.1.319 (Claude Code) on claude-fable-5-1; taking work, and checking again a day after that pass")).toBeNull();
+    expect(holdOf(null)).toBeNull();
+    expect(holdOf("")).toBeNull();
+    expect(holdOf(`self-test: ${"x".repeat(400)}. Holding work for 5m`)).toEqual({ kind: "limit", said: "x".repeat(160) });
+  });
+
+  it("reads which limit and when it lifts, from a time said in UTC", () => {
+    expect(limitOf("You've hit your weekly limit · resets Nov 13, 4am (UTC)", THEN)).toEqual({ which: "weekly", lifts: new Date("2026-11-13T04:00:00Z") });
+    expect(limitOf("You've hit your session limit · resets 11pm (UTC)", THEN)).toEqual({ which: "session", lifts: new Date("2026-11-10T23:00:00Z") });
+    // an hour already past today is tomorrow's, and a day already past this year is next year's
+    expect(limitOf("You've hit your session limit · resets 2am (UTC)", THEN).lifts).toEqual(new Date("2026-11-11T02:00:00Z"));
+    expect(limitOf("You've hit your weekly limit · resets Jan 2, 9am (UTC)", new Date("2026-12-30T00:00:00Z")).lifts).toEqual(new Date("2027-01-02T09:00:00Z"));
+    expect(limitOf("5-hour limit reached ∙ resets 3:30pm (UTC)", THEN)).toEqual({ which: "5-hour", lifts: new Date("2026-11-10T15:30:00Z") });
+    expect(limitOf("You've hit your weekly limit · resets 12am (UTC)", THEN).lifts).toEqual(new Date("2026-11-11T00:00:00Z"));
+    expect(limitOf("You've hit your weekly limit · resets 12pm (UTC)", THEN).lifts).toEqual(new Date("2026-11-10T12:00:00Z"));
+    // no time, a time in another zone's words, or a month that is none: the limit, and no hour made up for it
+    expect(limitOf("You've hit your usage limit. Try again later.", THEN)).toEqual({ which: null, lifts: null });
+    expect(limitOf("You've hit your weekly limit · resets Nov 13, 4am (America/New_York)", THEN)).toEqual({ which: "weekly", lifts: null });
+    expect(limitOf("You've hit your weekly limit · resets Foo 13, 4am (UTC)", THEN).lifts).toBeNull();
+    expect(limitOf("rate limited", THEN)).toEqual({ which: null, lifts: null });
+  });
+
+  it("says it under the agent and in its tray", () => {
+    const limit = holdOf(WEEKLY);
+    const lifts = new Date("2026-11-13T04:00:00Z");
+    expect(statusLine({ kind: "holding", hold: limit }, held(), THEN)).toBe(`At Claude's limit · back ${liftsAt(lifts, THEN)}`);
+    expect(holdingWords(limit, held(), THEN)).toBe(`Claude's weekly limit is used up. It takes jobs again ${liftsAt(lifts, THEN, true)}.`);
+    // once its hour has passed, or where it names none, only what it is
+    expect(statusLine({ kind: "holding", hold: limit }, held(), new Date("2026-11-13T05:00:00Z"))).toBe("At Claude's limit");
+    expect(statusLine({ kind: "holding", hold: { kind: "limit", said: "You've hit your usage limit." } }, held(), THEN)).toBe("At Claude's limit");
+    expect(holdingWords({ kind: "limit", said: "You've hit your usage limit." }, held(), THEN)).toBe("Claude's limit is used up. It takes jobs again once that lifts. Claude said: You've hit your usage limit.");
+    expect(statusLine({ kind: "holding", hold: limit }, held({ runtimes: [{ id: "codex" }] }), THEN)).toMatch(/^At Codex's limit · back /);
+    expect(statusLine({ kind: "holding", hold: limit }, held({ runtimes: [] }), THEN)).toMatch(/^At its limit · back /);
+    expect(holdingWords(limit, held({ runtimes: [] }), THEN)).toMatch(/^Its runtime's weekly limit is used up\. It takes jobs again /);
+    // a row has room for it at its longest: a day, and an hour with its minutes
+    expect(statusLine({ kind: "holding", hold: { kind: "limit", said: "You've hit your weekly limit · resets Nov 12, 11:30pm (UTC)" } }, held(), THEN).length).toBeLessThanOrEqual(37);
+    // a provider with no room is not its owner's limit, and says so
+    const full = { kind: "limit" as const, said: "API Error: 529 Overloaded" };
+    expect(statusLine({ kind: "holding", hold: full }, held(), THEN)).toBe("Claude is at capacity");
+    expect(holdingWords(full, held(), THEN)).toBe("Claude is at capacity. It asks again every few minutes, and takes jobs once it answers. Claude said: API Error: 529 Overloaded");
+    expect(statusLine({ kind: "holding", hold: { kind: "limit", said: "rate limited" } }, held(), THEN)).toBe("At Claude's limit");
+    // a failed check, a check still out, and an agent whose log is another machine's
+    expect(statusLine({ kind: "holding", hold: { kind: "fault", said: "Not logged in" } }, held(), THEN)).toBe("Not taking jobs · Claude failed its check");
+    expect(holdingWords({ kind: "fault", said: "Not logged in · Please run /login" }, held(), THEN)).toBe("Claude failed the check a worker runs before taking jobs: Not logged in · Please run /login");
+    expect(statusLine({ kind: "holding", hold: { kind: "checking" } }, held(), THEN)).toBe("Checking Claude before taking jobs");
+    expect(statusLine({ kind: "holding", hold: null }, held(), THEN)).toBe("Not taking jobs right now");
+    expect(holdingWords(null, held(), THEN)).toBe("Its worker is connected but turning jobs away: at a limit, updating, or checking itself. Its log says which.");
+  });
+
+  it("says when in the words of someone here: the hour today, the day this week, the date past it", () => {
+    const now = new Date(2026, 10, 9, 22, 23);
+    const [tonight, halfPast, thursday, later] = [new Date(2026, 10, 9, 23, 0), new Date(2026, 10, 9, 23, 30), new Date(2026, 10, 12, 23, 0), new Date(2026, 10, 21, 23, 0)];
+    const hour = (at: Date) => at.toLocaleTimeString([], { hour: "numeric" });
+    const day = (at: Date, weekday: "short" | "long") => at.toLocaleDateString([], { weekday });
+    const date = (at: Date) => at.toLocaleDateString([], { month: "short", day: "numeric" });
+    expect(liftsAt(tonight, now)).toBe(hour(tonight));
+    expect(liftsAt(halfPast, now)).toBe(halfPast.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
+    expect(liftsAt(thursday, now)).toBe(`${day(thursday, "short")} ${hour(thursday)}`);
+    expect(liftsAt(later, now)).toBe(date(later));
+    // at length, for a sentence that ends "again …"
+    expect(liftsAt(tonight, now, true)).toBe(`at ${hour(tonight)}`);
+    expect(liftsAt(thursday, now, true)).toBe(`${day(thursday, "long")} at ${hour(thursday)}`);
+    expect(liftsAt(later, now, true)).toBe(`${date(later)} at ${hour(later)}`);
+    // a day already gone is said by its date, never as a weekday to come
+    expect(liftsAt(new Date(2026, 10, 7, 23, 0), now)).toBe(date(new Date(2026, 10, 7, 23, 0)));
+    // and in this country's words, where the computer speaks them
+    if (new Intl.DateTimeFormat().resolvedOptions().locale === "en-US") {
+      expect(liftsAt(thursday, now)).toMatch(/^Thu 11\sPM$/);
+      expect(liftsAt(thursday, now, true)).toMatch(/^Thursday at 11\sPM$/);
+      expect(liftsAt(halfPast, now)).toMatch(/^11:30\sPM$/);
+      expect(liftsAt(later, now)).toBe("Nov 21");
+    }
   });
 });
 
