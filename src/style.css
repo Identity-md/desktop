@@ -468,6 +468,8 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 .footnote { margin: 0; padding: 6px 14px 0; font-size: 11px; line-height: 1.45; color: var(--ink-3); }
 .sub { display: block; font-size: 11px; color: var(--ink-2); }
 .sub.bad { color: var(--danger); }
+/* a key is one long word: it wraps anywhere rather than past the line's edge */
+.sub.key-words { overflow-wrap: anywhere; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; }
 /* a field with what went wrong under it, as a line's title has its sub */
 .field-stack { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .linking { padding: 12px 14px; }
