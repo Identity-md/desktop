@@ -6,7 +6,7 @@ import * as api from "./api";
 import { lendingOn, lendReader, type Lending, type Terms } from "./lending";
 import { faceFor, loadFace } from "./masks";
 import { ctrl, mac, shift, windows } from "./platform";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow, holdOf, holdsWork, holdingWords, type Hold } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow, holdOf, holdsWork, holdingWords, runtimeName, type Hold } from "./model";
 
 // ---------------------------------------------------------------------------------------------
 // What the app remembers between runs: wallets, the network it signs for, names. Nothing secret:
@@ -833,6 +833,8 @@ function agentTrayHtml(agent: Agent): string {
   const failing = (agent.standing?.standing.consecutiveFailures ?? 0) > 0 ? failureWords(agent.standing?.standing.recentFailures?.[0]) : null;
   const behind = outdated(agent);
   const jailed = jailWords(agent.standing);
+  // this computer's runtime signed out: setup's Connect Claude signs it in again, and the agent takes jobs at once
+  const signedOut = local && signedOutHere();
   // what wants doing comes first: an older worker, a failure, work it cannot take, or this computer's own Restart
   const restart = local
     ? `<button class="pill" data-action="restart" title="Restart this computer's agent (U)" ${state.restartWhenIdle ? "disabled" : ""}>${state.restartWhenIdle ? "Restarts after this job" : phaseFor(agent).kind === "working" ? "Restart after this job" : behind ? "Update" : "Restart"}</button>`
@@ -847,6 +849,7 @@ function agentTrayHtml(agent: Agent): string {
     lent ? lendingHtml(lent) : "",
     // one label for both, since on means it takes jobs either way; under it, what off does to this one
     toggle ? `<div class="care-row control"><span class="care-text">Take jobs<span class="sub">${here ? "Off stops it on this computer" : "Off pauses it after its current job"}</span></span>${toggle}</div>` : "",
+    signedOut ? `<div class="care-row bad"><span class="care-text">${esc(runtimeOf(agent))} is signed out</span><button class="pill" data-action="setup" title="Sign in again (S)">Sign in</button></div>` : "",
     failing ? `<div class="care-row bad"><span class="care-text" title="${esc(failing)}">Its last job failed: ${esc(failing)}</span>${local && !behind ? restart : ""}</div>` : "",
     behind ? `<div class="care-row warn"><span class="care-text">${esc(behindText)}</span>${restart}</div>` : "",
     // why, in plain words, and the fix: on this computer a restart starts the box with its sandbox; elsewhere,
@@ -1343,6 +1346,11 @@ function juryLineHtml(here: string, jury: api.Jury, rpc: boolean): string {
   const join = `<button class="pill" data-action="jury-join" title="Join the jury (J)">Join</button>`;
   return state.jurySaid ? line(state.jurySaid, join, true) : line("Check and approve onchain actions", join);
 }
+
+/** This computer's runtime signed out, as its worker's check said: its login ran out, and only signing in again renews it. */
+const signedOutHere = () => Boolean(state.hold?.kind === "fault" && state.hold.signedOut && state.box?.state === "running");
+/** The runtime this computer's agent thinks with, by name, as the network has it. */
+const runtimeOf = (agent: Agent) => runtimeName(agent) ?? "Claude";
 
 /** K: the key's field, out and ready to paste into. */
 function openRpcField(): void {
@@ -1874,7 +1882,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "e") return toggleRewards();
   if (event.key === "u") return void restartLocal();
   if (event.key === "U") return updateNow();
-  if (event.key === "s" && (!state.box?.installed || state.unpaired || state.settingUp || state.pairingOut || setupUnfinished())) return void api.openSetup();
+  if (event.key === "s" && (!state.box?.installed || state.unpaired || state.settingUp || state.pairingOut || setupUnfinished() || signedOutHere())) return void api.openSetup();
   if (event.key === "r") return void refresh(true);
   if (event.key === "a" && state.view === "settings") return setTheme(THEMES[(THEMES.findIndex(([t]) => t === settings.theme) + 1) % THEMES.length]![0]);
   if (event.key === "Enter") {

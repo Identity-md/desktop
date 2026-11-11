@@ -825,7 +825,7 @@ async fn setup_state(restart: bool) -> Setup {
         if !run_docker(&["image", "inspect", "--format", "{{.Id}}", BOX_IMAGE], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
             return none("running");
         }
-        let look = r#"command -v imd >/dev/null && echo worker; test -s "$HOME/.claude/.credentials.json" && echo claude; command -v imd >/dev/null && imd whoami 2>/dev/null | head -1; true"#;
+        let look = r#"command -v imd >/dev/null && echo worker; test -s "$HOME/.claude/.credentials.json" && echo claude && stat -c 'claude-at %Y' "$HOME/.claude/.credentials.json"; command -v imd >/dev/null && imd whoami 2>/dev/null | head -1; true"#;
         let running = run_docker(&["inspect", "-f", "{{.State.Running}}", BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, out)| ok && out == "true");
         let answer = if running {
             run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", look], Duration::from_secs(30))
@@ -836,12 +836,15 @@ async fn setup_state(restart: bool) -> Setup {
             run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(60))
         };
         let lines: Vec<String> = answer.filter(|(ok, _)| *ok).map(|(_, out)| out.lines().map(str::to_string).collect()).unwrap_or_default();
+        // A sign-in that ran out still leaves its file: the worker's check, newer than the file, is what says it did.
+        let signed_at = lines.iter().find_map(|l| l.strip_prefix("claude-at ")).and_then(|secs| secs.trim().parse::<u64>().ok()).map(|secs| secs * 1000);
+        let ran_out = running && signed_out_since(signed_at);
         Setup {
             docker: "running",
             restart_ahead: false,
             image: true,
             worker: lines.iter().any(|l| l == "worker"),
-            claude: lines.iter().any(|l| l == "claude"),
+            claude: lines.iter().any(|l| l == "claude") && !ran_out,
             device_key: lines.into_iter().find(|l| l.len() == 64 && l.chars().all(|c| c.is_ascii_hexdigit())),
         }
     })
@@ -1646,6 +1649,11 @@ async fn box_sign_in(app: tauri::AppHandle) -> Result<(), String> {
             let _ = app.emit("box-signin-page", ());
             let _ = app.opener().open_url(page, None::<&str>);
         });
+        // signed in again on a box whose worker turned jobs away for want of it: its worker checks at once on a restart,
+        // and a worker held so has no job to lose
+        if signed.is_ok() && run_docker(&["inspect", "-f", "{{.State.Running}}", BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, out)| ok && out == "true") && signed_out_since(None) {
+            let _ = run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90));
+        }
         signed.map_err(|why| if SIGN_IN_STOPPED.load(Ordering::SeqCst) == round { "timed out".into() } else { why })
     })
     .await
@@ -1689,6 +1697,32 @@ fn sign_in_with(args: &[String], opened: impl Fn(&str)) -> Result<(), String> {
     // "Login failed: …", or Docker's own error, comes on stderr
     let errors = errors.join().unwrap_or_default();
     Err(errors.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("Claude's sign-in stopped").to_string())
+}
+
+/// A check the worker failed on its runtime's sign-in, as Claude Code words one: a login past its time limit, which
+/// nothing in the box renews, one signed out, or none.
+fn signed_out_words(words: &str) -> bool {
+    words.starts_with("self-test failed")
+        && ["Failed to authenticate", "claude auth login", "run /login", "not logged in", "Not logged in", "signed out", "OAuth token has expired", "OAuth token has been revoked"].iter().any(|said| words.contains(said))
+}
+
+/// When the worker's newest check failed on its sign-in, in milliseconds; None when its newest check said anything else.
+fn signed_out_at(out: &str, err: &str) -> Option<u64> {
+    let (stamp, words) = out
+        .lines()
+        .chain(err.lines())
+        .filter_map(|line| line.trim().split_once(' '))
+        .filter(|(stamp, words)| stamp.len() == 24 && stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T' && words.starts_with("self-test"))
+        .max_by(|a, b| a.0.cmp(b.0))?;
+    if signed_out_words(words) { iso_ms(stamp) } else { None }
+}
+
+/// Whether the running box's worker last failed its check on its sign-in, after `signed_at`, the moment its sign-in was
+/// last saved, where that is known: a sign-in since then has yet to be checked, and counts.
+fn signed_out_since(signed_at: Option<u64>) -> bool {
+    docker_streams(&["logs", "--tail", "500", BOX_NAME], Duration::from_secs(10))
+        .and_then(|(out, err)| signed_out_at(&out, &err))
+        .is_some_and(|at| signed_at.is_none_or(|signed| at > signed))
 }
 
 /// Claude's own sign-in page, the only one a sign-in opens: https, on Claude's or Anthropic's own host, in one plain line.
@@ -3837,6 +3871,22 @@ mod tests {
         let odd = format!("2026-11-10T03:22:16.016Z self-test: a\u{1b}[31mb{}", "x".repeat(400));
         let said = super::self_test_line("", &odd).unwrap();
         assert!(said.starts_with("self-test: a[31mb") && said.chars().count() == 300);
+    }
+
+    #[test]
+    fn a_sign_in_that_ran_out_is_told_from_other_failed_checks() {
+        let ran_out = "2026-11-11T20:36:40.512Z self-test failed, taking no work: Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again, or use `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN for unattended jobs. Checking again in 11m, or at once on a restart";
+        let alive = "2026-11-11T20:37:10.222Z alive 1m · idle · 0 submitted · fleet 1050 online, 1083 enrolled · taking no work: self-test failed (signed out)";
+        let at = super::iso_ms("2026-11-11T20:36:40.512Z");
+        assert_eq!(super::signed_out_at(&format!("{alive}\n"), &format!("{ran_out}\n")), at);
+        // a pass after it, or a failure of another kind, is the newest word
+        let passed = "2026-11-11T20:40:57.256Z self-test passed: claude-fable-5-1 ran a shell command and answered in 3.5s";
+        assert_eq!(super::signed_out_at(&format!("{passed}\n"), &format!("{ran_out}\n")), None);
+        let limit = "2026-11-11T20:38:00.000Z self-test: You've hit your weekly limit · resets Nov 13, 4am (UTC). Holding work for 16m";
+        assert_eq!(super::signed_out_at(&format!("{limit}\n"), &format!("{ran_out}\n")), None);
+        assert!(!super::signed_out_words("self-test failed, taking no work: the runtime answered nothing within a minute. Checking again in 10m"));
+        assert!(super::signed_out_words("self-test failed, taking no work: Not logged in · Please run /login. Checking again in 10m"));
+        assert_eq!(super::signed_out_at("", ""), None);
     }
 
     #[test]

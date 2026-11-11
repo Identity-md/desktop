@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { limitOf, liftsAt, holdingWords, holdOf, dotOf, localPhase, tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
+import { limitOf, liftsAt, holdingLine, holdingWords, holdOf, dotOf, localPhase, tookJob, watchKind, watchParts, acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, failureWords, jailFix, jailWords, judgedRate, modelName, newerRelease, phaseOf, runLength, setupErrorWords, statusLine, stepTitle, sumOf, trayState, upSince, usdText, worthOf, type Agent, type Standing } from "./model";
 
 const standing = (over: Partial<Standing["standing"]> = {}, presence: Partial<NonNullable<Standing["presence"]>> | null = {}): Standing => ({
   enrollment: { status: "active", tokenId: "12" },
@@ -60,7 +60,16 @@ describe("an agent holding its own work", () => {
 
   it("reads the worker's newest self-test line for what holds it", () => {
     expect(holdOf(WEEKLY)).toEqual({ kind: "limit", said: "You've hit your weekly limit · resets Nov 13, 4am (UTC)" });
-    expect(holdOf("self-test failed, taking no work: Not logged in · Please run /login. Checking again in 10m, or at once on a restart")).toEqual({ kind: "fault", said: "Not logged in · Please run /login" });
+    expect(holdOf("self-test failed, taking no work: Not logged in · Please run /login. Checking again in 10m, or at once on a restart")).toEqual({ kind: "fault", said: "Not logged in · Please run /login", signedOut: true });
+    // a login past its time limit, word for word as a box said it on 2026-11-11: signed out, and Sign in fixes it
+    const ranOut = holdOf("self-test failed, taking no work: Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again, or use `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN for unattended jobs. Checking again in 11m, or at once on a restart");
+    expect(ranOut).toMatchObject({ kind: "fault", signedOut: true });
+    expect(holdingLine(ranOut, null)).toBe("Not taking jobs · Claude is signed out");
+    expect(holdingWords(ranOut, null)).toBe("Claude's sign-in in this box ran out, so it takes no jobs. Sign in again, and it takes jobs at once.");
+    // any other failed check is still only that
+    const other = holdOf("self-test failed, taking no work: the runtime answered nothing within a minute. Checking again in 10m");
+    expect(other).toEqual({ kind: "fault", said: "the runtime answered nothing within a minute" });
+    expect(holdingLine(other, null)).toBe("Not taking jobs · its runtime failed its check");
     expect(holdOf("self-test: asking the runtime to run one shell command on claude-fable-5-1 within a minute, before taking work")).toEqual({ kind: "checking" });
     // a pass holds nothing, and neither does no line
     expect(holdOf("self-test passed: ran one shell command; taking work again")).toBeNull();
