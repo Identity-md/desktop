@@ -102,6 +102,18 @@ const state = {
   openAtLogin: false,
   /** A fix just copied, which its button says for a moment. */
   copied: null as string | null,
+  /** This computer's agent's own RPC endpoints, read as Settings opens; the key's field, out; and a key being checked. */
+  rpc: null as api.Rpc | null,
+  rpcField: false,
+  rpcBusy: false,
+  /** What went wrong with the last key, said under its field. */
+  rpcSaid: null as string | null,
+  /** This computer's agent on IMD's jury, read as Settings opens; joining; and the link a join waits at for its signature. */
+  jury: null as api.Jury | null,
+  joining: false,
+  juryLink: null as api.JuryLink | null,
+  /** Why the last join didn't, said on the jury's line. */
+  jurySaid: null as string | null,
   loaded: false,
 };
 
@@ -1270,6 +1282,7 @@ function settingsHtml(): string {
       <span></span>
     </header>
     ${agentSettingsHtml()}
+    ${computerHtml()}
     ${walletHtml()}
     <section class="card list spaced">
       <label class="line"><span>Open at login</span><button class="switch${state.openAtLogin ? " on" : ""}" role="switch" aria-checked="${state.openAtLogin}" data-action="login"><span></span></button></label>
@@ -1282,6 +1295,111 @@ function settingsHtml(): string {
 }
 
 const THEMES: Array<[api.Theme, string]> = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
+
+// ---------------------------------------------------------------------------------------------
+// This computer's agent's own settings: its RPC endpoints, and a seat on IMD's jury. Each is a
+// command in its box, so they show only while the box runs.
+// ---------------------------------------------------------------------------------------------
+
+/** The chains `imd rpc setup` fills from one Alchemy key, by id. */
+const CHAIN_NAMES: Record<string, string> = { "1": "Ethereum", "8453": "Base", "4663": "Robinhood Chain" };
+const hereRunning = () => Boolean(state.localToken && state.box?.state === "running" && !state.unpaired);
+
+/** Its RPC and its seat on the jury, read from its box. */
+async function readComputer(): Promise<void> {
+  if (!hereRunning()) return;
+  const [rpc, jury] = await Promise.all([api.rpcState().catch(() => null), api.juryState().catch(() => null)]);
+  state.rpc = rpc;
+  state.jury = jury;
+  if (jury?.link && !state.juryLink) state.juryLink = jury.link;
+  render();
+}
+
+/** Named for what each does, as the lines below are, so no heading is needed. Drawn once the box has answered. */
+function computerHtml(): string {
+  if (!hereRunning() || !state.jury) return "";
+  const named = (state.rpc?.chains ?? []).map((id) => CHAIN_NAMES[id]).filter((name): name is string => Boolean(name));
+  // what went wrong with a key goes under its field, where the next one is pasted
+  const said = state.rpcSaid ? `<span class="sub bad" role="status">${esc(state.rpcSaid)}</span>` : "";
+  const rpc = state.rpcField
+    ? `<form class="line" data-form="rpc"><span class="field-stack"><input class="inline-input" data-field="rpc" type="password" placeholder="Paste an Alchemy key" spellcheck="false" autocomplete="off" aria-label="Alchemy API key">${said}</span><button type="button" class="link" data-action="alchemy" title="Alchemy's sign-up: one free key covers all three chains">Get one</button><button class="pill" type="submit" title="Save (Enter)" ${state.rpcBusy ? "disabled" : ""}>${state.rpcBusy ? "Checking…" : "Save"}</button></form>`
+    : `<div class="line"><span>RPC<span class="sub">${esc(named.length ? named.join(", ") : "One Alchemy key, for more jobs")}</span></span><button class="pill" data-action="rpc" title="${named.length ? "Change the key" : "Add an Alchemy key"} (K)">${named.length ? "Change" : "Add key"}</button></div>`;
+  return `<section class="card list spaced">${rpc}${juryLineHtml(state.localToken!, state.jury, named.length > 0)}</section>`;
+}
+
+function juryLineHtml(here: string, jury: api.Jury, rpc: boolean): string {
+  const line = (sub: string, button = "", bad = false) => `<div class="line"><span>Jury<span class="sub${bad ? " bad" : ""}"${bad ? ' role="status"' : ""}>${esc(sub)}</span></span>${button}</div>`;
+  if (state.juryLink) {
+    return line(`Sign with #${here}'s wallet`, `<span class="line-value"><button class="link" data-action="jury-cancel" title="Cancel">Cancel</button><button class="pill" data-action="jury-open" title="Open the link again (J)">Open link</button></span>`);
+  }
+  if (state.joining) return line("Making its key…", `<button class="pill" disabled>Joining…</button>`);
+  if (jury.joined) {
+    const reporting = jury.key && jury.said_secs !== null && jury.said_secs < 120;
+    return line(!rpc ? "Joined · add RPC so it can check votes" : reporting ? `Joined · key ${jury.key!.slice(0, 6)}…${jury.key!.slice(-4)}` : "Joined · starting");
+  }
+  // an imdLend vault holds a borrowed seat, and a vault can't sign for a key
+  if (state.lendings.has(here)) return line("Its owner's to join: the seat is on loan");
+  if (!jury.able) return line("Restart this agent first", `<button class="pill" data-action="restart" title="Restart (U)">Restart</button>`);
+  const join = `<button class="pill" data-action="jury-join" title="Join the jury (J)">Join</button>`;
+  return state.jurySaid ? line(state.jurySaid, join, true) : line("Check and approve onchain actions", join);
+}
+
+/** K: the key's field, out and ready to paste into. */
+function openRpcField(): void {
+  if (!hereRunning() || !state.jury) return;
+  state.rpcField = true;
+  render();
+  app.querySelector<HTMLInputElement>("[data-field=rpc]")?.focus();
+}
+
+/** A key saved: each chain checked in the box, and what came of it said in a line. */
+async function saveRpc(input: HTMLInputElement): Promise<void> {
+  const key = input.value.trim();
+  if (!key || state.rpcBusy) return;
+  state.rpcBusy = true;
+  state.rpcSaid = null;
+  render();
+  try {
+    const set = await api.rpcSetup(key);
+    input.value = "";
+    const off = set.chains.filter((chain) => chain.state === "none").map((chain) => chain.name);
+    state.rpcSaid = set.refused
+      ? "Alchemy refused that key."
+      : off.length
+        ? `${off.join(" and ")} ${off.length === 1 ? "isn't" : "aren't"} on for this key. Turn ${off.length === 1 ? "it" : "them"} on at Alchemy.`
+        : null;
+  } catch (error) {
+    state.rpcSaid = `Couldn't save it: ${String(error).replace(/^Error: /, "")}`;
+  } finally {
+    state.rpcBusy = false;
+    // saved, the field goes and the line names the chains; short, it stays for the same key again
+    if (!state.rpcSaid) state.rpcField = false;
+    state.rpc = await api.rpcState().catch(() => state.rpc);
+    render();
+  }
+}
+
+/** J: joins, or opens the link a join waits at. */
+async function joinJury(): Promise<void> {
+  if (state.juryLink) return void api.juryOpen().catch(() => undefined);
+  if (state.joining || !hereRunning() || !state.jury?.able || state.jury.joined) return;
+  state.joining = true;
+  state.jurySaid = null;
+  render();
+  try {
+    await api.juryJoin();
+    // the juror says its key within a minute of starting
+    setTimeout(() => { if (state.view === "settings") void readComputer(); }, 40_000);
+  } catch (error) {
+    const why = String(error).replace(/^Error: /, "");
+    if (why !== "stopped") state.jurySaid = why;
+  } finally {
+    state.joining = false;
+    state.juryLink = null;
+    await readComputer();
+    render();
+  }
+}
 
 function setTheme(theme: api.Theme): void {
   settings.theme = theme;
@@ -1514,6 +1632,8 @@ void listen<string>("update-available", (event) => { state.update = event.payloa
 void listen<string | null>("setup-progress", (event) => { state.settingUp = event.payload; render(); });
 // a pairing ended, its agent started or not: read again, so the agent shows at once
 void listen("box-pair-ended", () => void refresh(true));
+// a join's link, each time one comes, and none once it has ended
+void listen<api.JuryLink | null>("jury-link", (event) => { state.juryLink = event.payload; render(); });
 
 void listen<boolean>("panel-shown", (event) => {
   playIn(event.payload === true);
@@ -1530,6 +1650,7 @@ function openSettings(): void {
   void autostartIsOn().then((on) => { state.openAtLogin = on; render(); }).catch(() => undefined);
   // Settings says at once whether a newer version is out, rather than at the six-hourly check
   void api.updateCheck().then((version) => { state.update = version; render(); }).catch(() => undefined);
+  void readComputer();
   render();
 }
 
@@ -1617,6 +1738,10 @@ app.addEventListener("click", (event) => {
   if (action === "cancel") { state.linking = null; return render(); }
   if (action === "disconnect") return void disconnect();
   if (action === "quit") return void api.quit();
+  if (action === "rpc") return openRpcField();
+  if (action === "alchemy") return void api.openAlchemy().catch(() => undefined);
+  if (action === "jury-join" || action === "jury-open") return void joinJury();
+  if (action === "jury-cancel") return void api.juryCancel().catch(() => undefined);
   if (action === "theme") return setTheme(target.closest<HTMLElement>("[data-theme]")!.dataset.theme as api.Theme);
   if (action === "sounds") {
     event.preventDefault();
@@ -1691,6 +1816,8 @@ app.addEventListener("focusout", (event) => { if ((event.target as HTMLElement).
 
 app.addEventListener("submit", (event) => {
   event.preventDefault();
+  const key = (event.target as HTMLElement).querySelector<HTMLInputElement>("[data-field=rpc]");
+  if (key) return void saveRpc(key);
   const input = (event.target as HTMLElement).querySelector<HTMLInputElement>("[data-field=add]");
   // everything typed was found: the field empties for the next
   if (input) void watch(input.value).then((all) => { if (all) input.value = ""; });
@@ -1706,6 +1833,8 @@ app.addEventListener("change", (event) => {
 
 window.addEventListener("keydown", (event) => {
   if ((event.target as HTMLElement).tagName === "INPUT") {
+    // the key's field goes away with what was typed in it
+    if (event.key === "Escape" && (event.target as HTMLElement).dataset.field === "rpc" && !state.rpcBusy) { state.rpcField = false; state.rpcSaid = null; return render(); }
     // a name is kept as it is left: Enter keeps it too
     if (event.key === "Escape" || (event.key === "Enter" && (event.target as HTMLElement).dataset.name)) (event.target as HTMLElement).blur();
     return;
@@ -1737,6 +1866,8 @@ window.addEventListener("keydown", (event) => {
     if (event.key === "l") return void listSeat(state.lending);
   }
   if (event.key === "L" && state.view === "home") return openLend(state.openAgent);
+  if (state.view === "settings" && event.key === "k") { event.preventDefault(); return openRpcField(); }
+  if (state.view === "settings" && event.key === "j") return void joinJury();
   if (event.key === "w") { event.preventDefault(); return focusWatch(); }
   if (event.key === "l") return void connect();
   if (event.key === "c") return claim();
@@ -1779,7 +1910,7 @@ window.addEventListener("keydown", (event) => {
 
 // The panel closes when it loses focus, as a menu does, or on a click in the room around it, and reads
 // again whenever it opens.
-window.addEventListener("blur", () => { if (!state.linking) close(); });
+window.addEventListener("blur", () => { if (!state.linking && !state.joining) close(); });
 document.addEventListener("pointerdown", (event) => { if (!panel.contains(event.target as Node)) close(); });
 window.addEventListener("focus", () => {
   if (closing) playIn(above);

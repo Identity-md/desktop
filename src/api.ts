@@ -209,3 +209,22 @@ export async function ensWallet(name: string): Promise<string | null | "unreache
   return wallet && /^0x[0-9a-f]{40}$/.test(wallet) ? wallet : null;
 }
 export const setTrayState = (state: string) => invoke<void>("set_tray_state", { state });
+
+/** This computer's own RPC endpoints, by chain id, and whether goal jobs may read through them. */
+export type Rpc = { chains: string[]; goals: boolean };
+export const rpcState = () => invoke<Rpc | null>("rpc_state");
+/** One chain after a key is checked: "ok" keeps the whole history, "recent" serves without it, "none" has no endpoint. */
+export type RpcChain = { name: string; state: "ok" | "recent" | "none"; said: string };
+/** Ethereum, Base and Robinhood Chain from one Alchemy key, each checked. The key goes to the box and nowhere else. */
+export const rpcSetup = (key: string) => invoke<{ chains: RpcChain[]; refused: boolean }>("rpc_setup", { key });
+export const openAlchemy = () => invoke<void>("open_alchemy");
+
+/** A setup's link, waiting for the seat's holder to sign, until a moment in milliseconds. */
+export type JuryLink = { url: string; until: number };
+/** This computer's agent on IMD's jury: whether its box can hold a juror, whether one is set up, and what it says. */
+export type Jury = { able: boolean; joined: boolean; key: string | null; seat: string | null; said_secs: number | null; chains: string[]; link: JuryLink | null };
+export const juryState = () => invoke<Jury | null>("jury_state");
+/** Joins: the key is made in the box, the link opens in the browser and comes as `jury-link`; ends joined, or with why not. */
+export const juryJoin = () => invoke<void>("jury_join");
+export const juryOpen = () => invoke<void>("jury_open");
+export const juryCancel = () => invoke<void>("jury_cancel");

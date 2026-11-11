@@ -467,6 +467,9 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 .list form.line .pill { margin-right: -6px; }
 .footnote { margin: 0; padding: 6px 14px 0; font-size: 11px; line-height: 1.45; color: var(--ink-3); }
 .sub { display: block; font-size: 11px; color: var(--ink-2); }
+.sub.bad { color: var(--danger); }
+/* a field with what went wrong under it, as a line's title has its sub */
+.field-stack { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .linking { padding: 12px 14px; }
 .linking-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
 .code { margin: 8px 0 10px; font: 600 24px/1.2 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 0.14em; user-select: text; -webkit-user-select: text; }
