@@ -825,7 +825,7 @@ async fn setup_state(restart: bool) -> Setup {
         if !run_docker(&["image", "inspect", "--format", "{{.Id}}", BOX_IMAGE], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
             return none("running");
         }
-        let look = r#"command -v imd >/dev/null && echo worker; test -s "$HOME/.claude/.credentials.json" && echo claude; command -v imd >/dev/null && imd whoami 2>/dev/null | head -1; true"#;
+        let look = r#"command -v imd >/dev/null && echo worker; test -s "$HOME/.claude/.credentials.json" && echo claude && stat -c 'claude-at %Y' "$HOME/.claude/.credentials.json"; command -v imd >/dev/null && imd whoami 2>/dev/null | head -1; true"#;
         let running = run_docker(&["inspect", "-f", "{{.State.Running}}", BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, out)| ok && out == "true");
         let answer = if running {
             run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", look], Duration::from_secs(30))
@@ -836,12 +836,15 @@ async fn setup_state(restart: bool) -> Setup {
             run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(60))
         };
         let lines: Vec<String> = answer.filter(|(ok, _)| *ok).map(|(_, out)| out.lines().map(str::to_string).collect()).unwrap_or_default();
+        // A sign-in that ran out still leaves its file: the worker's check, newer than the file, is what says it did.
+        let signed_at = lines.iter().find_map(|l| l.strip_prefix("claude-at ")).and_then(|secs| secs.trim().parse::<u64>().ok()).map(|secs| secs * 1000);
+        let ran_out = running && signed_out_since(signed_at);
         Setup {
             docker: "running",
             restart_ahead: false,
             image: true,
             worker: lines.iter().any(|l| l == "worker"),
-            claude: lines.iter().any(|l| l == "claude"),
+            claude: lines.iter().any(|l| l == "claude") && !ran_out,
             device_key: lines.into_iter().find(|l| l.len() == 64 && l.chars().all(|c| c.is_ascii_hexdigit())),
         }
     })
@@ -1646,6 +1649,11 @@ async fn box_sign_in(app: tauri::AppHandle) -> Result<(), String> {
             let _ = app.emit("box-signin-page", ());
             let _ = app.opener().open_url(page, None::<&str>);
         });
+        // signed in again on a box whose worker turned jobs away for want of it: its worker checks at once on a restart,
+        // and a worker held so has no job to lose
+        if signed.is_ok() && run_docker(&["inspect", "-f", "{{.State.Running}}", BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, out)| ok && out == "true") && signed_out_since(None) {
+            let _ = run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90));
+        }
         signed.map_err(|why| if SIGN_IN_STOPPED.load(Ordering::SeqCst) == round { "timed out".into() } else { why })
     })
     .await
@@ -1689,6 +1697,32 @@ fn sign_in_with(args: &[String], opened: impl Fn(&str)) -> Result<(), String> {
     // "Login failed: …", or Docker's own error, comes on stderr
     let errors = errors.join().unwrap_or_default();
     Err(errors.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("Claude's sign-in stopped").to_string())
+}
+
+/// A check the worker failed on its runtime's sign-in, as Claude Code words one: a login past its time limit, which
+/// nothing in the box renews, one signed out, or none.
+fn signed_out_words(words: &str) -> bool {
+    words.starts_with("self-test failed")
+        && ["Failed to authenticate", "claude auth login", "run /login", "not logged in", "Not logged in", "signed out", "OAuth token has expired", "OAuth token has been revoked"].iter().any(|said| words.contains(said))
+}
+
+/// When the worker's newest check failed on its sign-in, in milliseconds; None when its newest check said anything else.
+fn signed_out_at(out: &str, err: &str) -> Option<u64> {
+    let (stamp, words) = out
+        .lines()
+        .chain(err.lines())
+        .filter_map(|line| line.trim().split_once(' '))
+        .filter(|(stamp, words)| stamp.len() == 24 && stamp.ends_with('Z') && stamp.as_bytes()[10] == b'T' && words.starts_with("self-test"))
+        .max_by(|a, b| a.0.cmp(b.0))?;
+    if signed_out_words(words) { iso_ms(stamp) } else { None }
+}
+
+/// Whether the running box's worker last failed its check on its sign-in, after `signed_at`, the moment its sign-in was
+/// last saved, where that is known: a sign-in since then has yet to be checked, and counts.
+fn signed_out_since(signed_at: Option<u64>) -> bool {
+    docker_streams(&["logs", "--tail", "500", BOX_NAME], Duration::from_secs(10))
+        .and_then(|(out, err)| signed_out_at(&out, &err))
+        .is_some_and(|at| signed_at.is_none_or(|signed| at > signed))
 }
 
 /// Claude's own sign-in page, the only one a sign-in opens: https, on Claude's or Anthropic's own host, in one plain line.
@@ -2069,6 +2103,7 @@ fn run_box(runtime: &str) -> Result<(), String> {
     let _ = run_docker(&["rm", "-f", BOX_NAME], Duration::from_secs(30));
     let mut args: Vec<String> = ["run", "-d", "--name", BOX_NAME, "--restart", "unless-stopped"].iter().map(|s| s.to_string()).collect();
     args.extend(box_flags());
+    args.extend(juror_flags());
     args.extend([BOX_IMAGE, "imd", "start", "--runtime", runtime, "--auto-update"].iter().map(|s| s.to_string()));
     match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(120)) {
         Some((true, _)) => {
@@ -2084,8 +2119,9 @@ fn run_box(runtime: &str) -> Result<(), String> {
 
 /// What `docker inspect` is asked about how a box was made: its image, then its flags for `sealed`. In an inspect of its
 /// own: a template that also asks `.Id` is run on Docker's raw JSON, where a box with no init has no such key and the
-/// whole read fails.
-const BOX_MADE: &str = "{{.Image}} {{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}} {{.HostConfig.Init}}";
+/// whole read fails. The security options come with the seccomp profile's text, spaces and all, so every field after
+/// them is one without a space, read from the end.
+const BOX_MADE: &str = "{{.Image}} {{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}} {{.HostConfig.Init}} {{json .HostConfig.CapAdd}} {{json .HostConfig.Binds}}";
 
 /// Whether a box, as `BOX_MADE` reads it, was made from `image` with the flags above.
 fn made_current(inspect: &str, image: &str) -> bool {
@@ -2093,13 +2129,16 @@ fn made_current(inspect: &str, image: &str) -> bool {
 }
 
 /// Whether a box was made with the flags this app gives one, read from `docker inspect` as its security
-/// options, how many paths of /proc it masks and its init: a seccomp profile of its own, none masked, and
-/// an init. Without the first two, as an older IMD Agents made it, its worker's read jail cannot start;
-/// without the init, it fills with dead processes.
+/// options, how many paths of /proc it masks, its init, its added capabilities and its volumes: a seccomp
+/// profile of its own, none masked, an init, and the juror's. Without the first two, as an older IMD Agents
+/// made it, its worker's read jail cannot start; without the init, it fills with dead processes; without the
+/// juror's, it can't sit on the jury.
 fn sealed(inspect: &str) -> bool {
-    let mut fields = inspect.trim().rsplitn(3, ' ');
-    let (init, masked, options) = (fields.next(), fields.next(), fields.next());
+    let mut fields = inspect.trim().rsplitn(5, ' ');
+    let (binds, caps, init, masked, options) = (fields.next(), fields.next(), fields.next(), fields.next(), fields.next());
     options.is_some_and(|options| options.contains("seccomp=")) && masked == Some("0") && init == Some("true")
+        && caps.is_some_and(|caps| caps.contains("DAC_READ_SEARCH"))
+        && binds.is_some_and(|binds| binds.contains(&format!("\"{JUROR_HOME}\"")) && binds.contains(&format!("\"{JUROR_CODE}\"")))
 }
 
 /// Starts Docker if its engine isn't answering and waits until it is, so the box's switch is all it takes. Five minutes, as
@@ -2196,6 +2235,429 @@ async fn box_restart(runtime: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------------------------
+// This computer's agent, in Settings: its own RPC endpoints, and a seat on IMD's jury.
+// ---------------------------------------------------------------------------------------------
+
+/// The juror's two volumes: its home, which only its own user can read, and root's copy of the worker it runs.
+const JUROR_HOME: &str = "imd-juror-home:/var/lib/imd-juror";
+const JUROR_CODE: &str = "imd-juror-code:/opt/imd-juror";
+/// What runs the juror in the box, as systemd runs it on a server: there only in a box image that can hold one.
+const JUROR_SUPERVISOR: &str = "/usr/local/sbin/imd-box-juror";
+/// Where the jury's setup notes its process in the box, so a cancel stops that one and no other.
+const JURY_SETUP_PID: &str = "/run/imd-jury-enable.pid";
+/// Root's PATH in the box for a juror's later steps: the system's, and Foundry's for anvil. Never the worker's own
+/// folder, which its user can write.
+const ROOT_PATH: &str = "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/foundry/bin";
+
+/// What a box needs beside `box_flags` to hold a juror (`imd jury`): the juror's volumes, and DAC_READ_SEARCH, with which
+/// root's `imd jury enable` and `sync` read the seat and the RPC endpoints in the worker's config, a file only the
+/// worker's user can read otherwise. Only root's few processes in the box hold it: its init, the juror's supervisor, and
+/// what this app runs there. The worker and every job drop it with every other capability, and the juror runs with none.
+/// The running box alone takes these: no one-off box runs a juror.
+fn juror_flags() -> Vec<String> {
+    ["--cap-add", "DAC_READ_SEARCH", "-v", JUROR_HOME, "-v", JUROR_CODE].iter().map(|s| s.to_string()).collect()
+}
+
+/// `run_docker`, its input given `input` and then closed: how a key reaches the box without being in an argument. Both
+/// streams come back, joined.
+fn run_docker_with_input(args: &[&str], input: &str, timeout: Duration) -> Option<(bool, String)> {
+    use std::io::{Read, Write};
+    let mut command = docker_command()?;
+    command.args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    let (mut out, mut err) = (child.stdout.take()?, child.stderr.take()?);
+    let read_out = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = out.read_to_end(&mut text);
+        text
+    });
+    let read_err = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = err.read_to_end(&mut text);
+        text
+    });
+    let started = std::time::Instant::now();
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if started.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(40)),
+            Err(_) => break false,
+        }
+    };
+    let (out, err) = (read_out.join().ok()?, read_err.join().ok()?);
+    Some((ok, format!("{}{}", String::from_utf8_lossy(&out), String::from_utf8_lossy(&err))))
+}
+
+/// This computer's own RPC endpoints, by chain id, and whether goal jobs may read through them.
+#[derive(Serialize, Default, Debug, PartialEq)]
+struct Rpc {
+    chains: Vec<String>,
+    goals: bool,
+}
+
+/// `imd rpc`'s list: a line a chain, "  chain 8453     base-mainnet.g.alchemy.com", then whether goal tasks may read
+/// through them. Only the ids are kept.
+fn rpc_listed(out: &str) -> Rpc {
+    let chains = out
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("chain "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|id| !id.is_empty() && id.len() <= 16 && id.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect();
+    Rpc { chains, goals: out.lines().any(|line| line.starts_with("goal tasks may read")) }
+}
+
+/// This computer's RPC, as its worker lists it; nothing while its box isn't running.
+#[tauri::command]
+async fn rpc_state() -> Option<Rpc> {
+    tauri::async_runtime::spawn_blocking(|| {
+        run_docker(&["exec", "-u", "imd", BOX_NAME, "imd", "rpc"], Duration::from_secs(20)).filter(|(ok, _)| *ok).map(|(_, out)| rpc_listed(&out))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The three chains `imd rpc setup` fills from one Alchemy key, in its order.
+const SETUP_CHAINS: [&str; 3] = ["Ethereum", "Base", "Robinhood Chain"];
+
+/// One chain as `imd rpc setup` ends on it: "ok" for an endpoint that keeps the whole history, "recent" for one that serves
+/// the chain without it, "none" for no endpoint; and what it said beside it, which names a host and never a key.
+#[derive(Serialize, Debug, PartialEq)]
+struct RpcChain {
+    name: String,
+    state: &'static str,
+    said: String,
+}
+
+#[derive(Serialize, Debug)]
+struct RpcSet {
+    chains: Vec<RpcChain>,
+    /// Alchemy refused the key outright.
+    refused: bool,
+}
+
+/// What `imd rpc setup` came to: each chain's last line, "  ✓ Ethereum        eth-mainnet.g.alchemy.com, full history".
+fn rpc_said(out: &str) -> RpcSet {
+    let mut chains: Vec<RpcChain> = Vec::new();
+    for line in out.lines() {
+        let Some(rest) = line.strip_prefix("  ") else { continue };
+        let mut chars = rest.chars();
+        let state = match chars.next() {
+            Some('✓') => "ok",
+            Some('·') => "recent",
+            Some('✗') => "none",
+            _ => continue,
+        };
+        let rest = chars.as_str().trim_start();
+        let Some(name) = SETUP_CHAINS.into_iter().find(|name| rest.strip_prefix(name).is_some_and(|after| after.is_empty() || after.starts_with(' '))) else { continue };
+        let said: String = rest[name.len()..].trim().chars().filter(|c| !c.is_control()).take(160).collect();
+        chains.retain(|chain| chain.name != name);
+        chains.push(RpcChain { name: name.into(), state, said });
+    }
+    chains.sort_by_key(|chain| SETUP_CHAINS.iter().position(|name| *name == chain.name));
+    RpcSet { chains, refused: out.contains("Alchemy refused that key.") }
+}
+
+/// An Alchemy key, or an RPC URL, as `imd rpc setup` takes one: one line of plain characters.
+fn rpc_key(key: &str) -> Option<&str> {
+    let key = key.trim();
+    (key.len() >= 8 && key.len() <= 512 && key.chars().all(|c| c.is_ascii_graphic())).then_some(key)
+}
+
+/// This computer's RPC from one Alchemy key, or a URL: `imd rpc setup --yes` in its box, the key on its input, never in
+/// an argument or a log. It fills Ethereum, Base and Robinhood Chain, checks each, and lets goal jobs read through them;
+/// the worker takes them once it's idle, and a juror here at its next round.
+#[tauri::command]
+async fn rpc_setup(key: String) -> Result<RpcSet, String> {
+    let key = rpc_key(&key).ok_or("That isn't an Alchemy key.")?.to_string();
+    let _busy = Busy::new();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (_, out) = run_docker_with_input(&["exec", "-i", "-u", "imd", BOX_NAME, "imd", "rpc", "setup", "--yes"], &format!("{key}\n"), Duration::from_secs(120))
+            .ok_or("Docker is not installed")?;
+        let said = rpc_said(&out);
+        // its exit says only whether a chain is still short, which that chain's line says
+        if said.chains.is_empty() && !said.refused {
+            return Err(out.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("RPC setup stopped").chars().take(300).collect());
+        }
+        if juror_here() {
+            std::thread::spawn(jury_sync);
+        }
+        Ok(said)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Alchemy's sign-up, for a key: free, and one covers all three chains.
+#[tauri::command]
+fn open_alchemy(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener().open_url("https://dashboard.alchemy.com/signup", None::<&str>).map_err(|e| e.to_string())
+}
+
+/// This computer's agent's seat on IMD's jury, as its box says.
+#[derive(Serialize, Default, Debug)]
+struct Jury {
+    /// The box can hold a juror: made with the juror's volumes, from an image with its user and supervisor.
+    able: bool,
+    /// The setup finished here: root's record of the juror is in place.
+    joined: bool,
+    /// The juror's own word, rewritten every half minute while it runs: its key, its seat, and how long ago it said so.
+    key: Option<String>,
+    seat: Option<String>,
+    said_secs: Option<u64>,
+    /// The chains it has an RPC endpoint of its own for, by root's record of the last setup or sync.
+    chains: Vec<String>,
+    /// A setup under way, waiting for the seat's holder to sign at its link.
+    link: Option<JuryLink>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+struct JuryLink {
+    url: String,
+    /// When the link runs out, in milliseconds; a fresh one follows until the setup's hour is up.
+    until: u64,
+}
+
+/// The link a setup waits at, for the panel to show and Open link to open again.
+static JURY_LINK: std::sync::Mutex<Option<JuryLink>> = std::sync::Mutex::new(None);
+
+/// What the box says of its juror, in one look as the worker's own user: whether its image can hold one, root's record of
+/// it, and what the juror publishes for the worker. Each is world-readable, and none holds a key.
+const JURY_LOOK: &str = "test -x /usr/local/sbin/imd-box-juror && echo able; \
+    [ -f /opt/imd-juror/install.json ] && printf 'install %s\\n' \"$(tr -d '\\n' < /opt/imd-juror/install.json)\"; \
+    [ -f /run/imd-juror/juror.json ] && printf 'juror %s\\n' \"$(tr -d '\\n' < /run/imd-juror/juror.json)\"; true";
+
+fn jury_read(out: &str, now: u64) -> Jury {
+    let mut jury = Jury::default();
+    let digits = |text: &str, most: usize| !text.is_empty() && text.len() <= most && text.chars().all(|c| c.is_ascii_digit());
+    for line in out.lines() {
+        if line == "able" {
+            jury.able = true;
+        } else if let Some(value) = line.strip_prefix("install ").and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok()) {
+            jury.joined = true;
+            jury.chains = value["rpc"].as_array().map(|ids| ids.iter().filter_map(|id| id.as_str()).filter(|id| digits(id, 16)).map(str::to_string).collect()).unwrap_or_default();
+        } else if let Some(value) = line.strip_prefix("juror ").and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok()) {
+            jury.key = value["address"].as_str().filter(|a| a.len() == 42 && a.starts_with("0x") && a[2..].chars().all(|c| c.is_ascii_hexdigit())).map(str::to_string);
+            jury.seat = value["tokenId"].as_str().filter(|seat| digits(seat, 78)).map(str::to_string);
+            jury.said_secs = value["at"].as_str().and_then(iso_ms).map(|at| now.saturating_sub(at) / 1000);
+        }
+    }
+    jury
+}
+
+/// Milliseconds since 1970 of a time as JavaScript writes one: "2026-11-11T20:13:15.172Z".
+fn iso_ms(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' || bytes[13] != b':' || bytes[16] != b':' || !text.ends_with('Z') {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| text.get(range).filter(|part| part.chars().all(|c| c.is_ascii_digit())).and_then(|part| part.parse::<u64>().ok());
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    if !(1970..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let millis = if bytes[19] == b'.' { number(20..23)? } else { 0 };
+    // days from the civil calendar, as Howard Hinnant's algorithm counts them
+    let (y, m) = if month <= 2 { (year - 1, month + 9) } else { (year, month - 3) };
+    let era = y / 400;
+    let year_of_era = y - era * 400;
+    let day_of_year = (153 * m + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = (era * 146_097 + day_of_era).checked_sub(719_468)?;
+    Some((days * 86_400 + hour * 3_600 + minute * 60 + second) * 1_000 + millis)
+}
+
+/// Whether the box can hold a juror: its image has the juror's supervisor, and it was made with the juror's volumes.
+fn juror_able() -> bool {
+    run_docker(&["exec", "-u", "imd", BOX_NAME, "test", "-x", JUROR_SUPERVISOR], Duration::from_secs(20)).is_some_and(|(ok, _)| ok)
+        && run_docker(&["inspect", "--format", BOX_MADE, BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, made)| ok && sealed(&made))
+}
+
+/// Whether a juror was set up in the box: root's record of it is there.
+fn juror_here() -> bool {
+    run_docker(&["exec", "-u", "imd", BOX_NAME, "test", "-f", "/opt/imd-juror/install.json"], Duration::from_secs(20)).is_some_and(|(ok, _)| ok)
+}
+
+/// Root's copy brings the juror up to date with the worker's config, as `imd rpc add` asks of a server's root: its seat
+/// and its RPC endpoints, which the juror takes at its next round. Best effort.
+fn jury_sync() {
+    let _ = run_docker(
+        &["exec", "-u", "root", BOX_NAME, "env", "-i", "HOME=/root", ROOT_PATH, "/opt/imd-juror/bin/imd", "jury", "sync", "--yes", "--worker-user", "imd"],
+        Duration::from_secs(600),
+    );
+}
+
+/// This computer's agent on the jury: whether it can be, whether it is, and the link a setup waits at.
+#[tauri::command]
+async fn jury_state() -> Option<Jury> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (ok, out) = run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", JURY_LOOK], Duration::from_secs(20))?;
+        if !ok {
+            return None;
+        }
+        let mut jury = jury_read(&out, now_ms());
+        jury.able = jury.able && run_docker(&["inspect", "--format", BOX_MADE, BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, made)| ok && sealed(&made));
+        jury.link = JURY_LINK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        Some(jury)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// How long a setup waits for the holder's signature before the app stops it: its own hour, and room.
+const JURY_WAITS: Duration = Duration::from_secs(70 * 60);
+/// Which setup is the latest, so the stop meant for one never ends the next.
+static JURY_ROUND: AtomicU64 = AtomicU64::new(0);
+
+/// The page a jury key is registered at: the explorer's own, as the plane makes its link, and no other.
+fn jury_page(link: &str) -> bool {
+    let Some(id) = link.strip_prefix(&format!("{}/jury/register/", explorer_base().trim_end_matches('/'))) else { return false };
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// How many minutes a link is good for, from the setup's line "  good for   10 minutes, until 19:58 UTC; …".
+fn good_for(line: &str) -> Option<u64> {
+    let rest = line.trim_start().strip_prefix("good for")?.trim_start();
+    rest.split_whitespace().next()?.parse::<u64>().ok().filter(|minutes| (1..=60).contains(minutes))
+}
+
+/// Why a setup didn't join, in its own words: the first thing it said went wrong, else its last line.
+fn jury_failure(code: Option<i32>, out: &[String], errors: &str) -> String {
+    match code {
+        Some(129 | 130 | 143) => return "stopped".into(),
+        Some(3) => return "Not signed within the hour. Join again for a new link.".into(),
+        _ => {}
+    }
+    let said = errors.lines().map(str::trim).find(|line| !line.is_empty()).or_else(|| out.iter().map(|line| line.trim()).rfind(|line| !line.is_empty()));
+    said.unwrap_or("the jury's setup stopped").chars().filter(|c| !c.is_control()).take(400).collect()
+}
+
+/// Stops a jury setup running in the box, as Ctrl-C does at a terminal: it withdraws its link and keeps what it made for
+/// the next. Only the process it noted, and only while that is still the setup.
+fn stop_jury_setup() {
+    let script = format!(
+        "p=$(cat {JURY_SETUP_PID} 2>/dev/null) && [ -n \"$p\" ] && tr '\\0' ' ' < /proc/\"$p\"/cmdline 2>/dev/null | grep -q 'jury enable' && kill -INT \"$p\"; rm -f {JURY_SETUP_PID}"
+    );
+    let _ = run_docker(&["exec", "-u", "root", BOX_NAME, "sh", "-c", &script], Duration::from_secs(20));
+}
+
+fn set_jury_link(app: &tauri::AppHandle, link: Option<JuryLink>) {
+    *JURY_LINK.lock().unwrap_or_else(|e| e.into_inner()) = link.clone();
+    let _ = app.emit("jury-link", link);
+}
+
+/// A seat on IMD's jury for this computer's agent: `imd jury enable` as root in its box, which makes the juror's key under
+/// a user of its own, the worker's never, and waits for the seat's holder to sign for it at a link. The link opens in the
+/// browser and comes as the `jury-link` event, a fresh one each time one runs out; once it's signed the juror starts
+/// beside the worker, and the box starts it at each start from then on. Ends joined, or with why not.
+#[tauri::command]
+async fn jury_join(app: tauri::AppHandle) -> Result<(), String> {
+    let _busy = Busy::new();
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::{BufRead, Read};
+        if !juror_able() {
+            return Err("This agent's box is older than the jury. Restart it, then join.".into());
+        }
+        // one left waiting from before, as when the app quit while it waited, stops first and withdraws its link
+        stop_jury_setup();
+        let round = JURY_ROUND.fetch_add(1, Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(JURY_WAITS);
+            if JURY_ROUND.load(Ordering::SeqCst) == round {
+                stop_jury_setup();
+            }
+        });
+        // The first setup runs the worker's own imd as root, as `sudo env "PATH=$PATH" imd jury enable` does on a server;
+        // once root has its own copy, that one. Its process is noted for a cancel, and nothing of root's or the box's
+        // environment goes with it.
+        let script = format!(
+            "echo $$ > {JURY_SETUP_PID}; if [ -f /opt/imd-juror/install.json ]; then imd=/opt/imd-juror/bin/imd; else imd=imd; fi; \
+             exec env -i HOME=/root PATH=/home/imd/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/foundry/bin \"$imd\" jury enable --yes --worker-user imd --no-qr"
+        );
+        let mut command = docker_command().ok_or("Docker is not installed")?;
+        command
+            .args(["exec", "-u", "root", BOX_NAME, "sh", "-c", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|e| e.to_string())?;
+        let stderr = child.stderr.take();
+        let errors = std::thread::spawn(move || {
+            let mut said = String::new();
+            if let Some(mut err) = stderr {
+                let _ = err.read_to_string(&mut said);
+            }
+            said
+        });
+        let mut said: Vec<String> = Vec::new();
+        let (mut link_next, mut opened) = (false, false);
+        if let Some(stdout) = child.stdout.take() {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                if line.contains("signs at this link") {
+                    link_next = true;
+                } else if link_next && !line.trim().is_empty() {
+                    link_next = false;
+                    let url = line.trim();
+                    if jury_page(url) {
+                        set_jury_link(&app, Some(JuryLink { url: url.to_string(), until: now_ms() + 10 * 60_000 }));
+                        // the first link opens by itself; a fresh one is the panel's to open, as the first's tab says it's closed
+                        if !opened {
+                            opened = true;
+                            let _ = app.opener().open_url(url, None::<&str>);
+                        }
+                    }
+                } else if let Some(minutes) = good_for(&line) {
+                    let link = JURY_LINK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(link) = link {
+                        set_jury_link(&app, Some(JuryLink { until: now_ms() + minutes * 60_000, ..link }));
+                    }
+                }
+                said.push(line);
+                if said.len() > 60 {
+                    said.remove(0);
+                }
+            }
+        }
+        let status = child.wait().map_err(|e| e.to_string())?;
+        JURY_ROUND.fetch_add(1, Ordering::SeqCst);
+        set_jury_link(&app, None);
+        if status.success() {
+            // the juror, beside the worker, as the box's start brings it up from now on
+            let _ = run_docker(&["exec", "-d", "-u", "root", BOX_NAME, JUROR_SUPERVISOR], Duration::from_secs(20));
+            return Ok(());
+        }
+        Err(jury_failure(status.code(), &said, &errors.join().unwrap_or_default()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Opens the link a setup waits at, again: a tab closed by mistake needs no new link.
+#[tauri::command]
+fn jury_open(app: tauri::AppHandle) -> Result<(), String> {
+    let link = JURY_LINK.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or("no link")?;
+    app.opener().open_url(link.url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Stops a setup waiting for its signature. What it made is kept, so Join goes on from there.
+#[tauri::command]
+async fn jury_cancel() {
+    let _ = tauri::async_runtime::spawn_blocking(stop_jury_setup).await;
 }
 
 /// The worker's heartbeat saying it holds no work: "alive 17m · idle · 0 submitted · …". Any other last line says
@@ -2316,6 +2778,7 @@ fn box_tries(image: &str) -> Result<(), String> {
     let _ = run_docker(&["rm", "-f", BOX_TRYING], Duration::from_secs(30));
     let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_TRYING.into()];
     args.extend(box_flags());
+    args.extend(juror_flags());
     args.extend([image.to_string(), "imd".into(), "help".into()]);
     match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(60)) {
         Some((true, _)) => Ok(()),
@@ -2964,7 +3427,7 @@ pub fn run() {
             box_state, box_start, box_stop, box_restart, box_renewal, box_hold, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_sign_in_code, box_sign_in_open, box_sign_in_cancel, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
             docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound, set_theme,
-            restart_pc, set_open_at_login
+            restart_pc, set_open_at_login, rpc_state, rpc_setup, open_alchemy, jury_state, jury_join, jury_open, jury_cancel
         ])
         .setup(|app| {
             // The log of what went wrong, and a panic's place in it before the app goes.
@@ -3411,6 +3874,22 @@ mod tests {
     }
 
     #[test]
+    fn a_sign_in_that_ran_out_is_told_from_other_failed_checks() {
+        let ran_out = "2026-11-11T20:36:40.512Z self-test failed, taking no work: Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again, or use `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN for unattended jobs. Checking again in 11m, or at once on a restart";
+        let alive = "2026-11-11T20:37:10.222Z alive 1m · idle · 0 submitted · fleet 1050 online, 1083 enrolled · taking no work: self-test failed (signed out)";
+        let at = super::iso_ms("2026-11-11T20:36:40.512Z");
+        assert_eq!(super::signed_out_at(&format!("{alive}\n"), &format!("{ran_out}\n")), at);
+        // a pass after it, or a failure of another kind, is the newest word
+        let passed = "2026-11-11T20:40:57.256Z self-test passed: claude-fable-5-1 ran a shell command and answered in 3.5s";
+        assert_eq!(super::signed_out_at(&format!("{passed}\n"), &format!("{ran_out}\n")), None);
+        let limit = "2026-11-11T20:38:00.000Z self-test: You've hit your weekly limit · resets Nov 13, 4am (UTC). Holding work for 16m";
+        assert_eq!(super::signed_out_at(&format!("{limit}\n"), &format!("{ran_out}\n")), None);
+        assert!(!super::signed_out_words("self-test failed, taking no work: the runtime answered nothing within a minute. Checking again in 10m"));
+        assert!(super::signed_out_words("self-test failed, taking no work: Not logged in · Please run /login. Checking again in 10m"));
+        assert_eq!(super::signed_out_at("", ""), None);
+    }
+
+    #[test]
     fn only_the_workers_heartbeat_says_it_is_idle() {
         assert!(super::worker_idle("2026-11-07T04:37:02.243Z alive 17m · idle · 0 submitted · fleet 947 online, 1077 enrolled"));
         assert!(!super::worker_idle("2026-11-07T04:37:02.243Z alive 17m · 1 task running · 0 submitted · fleet 947 online, 1077 enrolled"));
@@ -3435,6 +3914,7 @@ mod tests {
             let _ = super::run_docker(&["rm", "-f", name], Duration::from_secs(30));
             let mut args: Vec<String> = vec!["create".into(), "--name".into(), name.into()];
             args.extend(super::box_flags().into_iter().filter(|flag| init || flag != "--init"));
+            args.extend(super::juror_flags());
             args.extend([super::BOX_IMAGE.to_string(), "true".into()]);
             let made = super::run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(30));
             assert!(made.is_some_and(|(ok, _)| ok), "{name} made");
@@ -3442,7 +3922,8 @@ mod tests {
             let _ = super::run_docker(&["rm", "-f", name], Duration::from_secs(30));
             let (ok, out) = read.expect("docker answers");
             assert!(ok, "{out}");
-            assert!(out.ends_with(if init { " 0 true" } else { " 0 <nil>" }), "{name}");
+            assert!(out.contains(if init { " 0 true [" } else { " 0 <nil> [" }), "{name}");
+            assert!(out.contains("DAC_READ_SEARCH") && out.contains(super::JUROR_HOME) && out.contains(super::JUROR_CODE), "{name}: {out}");
             assert_eq!(super::sealed(&out), init, "{name}");
             let image = super::image_id(super::BOX_IMAGE).expect("a box image here");
             assert_eq!(super::made_current(&out, &image), init, "{name}");
@@ -3452,11 +3933,97 @@ mod tests {
 
     #[test]
     fn a_box_is_current_only_from_this_image_with_these_flags() {
-        let made = r#"sha256:aaa ["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0 true"#;
+        let made = r#"sha256:aaa ["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0 true ["CAP_NET_ADMIN","CAP_SETUID","CAP_SETGID","CAP_SETPCAP","CAP_CHOWN","CAP_DAC_READ_SEARCH"] ["imd-worker-home:/home/imd","imd-juror-home:/var/lib/imd-juror","imd-juror-code:/opt/imd-juror"]"#;
         assert!(super::made_current(made, "sha256:aaa"));
         assert!(!super::made_current(made, "sha256:bbb"));
         assert!(!super::made_current(&made.replace(" 0 true", " 0 <nil>"), "sha256:aaa"));
         assert!(!super::made_current("", "sha256:aaa"));
+        // a box from before the jury: none of the juror's flags, then the capability alone, then the volumes alone
+        let before = r#"sha256:aaa ["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0 true ["NET_ADMIN","SETUID","SETGID","SETPCAP","CHOWN"] ["imd-worker-home:/home/imd"]"#;
+        assert!(!super::made_current(before, "sha256:aaa"));
+        assert!(!super::made_current(&made.replace(r#","CAP_DAC_READ_SEARCH""#, ""), "sha256:aaa"));
+        assert!(!super::made_current(&made.replace(r#","imd-juror-code:/opt/imd-juror""#, ""), "sha256:aaa"));
+        // as an app before the jury read a box: four fields, which say nothing of the juror's
+        assert!(!super::made_current(r#"sha256:aaa ["seccomp={}"] 0 true"#, "sha256:aaa"));
+    }
+
+    #[test]
+    fn only_the_running_box_holds_a_juror() {
+        let flags = super::juror_flags();
+        assert_eq!(flags, ["--cap-add", "DAC_READ_SEARCH", "-v", super::JUROR_HOME, "-v", super::JUROR_CODE]);
+        // the one-off boxes (pairing, updating, signing in) share the worker's volume and none of the juror's
+        assert!(!box_flags().iter().any(|flag| flag.contains("juror") || flag == "DAC_READ_SEARCH"));
+    }
+
+    #[test]
+    fn rpc_is_read_as_its_chains_and_never_its_endpoints() {
+        let listed = "  chain 1        eth-mainnet.g.alchemy.com\n  chain 8453     base-mainnet.g.alchemy.com\n  chain 4663     robinhood-mainnet.g.alchemy.com\ngoal tasks may read through them. Check each one: imd rpc setup\n";
+        assert_eq!(super::rpc_listed(listed), super::Rpc { chains: vec!["1".into(), "8453".into(), "4663".into()], goals: true });
+        assert_eq!(super::rpc_listed("  chain 1        eth.example\ngoal tasks may not read through them. Check each one: imd rpc setup\n").goals, false);
+        assert_eq!(super::rpc_listed("no own RPC endpoints; tasks use public ones. Set them up: imd rpc setup\n"), super::Rpc::default());
+    }
+
+    #[test]
+    fn rpc_setup_is_read_as_each_chains_last_line() {
+        let out = "Your own RPC seats this machine first on a chain's panels.\n\n  ✓ Ethereum        eth-mainnet.g.alchemy.com, full history\n  · Base            base-mainnet.g.alchemy.com, recent blocks only\n  ✗ Robinhood Chain robinhood-mainnet.g.alchemy.com: not enabled for this key (403)\nTurn on Robinhood Chain at https://dashboard.alchemy.com/apps\n\n  ✓ Ethereum        eth-mainnet.g.alchemy.com, full history\n  ✓ Base            base-mainnet.g.alchemy.com, full history\n  ✗ Robinhood Chain robinhood-mainnet.g.alchemy.com: not enabled for this key (403)\n  ✓ Goal jobs       may read through these endpoints\n";
+        let said = super::rpc_said(out);
+        assert!(!said.refused);
+        assert_eq!(said.chains.iter().map(|chain| (chain.name.as_str(), chain.state)).collect::<Vec<_>>(), [("Ethereum", "ok"), ("Base", "ok"), ("Robinhood Chain", "none")]);
+        assert_eq!(said.chains[2].said, "robinhood-mainnet.g.alchemy.com: not enabled for this key (403)");
+        let refused = super::rpc_said("  ✗ Ethereum        no endpoint\nAlchemy refused that key.\n");
+        assert!(refused.refused);
+        assert_eq!(super::rpc_key("  abcdEFGH1234_-xyz  "), Some("abcdEFGH1234_-xyz"));
+        for bad in ["", "short", "has a space in it", "line\nbreak-in-it", &"k".repeat(600)] {
+            assert_eq!(super::rpc_key(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_jury_is_read_from_what_the_box_publishes() {
+        let now = super::iso_ms("2026-11-11T20:15:00.000Z").unwrap();
+        let out = "able\ninstall {\"v\":1,\"version\":\"0.1.24+34df1ac6\",\"node\":\"/usr/local/bin/node\",\"anvil\":\"/opt/foundry/bin/anvil\",\"worker\":{\"user\":\"imd\",\"uid\":10001,\"sudo\":false},\"installedAt\":\"2026-11-11T20:12:00.000Z\",\"rpc\":[\"1\",\"8453\",\"4663\"]}\njuror {\"v\":1,\"address\":\"0x82dc3259a4394ce83c66ee373e73797216de1f0c\",\"keyStorage\":\"os-user\",\"tokenId\":\"12\",\"version\":\"0.1.24+34df1ac6\",\"pid\":77,\"at\":\"2026-11-11T20:14:45.500Z\"}\n";
+        let jury = super::jury_read(out, now);
+        assert!(jury.able && jury.joined);
+        assert_eq!(jury.chains, ["1", "8453", "4663"]);
+        assert_eq!(jury.key.as_deref(), Some("0x82dc3259a4394ce83c66ee373e73797216de1f0c"));
+        assert_eq!(jury.seat.as_deref(), Some("12"));
+        assert_eq!(jury.said_secs, Some(14));
+        // a box image from before the jury, and one with no juror yet
+        let none = super::jury_read("", now);
+        assert!(!none.able && !none.joined && none.key.is_none());
+        assert!(!super::jury_read("able\n", now).joined);
+        // a juror's file that isn't one says nothing
+        assert!(super::jury_read("juror {\"address\":\"0x12<script>\",\"tokenId\":\"1 2\"}\n", now).key.is_none());
+    }
+
+    #[test]
+    fn times_are_read_as_javascript_writes_them() {
+        assert_eq!(super::iso_ms("1970-01-01T00:00:00.000Z"), Some(0));
+        assert_eq!(super::iso_ms("2026-11-11T20:13:15.172Z"), Some(1_794_427_995_172));
+        assert_eq!(super::iso_ms("2024-02-29T12:00:00Z"), Some(1_709_208_000_000));
+        for bad in ["", "2026-11-11", "2026-13-11T20:13:15.172Z", "2026-11-11 20:13:15.172Z", "2026-11-11T20:13:15.172"] {
+            assert_eq!(super::iso_ms(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_jury_link_opens_only_the_explorers_page() {
+        assert!(super::jury_page("https://explorer.imd.fun/jury/register/kr_7Qx-9aZ"));
+        for bad in ["https://explorer.imd.fun/jury/register/", "https://explorer.imd.fun/jury/register/a/b", "https://evil.test/jury/register/abc", "http://explorer.imd.fun/jury/register/abc", "https://explorer.imd.fun/jury/register/abc?x=1", "https://explorer.imd.fun.evil.test/jury/register/abc"] {
+            assert!(!super::jury_page(bad), "{bad}");
+        }
+        assert_eq!(super::good_for("  good for   10 minutes, until 19:58 UTC; a fresh link is printed if it runs out"), Some(10));
+        assert_eq!(super::good_for("  good for   1 minute, until 19:58 UTC"), Some(1));
+        assert_eq!(super::good_for("  signed by  0x047f…"), None);
+    }
+
+    #[test]
+    fn a_setup_that_did_not_join_says_why_in_its_own_words() {
+        let out = vec!["made juror key 0x82dc…".to_string(), "".to_string()];
+        assert_eq!(super::jury_failure(Some(130), &out, ""), "stopped");
+        assert_eq!(super::jury_failure(Some(3), &out, ""), "Not signed within the hour. Join again for a new link.");
+        assert_eq!(super::jury_failure(Some(1), &out, "\nThe plane refused the change: signature does not verify (signature_invalid). The key made here is kept.\n\nThe juror's key is not registered\n"), "The plane refused the change: signature does not verify (signature_invalid). The key made here is kept.");
+        assert_eq!(super::jury_failure(Some(1), &out, ""), "made juror key 0x82dc…");
     }
 
     #[test]
@@ -3470,11 +4037,14 @@ mod tests {
 
     #[test]
     fn a_box_without_the_sandbox_flags_is_told_apart() {
-        // as `docker inspect` prints them: one made by this app, one by IMD Agents 0.1.18, one by 0.1.0, one with /proc masked
-        assert!(super::sealed(r#"["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0 true"#));
-        assert!(!super::sealed(r#"["no-new-privileges:true","seccomp={\"defaultAction\": \"SCMP_ACT_ERRNO\"}"] 0 <nil>"#));
-        assert!(!super::sealed(r#"["no-new-privileges:true"] 12 <nil>"#));
-        assert!(!super::sealed(r#"["no-new-privileges:true","seccomp={}"] 12 <nil>"#));
+        // as `docker inspect` prints them: one made by this app, one by IMD Agents 0.1.21, one by 0.1.18, one by 0.1.0, one with /proc masked
+        let juror = r#"["CAP_NET_ADMIN","CAP_DAC_READ_SEARCH"] ["imd-worker-home:/home/imd","imd-juror-home:/var/lib/imd-juror","imd-juror-code:/opt/imd-juror"]"#;
+        let none = r#"["NET_ADMIN","SETUID","SETGID","SETPCAP","CHOWN"] ["imd-worker-home:/home/imd"]"#;
+        assert!(super::sealed(&format!(r#"["no-new-privileges:true","seccomp={{\"defaultAction\": \"SCMP_ACT_ERRNO\"}}"] 0 true {juror}"#)));
+        assert!(!super::sealed(&format!(r#"["no-new-privileges:true","seccomp={{\"defaultAction\": \"SCMP_ACT_ERRNO\"}}"] 0 true {none}"#)));
+        assert!(!super::sealed(&format!(r#"["no-new-privileges:true","seccomp={{\"defaultAction\": \"SCMP_ACT_ERRNO\"}}"] 0 <nil> {none}"#)));
+        assert!(!super::sealed(&format!(r#"["no-new-privileges:true"] 12 <nil> {none}"#)));
+        assert!(!super::sealed(&format!(r#"["no-new-privileges:true","seccomp={{}}"] 12 <nil> {none}"#)));
         assert!(!super::sealed(""));
     }
 

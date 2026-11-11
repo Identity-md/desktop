@@ -80,6 +80,11 @@ export function installMock({ fixtures, scenario }) {
   const handlers = {};
   /** Claude's sign-in under way, to end when a code is pasted or it's cancelled. */
   let signingIn = null;
+  /** A jury join waiting for its signature, to end when it's cancelled. */
+  let joining = null;
+  /** This computer's RPC and jury seat: none and not joined, unless the scenario says (`rpc`, `jury`). */
+  let rpc = scenario.rpc ?? { chains: [], goals: false };
+  const jury = { able: true, joined: false, key: null, seat: null, said_secs: null, chains: [], link: null, ...scenario.jury };
   window.__emit = (event, payload) => { const id = handlers[event]; if (id) window[`_${id}`]({ event, id: 1, payload }); };
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "panel" }, currentWebview: { windowLabel: "panel", label: "panel" } },
@@ -134,6 +139,20 @@ export function installMock({ fixtures, scenario }) {
           if (args.path.startsWith("/api/search?q=")) { const w = scenario.ens?.[args.path.slice(14)]; return { status: 200, body: { groups: w ? [{ key: "go", hits: [{ meta: "wallet", href: `/wallet/${w}` }] }] : [] } }; }
           return window.__fixtures.explorer?.[args.path] ?? { status: 404, body: null };
         case "update_check": return scenario.update ?? null;
+        case "rpc_state": return rpc;
+        // a key checked chain by chain in the box: `rpcSays` for what it comes to, all three by default
+        case "rpc_setup": return new Promise((done) => setTimeout(() => {
+          const said = scenario.rpcSays ?? { chains: [["Ethereum", "ok"], ["Base", "ok"], ["Robinhood Chain", "ok"]].map(([name, state]) => ({ name, state, said: "full history" })), refused: false };
+          rpc = { chains: ["1", "8453", "4663"].filter((_, i) => said.chains[i]?.state !== "none"), goals: true };
+          done(said);
+        }, 1200));
+        case "jury_state": return jury;
+        // the key made, then its link, then a wait for the holder's signature that only Cancel ends
+        case "jury_join":
+          setTimeout(() => window.__emit("jury-link", { url: "https://explorer.imd.fun/jury/register/kr7Qx9aZ", until: Date.now() + 600_000 }), 700);
+          return new Promise((done, failed) => { joining = { done, failed }; });
+        case "jury_cancel": window.__emit("jury-link", null); joining?.failed("stopped"); return null;
+        case "jury_open": case "open_alchemy": return null;
         case "docker_install": return new Promise(() => {});
         case "update_install": return new Promise(() => {});
         default: return null;

@@ -41,7 +41,7 @@ export type Box = { state: "running" | "stopped" | "docker-down" | "no-docker" |
  * Why a worker holds its own work, in its own words. Only its log says, so only this computer's agent has one:
  * its runtime at a limit (`said` is the provider's line), its self-test failed, or a check still out.
  */
-export type Hold = { kind: "limit" | "fault"; said: string } | { kind: "checking" };
+export type Hold = { kind: "limit" | "fault"; said: string; signedOut?: boolean } | { kind: "checking" };
 
 export type Phase =
   | { kind: "working"; jobs: number }
@@ -91,6 +91,12 @@ export function localPhase(box: Box, agent: Agent | null, now = new Date(), hold
 }
 
 /**
+ * A check failed on the runtime's sign-in, as Claude Code words it: a login past its time limit ("cannot be renewed"),
+ * one signed out, or none. Nothing in the box renews it; signing in again does.
+ */
+const SIGNED_OUT = /Failed to authenticate|claude auth login|run \/login|not logged in|signed out|OAuth token (?:has )?(?:expired|been revoked)/i;
+
+/**
  * Why this computer's worker holds its work, from the newest line its self-test wrote in its log, the stamp
  * before it aside: "self-test: You've hit your weekly limit · resets Nov 13, 4am (UTC). Holding work for 11m".
  * Null for a line that holds nothing, as a pass is, and for no line at all.
@@ -100,7 +106,7 @@ export function holdOf(line: string | null | undefined): Hold | null {
   const limit = /^self-test: (.+?)\.? Holding work for /.exec(text);
   if (limit) return { kind: "limit", said: limit[1]!.trim().slice(0, 160) };
   const fault = /^self-test failed, taking no work: (.+?)\.? Checking again in /.exec(text);
-  if (fault) return { kind: "fault", said: fault[1]!.trim().slice(0, 160) };
+  if (fault) return { kind: "fault", said: fault[1]!.trim().slice(0, 160), ...(SIGNED_OUT.test(fault[1]!) ? { signedOut: true } : {}) };
   if (/^self-test: asking the runtime/.test(text)) return { kind: "checking" };
   return null;
 }
@@ -217,7 +223,7 @@ export function statusLine(phase: Phase, agent: Agent | null, now = new Date()):
 }
 
 /** The runtime an agent's jobs run on, as its maker writes it: "Claude", "Codex". Null where the network did not say. */
-function runtimeName(agent: Agent | null): string | null {
+export function runtimeName(agent: Agent | null): string | null {
   const id = agent?.standing?.presence?.runtimes?.[0]?.id;
   return id ? capitalize(id) : null;
 }
@@ -235,6 +241,7 @@ export function holdingLine(hold: Hold | null, agent: Agent | null, now = new Da
     const what = runtime ? `At ${runtime}'s limit` : "At its limit";
     return lifts && lifts > now ? `${what} · back ${liftsAt(lifts, now)}` : what;
   }
+  if (hold?.kind === "fault" && hold.signedOut) return `Not taking jobs · ${runtime ?? "Claude"} is signed out`;
   if (hold?.kind === "fault") return `Not taking jobs · ${runtime ?? "its runtime"} failed its check`;
   if (hold?.kind === "checking") return `Checking ${runtime ?? "its runtime"} before taking jobs`;
   return "Not taking jobs right now";
@@ -249,6 +256,7 @@ export function holdingWords(hold: Hold | null, agent: Agent | null, now = new D
     const used = `${runtime ? `${runtime}'s` : "Its runtime's"}${which ? ` ${which}` : ""} limit is used up.`;
     return lifts && lifts > now ? `${used} It takes jobs again ${liftsAt(lifts, now, true)}.` : `${used} It takes jobs again once that lifts. ${runtime ?? "It"} said: ${hold.said}`;
   }
+  if (hold?.kind === "fault" && hold.signedOut) return `${runtime ?? "Claude"}'s sign-in in this box ran out, so it takes no jobs. Sign in again, and it takes jobs at once.`;
   if (hold?.kind === "fault") return `${runtime ?? "Its runtime"} failed the check a worker runs before taking jobs: ${hold.said}`;
   if (hold?.kind === "checking") return `Checking that ${runtime ?? "its runtime"} answers before it takes jobs. About a minute.`;
   return "Its worker is connected but turning jobs away: at a limit, updating, or checking itself. Its log says which.";

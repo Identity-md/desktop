@@ -48,6 +48,11 @@
         (await until(selector)).click();
         await new Promise((done) => setTimeout(done, 700));
       }
+      // what someone would type, `type: { selector: text }`, and the form they'd send, `submit: selector`
+      for (const [selector, text] of Object.entries(state.scenario.type ?? {})) (await until(selector)).value = text;
+      if (state.scenario.submit) (await until(state.scenario.submit)).requestSubmit();
+      // and what takes its time, `wait: ms`: a check in the box, a link on its way
+      if (state.scenario.wait || state.scenario.submit) await new Promise((done) => setTimeout(done, state.scenario.wait ?? 1600));
       // and a job that lands 2.5 s in, landed
       if (state.scenario.lands) await new Promise((done) => setTimeout(done, 2000));
       ready();
