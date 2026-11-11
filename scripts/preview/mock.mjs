@@ -84,7 +84,7 @@ export function installMock({ fixtures, scenario }) {
   let joining = null;
   /** This computer's RPC and jury seat: none and not joined, unless the scenario says (`rpc`, `jury`). */
   let rpc = scenario.rpc ?? { chains: [], goals: false };
-  const jury = { able: true, joined: false, key: null, seat: null, said_secs: null, chains: [], link: null, ...scenario.jury };
+  const jury = { able: true, boxed: true, joined: false, key: null, seat: null, said_secs: null, chains: [], link: null, ...scenario.jury };
   window.__emit = (event, payload) => { const id = handlers[event]; if (id) window[`_${id}`]({ event, id: 1, payload }); };
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "panel" }, currentWebview: { windowLabel: "panel", label: "panel" } },
@@ -131,7 +131,15 @@ export function installMock({ fixtures, scenario }) {
           setTimeout(() => { if (scenario.setup) scenario.setup = { ...scenario.setup, claude: true }; signingIn?.done(null); }, 1500);
           return null;
         case "box_sign_in_cancel": signingIn?.failed("Input ended before a code was pasted. Sign in again and paste the code shown."); return null;
-        case "box_pull": case "box_install": return new Promise((done) => setTimeout(done, 60_000));
+        // setup's download takes its minute; the jury's Update counts a few megabytes, then is done
+        case "box_pull":
+          if (scenario.jury?.boxed === false) {
+            setTimeout(() => window.__emit("setup-step-progress", { step: "pull", words: "Downloading 212 of 385 MB…" }), 300);
+            return new Promise((done) => setTimeout(() => { jury.boxed = true; jury.able = true; done(); }, 3000));
+          }
+          return new Promise((done) => setTimeout(done, 60_000));
+        case "box_install": return new Promise((done) => setTimeout(done, 60_000));
+        case "box_restart": return null;
         case "box_pair":
           setTimeout(() => window.__emit("box-pairing", { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" }), 300);
           return new Promise(() => {});

@@ -224,7 +224,7 @@ export const openAlchemy = () => invoke<void>("open_alchemy");
 /** A setup's link, waiting for the seat's holder to sign, until a moment in milliseconds. */
 export type JuryLink = { url: string; until: number; key: string | null };
 /** This computer's agent on IMD's jury: whether its box can hold a juror, whether one is set up, and what it says. */
-export type Jury = { able: boolean; joined: boolean; key: string | null; seat: string | null; said_secs: number | null; chains: string[]; link: JuryLink | null };
+export type Jury = { able: boolean; boxed: boolean; joined: boolean; key: string | null; seat: string | null; said_secs: number | null; chains: string[]; link: JuryLink | null };
 export const juryState = () => invoke<Jury | null>("jury_state");
 /** Joins: the key is made in the box, the link opens in the browser and comes as `jury-link`; ends joined, or with why not. */
 export const juryJoin = () => invoke<void>("jury_join");

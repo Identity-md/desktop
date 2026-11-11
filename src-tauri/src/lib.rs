@@ -2447,6 +2447,9 @@ fn open_alchemy(app: tauri::AppHandle) -> Result<(), String> {
 struct Jury {
     /// The box can hold a juror: made with the juror's volumes, from an image with its user and supervisor.
     able: bool,
+    /// The box's image has the juror's user and supervisor: an image from before the jury needs the newer box, which
+    /// a restart alone never fetches.
+    boxed: bool,
     /// The setup finished here: root's record of the juror is in place.
     joined: bool,
     /// The juror's own word, rewritten every half minute while it runs: its key, its seat, and how long ago it said so.
@@ -2547,6 +2550,7 @@ async fn jury_state() -> Option<Jury> {
             return None;
         }
         let mut jury = jury_read(&out, now_ms());
+        jury.boxed = jury.able;
         jury.able = jury.able && run_docker(&["inspect", "--format", BOX_MADE, BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, made)| ok && sealed(&made));
         jury.link = JURY_LINK.lock().unwrap_or_else(|e| e.into_inner()).clone();
         Some(jury)

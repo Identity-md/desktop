@@ -114,6 +114,11 @@ const state = {
   juryLink: null as api.JuryLink | null,
   /** Why the last join didn't, said on the jury's line. */
   jurySaid: null as string | null,
+  /** The newest published box on its way down, for a box image from before the jury: how far it's got, and whether it
+   * waits for this computer's job to end first. */
+  updatingBox: false,
+  boxWords: null as string | null,
+  updateWhenIdle: false,
   loaded: false,
 };
 
@@ -337,6 +342,7 @@ async function refresh(full = false): Promise<void> {
   render();
   const local = state.agents.find((a) => a.tokenId === state.localToken);
   if (state.restartWhenIdle && local && phaseFor(local).kind !== "working") void restartLocal();
+  else if (state.updateWhenIdle && local && phaseFor(local).kind !== "working") void updateBox();
   else if (!renewed && boxDue(state.box, local)) void renewLocal();
   if (flying) landed.forEach((gain, i) => setTimeout(() => fly(gain.tokenId, gain.by), i * 260));
   // heard whether or not the panel is open: work accepted over work taken, once a read
@@ -1346,11 +1352,11 @@ function computerHtml(): string {
 }
 
 function juryLineHtml(here: string, jury: api.Jury, rpc: boolean): string {
-  const line = (sub: string, button = "", bad = false, more = "") => `<div class="line"><span>Jury<span class="sub${bad ? " bad" : ""}"${bad ? ' role="status"' : ""}>${esc(sub)}</span>${more ? `<span class="sub">${esc(more)}</span>` : ""}</span>${button}</div>`;
+  const line = (sub: string, button = "", bad = false, more = "") => `<div class="line"><span>Jury<span class="sub${bad ? " bad" : ""}"${bad ? ' role="status"' : ""}>${esc(sub)}</span>${more ? `<span class="sub key-words">${esc(more)}</span>` : ""}</span>${button}</div>`;
   if (state.juryLink) {
-    // the page shows the key it asks for: its end here, to see they're the same before signing
+    // the page shows the key it asks for, whole: the same, every character, before signing
     const key = state.juryLink.key;
-    return line(`Sign with #${here}'s wallet`, `<span class="line-value"><button class="link" data-action="jury-cancel" title="Cancel">Cancel</button><button class="pill" data-action="jury-open" title="Open the link again (J)">Open link</button></span>`, false, key ? `Key on the page ends ${key.slice(-4)}` : "");
+    return line(`Sign with #${here}'s wallet`, `<span class="line-value"><button class="link" data-action="jury-cancel" title="Cancel">Cancel</button><button class="pill" data-action="jury-open" title="Open the link again (J)">Open link</button></span>`, false, key ?? "");
   }
   if (state.joining) return line("Making its key…", `<button class="pill" disabled>Joining…</button>`);
   if (jury.joined) {
@@ -1359,6 +1365,12 @@ function juryLineHtml(here: string, jury: api.Jury, rpc: boolean): string {
   }
   // an imdLend vault holds a borrowed seat, and a vault can't sign for a key
   if (state.lendings.has(here)) return line("Its owner's to join: the seat is on loan");
+  // a box image from before the jury: the newest published box, which a restart alone never fetches
+  if (state.updatingBox) return line(state.boxWords ? `Downloading · ${state.boxWords}` : "Downloading the new box…", `<button class="pill" disabled>Updating…</button>`);
+  if (!jury.boxed) {
+    const waits = state.updateWhenIdle;
+    return line(state.jurySaid ?? "Its box needs an update first", `<button class="pill" data-action="box-update" title="Download the new box and restart on it" ${waits ? "disabled" : ""}>${waits ? "Updates after this job" : "Update"}</button>`, Boolean(state.jurySaid));
+  }
   if (!jury.able) return line("Restart this agent first", `<button class="pill" data-action="restart" title="Restart (U)">Restart</button>`);
   const join = `<button class="pill" data-action="jury-join" title="Join the jury (J)">Join</button>`;
   return state.jurySaid ? line(state.jurySaid, join, true) : line("Check and approve onchain actions", join);
@@ -1368,6 +1380,35 @@ function juryLineHtml(here: string, jury: api.Jury, rpc: boolean): string {
 const signedOutHere = () => Boolean(state.hold?.kind === "fault" && state.hold.signedOut && state.box?.state === "running");
 /** The runtime this computer's agent thinks with, by name, as the network has it. */
 const runtimeOf = (agent: Agent) => runtimeName(agent) ?? "Claude";
+
+/**
+ * The newest published box, now, and this computer's agent started again on it: for a box image from before the jury,
+ * which the twice-daily look for a newer box would only take while the panel is closed. Never with a job on it.
+ */
+async function updateBox(): Promise<void> {
+  const local = state.agents.find((a) => a.tokenId === state.localToken);
+  if (state.updatingBox || !hereRunning()) return;
+  if (local && phaseFor(local).kind === "working") { state.updateWhenIdle = true; return render(); }
+  state.updateWhenIdle = false;
+  state.updatingBox = true;
+  state.boxWords = null;
+  state.jurySaid = null;
+  render();
+  try {
+    await api.boxPull();
+    state.boxWords = "starting";
+    render();
+    await api.boxRestart(settings.runtime);
+  } catch (error) {
+    state.jurySaid = `Couldn't update its box: ${String(error).replace(/^Error: /, "")}`;
+  } finally {
+    state.updatingBox = false;
+    state.boxWords = null;
+    state.box = await api.boxState().catch(() => state.box);
+    await readComputer();
+    render();
+  }
+}
 
 /** K: the key's field, out and ready to paste into. */
 function openRpcField(): void {
@@ -1657,6 +1698,12 @@ void listen<string>("update-available", (event) => { state.update = event.payloa
 void listen<string | null>("setup-progress", (event) => { state.settingUp = event.payload; render(); });
 // a pairing ended, its agent started or not: read again, so the agent shows at once
 void listen("box-pair-ended", () => void refresh(true));
+// the new box's download, as setup counts it, while the jury's Update fetches it
+void listen<{ step: string; words: string }>("setup-step-progress", (event) => {
+  if (!state.updatingBox || event.payload.step !== "pull") return;
+  state.boxWords = event.payload.words.replace(/^Downloading\s*/i, "").replace(/…$/, "");
+  render();
+});
 // a join's link, each time one comes, and none once it has ended
 void listen<api.JuryLink | null>("jury-link", (event) => { state.juryLink = event.payload; render(); });
 
@@ -1767,6 +1814,7 @@ app.addEventListener("click", (event) => {
   if (action === "alchemy") return void api.openAlchemy().catch(() => undefined);
   if (action === "jury-join" || action === "jury-open") return void joinJury();
   if (action === "jury-cancel") return void api.juryCancel().catch(() => undefined);
+  if (action === "box-update") return void updateBox();
   if (action === "theme") return setTheme(target.closest<HTMLElement>("[data-theme]")!.dataset.theme as api.Theme);
   if (action === "sounds") {
     event.preventDefault();
