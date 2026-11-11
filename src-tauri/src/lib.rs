@@ -1918,6 +1918,41 @@ fn pairing_link(url: &str) -> bool {
 /// imdLend, the market where seats are lent, which the network doesn't run.
 const LEND: &str = "https://imdlend.com";
 
+/// The seats imdLend's own index has in a wallet's vaults. A hint and no more: the panel shows a seat as lent only once
+/// the chain says a vault of that wallet's holds it, checked against imdLend's market, as for any other. The index is a
+/// free one that refuses a burst, so the panel asks it seldom, and a refusal says nothing.
+#[tauri::command]
+async fn lend_owned(wallet: String) -> Result<Vec<String>, String> {
+    if !hex_address(&wallet) {
+        return Err("not a wallet".into());
+    }
+    let response = http().get(format!("{LEND}/api/subgraph/account?account={}", wallet.to_lowercase())).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("imdLend answered {}", response.status().as_u16()));
+    }
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    Ok(owned_seats(&body, &wallet))
+}
+
+/// The seats in the vaults of the account imdLend's index answered for: `data.owned[].seats[].tokenId`, of the vaults it
+/// says this wallet owns.
+fn owned_seats(body: &serde_json::Value, wallet: &str) -> Vec<String> {
+    let mut seats: Vec<String> = Vec::new();
+    for vault in body["data"]["owned"].as_array().into_iter().flatten() {
+        if !vault["owner"].as_str().is_some_and(|owner| owner.eq_ignore_ascii_case(wallet)) {
+            continue;
+        }
+        for seat in vault["seats"].as_array().into_iter().flatten() {
+            if let Some(id) = seat["tokenId"].as_str().filter(|id| seat_number(id)) {
+                if !seats.iter().any(|known| known == id) {
+                    seats.push(id.to_string());
+                }
+            }
+        }
+    }
+    seats
+}
+
 /// Opens one of imdLend's pages, and no other: its pairing page, for a seat borrowed there, which takes the box's code
 /// from its link; a new listing, for a seat of this wallet's to lend; the lender's vaults, where a lent seat is withdrawn
 /// or lent again; the borrower's lendings; or its rewards, where a vault's are claimed for its owner and its operator at
@@ -3427,7 +3462,7 @@ pub fn run() {
             box_state, box_start, box_stop, box_restart, box_renewal, box_hold, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_sign_in_code, box_sign_in_open, box_sign_in_cancel, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
             docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound, set_theme,
-            restart_pc, set_open_at_login, rpc_state, rpc_setup, open_alchemy, jury_state, jury_join, jury_open, jury_cancel
+            restart_pc, set_open_at_login, lend_owned, rpc_state, rpc_setup, open_alchemy, jury_state, jury_join, jury_open, jury_cancel
         ])
         .setup(|app| {
             // The log of what went wrong, and a panic's place in it before the app goes.
@@ -3708,6 +3743,32 @@ mod tests {
         // the words after it are Claude Code's own, and change; this start is what the panel reads
         let ended = ended.expect_err("a made-up code is turned down");
         assert!(ended.starts_with("Login failed:"), "{ended}");
+    }
+
+    #[test]
+    fn imdlends_index_names_the_seats_in_a_wallets_vaults() {
+        let wallet = "0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40";
+        // as imdLend answered for it on 2026-11-11: a vault whose lending ended and was withdrawn, and one lending #88 now
+        let body: serde_json::Value = serde_json::from_str(r#"{"data":{"owned":[
+            {"id":"0x063259a21f5f14e0b4f075450caaa3ffa304660d","owner":"0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40","operator":"0x047f606fd5b2baa5f5c6c4ab8958e45cb6b054b7","ownerBps":4900,"seats":[],"lendings":[{"tokenId":"88","startedAt":"1793067659","endsAt":"1793071259","endedEarly":false}]},
+            {"id":"0x6ebc731c839cc6459ae197328c0698a15e12e6e9","owner":"0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40","operator":"0xf5288e06548db3219ea65089378152da4fe30ead","ownerBps":3000,"seats":[{"tokenId":"88","lending":{"startedAt":"1794392471","endsAt":"1794478871","endedEarly":false}}]},
+            {"id":"0x1111111111111111111111111111111111111111","owner":"0x2222222222222222222222222222222222222222","seats":[{"tokenId":"5"}]},
+            {"id":"0x3333333333333333333333333333333333333333","owner":"0xFE35E15BE885750D9B2363CBB6ABDD57AC9C4C40","seats":[{"tokenId":"88"},{"tokenId":"x9"},{"tokenId":"412"}]}
+        ]}}"#).unwrap();
+        // the seats held now, each once; none of another owner's vault, and nothing that isn't a seat number
+        assert_eq!(super::owned_seats(&body, wallet), ["88", "412"]);
+        assert!(super::owned_seats(&serde_json::json!({"error": "rate limited"}), wallet).is_empty());
+    }
+
+    /// imdLend's own index, asked for a real wallet's vaults: what the panel adds back when it lost a lent seat. Its
+    /// answer changes as seats are lent and withdrawn; on 2026-11-11 it had #88 in one of 0xfe35…4c40's vaults.
+    #[test]
+    #[ignore]
+    fn reads_imdlends_index_for_a_real_wallet() {
+        let seats = tauri::async_runtime::block_on(super::lend_owned("0xfe35e15be885750d9b2363cbb6abdd57ac9c4c40".into())).expect("imdLend answers");
+        println!("in its vaults: {seats:?}");
+        assert!(seats.iter().all(|seat| super::seat_number(seat)));
+        assert!(tauri::async_runtime::block_on(super::lend_owned("not a wallet".into())).is_err());
     }
 
     #[test]
