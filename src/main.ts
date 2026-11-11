@@ -630,6 +630,17 @@ function claim(wallet = state.rewards[0]?.wallet ?? watched()[0]): void {
 /** A seat in an imdLend vault, as read from it, with the vault and whether a machine of the seat's was up. */
 type Lent = Lending & { vault: string; online: boolean };
 
+/** When imdLend's index was last asked after each wallet's vaults: at the panel's first read, then every six hours. */
+const lendIndexAsked = new Map<string, number>();
+const LEND_INDEX_EVERY = 6 * 3_600_000;
+
+/** The seats imdLend's index has in a wallet's vaults, when it's due to be asked; none otherwise, or when it refuses. */
+async function onLend(wallet: string): Promise<string[]> {
+  if (Date.now() - (lendIndexAsked.get(wallet) ?? 0) < LEND_INDEX_EVERY) return [];
+  lendIndexAsked.set(wallet, Date.now());
+  return api.lendOwned(wallet).catch(() => []);
+}
+
 /**
  * Seats in imdLend vaults. A connected wallet's seat that left it is asked after: its holder now, from the network, and
  * whether that's an imdLend vault of the wallet's, from the chain, which `lend` asks as seldom as it can. One that went
@@ -644,11 +655,15 @@ async function readLendings(held: Array<{ wallet: string; tokens: Array<{ tokenI
     if (!linked(wallet)) continue;
     const now = tokens.map((t) => t.tokenId);
     const kept: string[] = [];
-    for (const tokenId of (settings.held[wallet] ?? []).filter((t) => !now.includes(t))) {
+    // the seats this wallet held, and any imdLend's index has in its vaults that the panel lost track of
+    const known = settings.held[wallet] ?? [];
+    const lost = (await onLend(wallet)).filter((t) => !known.includes(t));
+    for (const tokenId of [...known, ...lost].filter((t) => !now.includes(t))) {
       const record = await api.seatRecord(tokenId, 0).catch(() => null);
       const holder = record?.owner?.toLowerCase();
       if (!holder) { kept.push(tokenId); asBefore(tokenId); continue; }
-      const lending = holder === wallet.toLowerCase() ? null : await lend.read(holder, tokenId);
+      // a record still naming this wallet for a seat its list no longer has is the network catching up: asked again
+      const lending = holder === wallet.toLowerCase() ? undefined : await lend.read(holder, tokenId);
       if (lending === undefined) { kept.push(tokenId); asBefore(tokenId); continue; }
       if (lending && lending.owner === wallet.toLowerCase()) {
         found.set(tokenId, { ...lending, vault: holder, online: record?.online ?? false });

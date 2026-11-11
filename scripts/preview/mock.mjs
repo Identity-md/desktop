@@ -112,6 +112,7 @@ export function installMock({ fixtures, scenario }) {
         case "pairing_pending": return scenario.pending ? { code: "QX7M4KD2", url: "https://api.imd.fun/pair?code=QX7M4KD2" } : null;
         // taken off its seat: the box gone, its pairing revoked
         case "box_unlink": return new Promise((done) => setTimeout(() => { scenario.unpaired = true; box.state = "stopped"; done(); }, 1500));
+        case "lend_owned": return scenario.lendOwned ?? [];
         case "lend_vault":
           return lending && args.holder.toLowerCase() === lending.vault ? { owner: lending.owner, operator: lending.operator, owner_bps: lending.owner_bps } : null;
         case "lend_span": {

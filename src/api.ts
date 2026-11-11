@@ -177,6 +177,8 @@ export const openLend = (page: "pair" | "list" | "vaults" | "run" | "rewards", o
  * null when it isn't one. Neither ever changes. A read that fails throws, which says nothing either way.
  */
 export const lendVault = (holder: string) => invoke<Terms | null>("lend_vault", { holder });
+/** The seats imdLend's own index has in a wallet's vaults: a hint, each checked on the chain before it shows. */
+export const lendOwned = (wallet: string) => invoke<string[]>("lend_owned", { wallet });
 /** A seat's latest lending in a vault: null for a seat the vault never lent. A read that fails throws. */
 export const lendSpan = (vault: string, seat: string) => invoke<Span | null>("lend_span", { vault, seat });
 /** The worker's newest releases, from GitHub, as daemons update from them. */
