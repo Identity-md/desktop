@@ -1346,9 +1346,11 @@ function computerHtml(): string {
 }
 
 function juryLineHtml(here: string, jury: api.Jury, rpc: boolean): string {
-  const line = (sub: string, button = "", bad = false) => `<div class="line"><span>Jury<span class="sub${bad ? " bad" : ""}"${bad ? ' role="status"' : ""}>${esc(sub)}</span></span>${button}</div>`;
+  const line = (sub: string, button = "", bad = false, more = "") => `<div class="line"><span>Jury<span class="sub${bad ? " bad" : ""}"${bad ? ' role="status"' : ""}>${esc(sub)}</span>${more ? `<span class="sub">${esc(more)}</span>` : ""}</span>${button}</div>`;
   if (state.juryLink) {
-    return line(`Sign with #${here}'s wallet`, `<span class="line-value"><button class="link" data-action="jury-cancel" title="Cancel">Cancel</button><button class="pill" data-action="jury-open" title="Open the link again (J)">Open link</button></span>`);
+    // the page shows the key it asks for: its end here, to see they're the same before signing
+    const key = state.juryLink.key;
+    return line(`Sign with #${here}'s wallet`, `<span class="line-value"><button class="link" data-action="jury-cancel" title="Cancel">Cancel</button><button class="pill" data-action="jury-open" title="Open the link again (J)">Open link</button></span>`, false, key ? `Key on the page ends ${key.slice(-4)}` : "");
   }
   if (state.joining) return line("Making its key…", `<button class="pill" disabled>Joining…</button>`);
   if (jury.joined) {

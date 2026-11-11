@@ -2462,6 +2462,8 @@ struct Jury {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 struct JuryLink {
     url: String,
+    /// The key the page asks the holder to sign for, as the setup printed it: the panel shows its end to compare.
+    key: Option<String>,
     /// When the link runs out, in milliseconds; a fresh one follows until the setup's hour is up.
     until: u64,
 }
@@ -2565,6 +2567,12 @@ fn jury_page(link: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// The key a link is for, from the setup's line "  juror key  0xb601…9f5a   (the page shows it too: …)".
+fn juror_key(line: &str) -> Option<String> {
+    let key = line.trim_start().strip_prefix("juror key")?.split_whitespace().next()?;
+    (key.len() == 42 && key.starts_with("0x") && key[2..].chars().all(|c| c.is_ascii_hexdigit())).then(|| key.to_lowercase())
+}
+
 /// How many minutes a link is good for, from the setup's line "  good for   10 minutes, until 19:58 UTC; …".
 fn good_for(line: &str) -> Option<u64> {
     let rest = line.trim_start().strip_prefix("good for")?.trim_start();
@@ -2649,12 +2657,17 @@ async fn jury_join(app: tauri::AppHandle) -> Result<(), String> {
                     link_next = false;
                     let url = line.trim();
                     if jury_page(url) {
-                        set_jury_link(&app, Some(JuryLink { url: url.to_string(), until: now_ms() + 10 * 60_000 }));
+                        set_jury_link(&app, Some(JuryLink { url: url.to_string(), key: None, until: now_ms() + 10 * 60_000 }));
                         // the first link opens by itself; a fresh one is the panel's to open, as the first's tab says it's closed
                         if !opened {
                             opened = true;
                             let _ = app.opener().open_url(url, None::<&str>);
                         }
+                    }
+                } else if let Some(key) = juror_key(&line) {
+                    let link = JURY_LINK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(link) = link {
+                        set_jury_link(&app, Some(JuryLink { key: Some(key), ..link }));
                     }
                 } else if let Some(minutes) = good_for(&line) {
                     let link = JURY_LINK.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -4076,6 +4089,10 @@ mod tests {
         assert_eq!(super::good_for("  good for   10 minutes, until 19:58 UTC; a fresh link is printed if it runs out"), Some(10));
         assert_eq!(super::good_for("  good for   1 minute, until 19:58 UTC"), Some(1));
         assert_eq!(super::good_for("  signed by  0x047f…"), None);
+        // the key the page shows, to compare, as the setup printed it for seat 22 on 2026-11-11
+        assert_eq!(super::juror_key("  juror key  0xb601720c7ca68fbbaace13b5384c3f91403e9f5a   (the page shows it too: sign only if the two are the same)").as_deref(), Some("0xb601720c7ca68fbbaace13b5384c3f91403e9f5a"));
+        assert_eq!(super::juror_key("  juror key  the one standing for the seat   (the key that is removed: …)"), None);
+        assert_eq!(super::juror_key("made juror key 0xb601720c7ca68fbbaace13b5384c3f91403e9f5a in the juror user's key folder"), None);
     }
 
     #[test]

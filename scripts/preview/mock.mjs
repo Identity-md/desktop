@@ -150,7 +150,7 @@ export function installMock({ fixtures, scenario }) {
         case "jury_state": return jury;
         // the key made, then its link, then a wait for the holder's signature that only Cancel ends
         case "jury_join":
-          setTimeout(() => window.__emit("jury-link", { url: "https://explorer.imd.fun/jury/register/kr7Qx9aZ", until: Date.now() + 600_000 }), 700);
+          setTimeout(() => window.__emit("jury-link", { url: "https://explorer.imd.fun/jury/register/kr7Qx9aZ", until: Date.now() + 600_000, key: "0xb601720c7ca68fbbaace13b5384c3f91403e9f5a" }), 700);
           return new Promise((done, failed) => { joining = { done, failed }; });
         case "jury_cancel": window.__emit("jury-link", null); joining?.failed("stopped"); return null;
         case "jury_open": case "open_alchemy": return null;
