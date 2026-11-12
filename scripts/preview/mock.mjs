@@ -127,6 +127,10 @@ export function installMock({ fixtures, scenario }) {
         case "box_sign_in":
           setTimeout(() => window.__emit("box-signin-page", null), 300);
           return new Promise((done, failed) => { signingIn = { done, failed }; });
+        // Codex's sign-in: OpenAI's page and its one-time code a moment on, then it waits for the code to be entered there
+        case "box_sign_in_codex":
+          setTimeout(() => window.__emit("box-signin-device", { url: "https://auth.openai.com/codex/device", code: "K7QD-3WMPX" }), 300);
+          return new Promise((done, failed) => { signingIn = { done, failed }; });
         case "box_sign_in_code":
           setTimeout(() => { if (scenario.setup) scenario.setup = { ...scenario.setup, claude: true }; signingIn?.done(null); }, 1500);
           return null;

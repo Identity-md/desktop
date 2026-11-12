@@ -30,6 +30,18 @@ const installs = mac || windows;
 /** This computer, as its person calls it. */
 const computer = mac ? "Mac" : windows ? "PC" : "computer";
 const settings = (() => { try { return JSON.parse(localStorage.getItem("imd-agents:settings") ?? "{}") as { runtime?: string }; } catch { return {}; } })();
+/** What the box thinks with: Claude, unless Codex was picked or the box already runs on it. */
+let runtime = settings.runtime ?? "claude";
+/**
+ * The AI picked to think with: Claude, on a Claude plan, or Codex, on a ChatGPT one. Asked once, right after the first
+ * screen, and kept; step 4's Change asks again.
+ */
+type Ai = "claude" | "codex";
+const AI = "imd-agents:ai";
+const savedAi = (() => { try { const ai = localStorage.getItem(AI); return ai === "claude" || ai === "codex" ? ai : null; } catch { return null; } })();
+const codex = () => runtime.startsWith("codex");
+/** The AI by the name step 4 connects it by. */
+const ai = () => (codex() ? "Codex" : "Claude");
 /** Whether Continue was pressed on the first screen, now or before: reopened part way, setup opens on its steps. */
 const BEGUN = "imd-agents:setup-begun";
 const begun = (() => { try { return localStorage.getItem(BEGUN) === "1"; } catch { return false; } })();
@@ -53,6 +65,8 @@ const state = {
   cancelled: false,
   /** Claude's sign-in page open in the browser, the code pasted here from it, and whether Claude Code is checking it. */
   signinOpen: false,
+  /** Codex's sign-in: OpenAI's page, open in the browser, and the one-time code to enter there. */
+  device: null as { url: string; code: string } | null,
   code: "",
   checking: false,
   /** A pairing this window found already waiting, opened again after its code went out: its end comes as an event. */
@@ -63,6 +77,14 @@ const state = {
   asking: null as "first" | "change" | null,
   /** The answer picked on the seat screen, kept by Continue. */
   picked: "own" as Seat,
+  /** The AI, as answered; null until asked. */
+  ai: savedAi as Ai | null,
+  /** The AI screen, while it shows: after the first screen, or from step 4's Change. */
+  askingAi: null as "first" | "change" | null,
+  /** The answer picked on the AI screen, kept by Continue. */
+  pickedAi: "claude" as Ai,
+  /** The AI screen came first this time, so the seat's Esc goes back to it. */
+  aiFirst: false,
   register: null as string | null,
   error: null as string | null,
   errorDetail: null as string | null,
@@ -84,14 +106,20 @@ function nextStep(): Step | null {
   if (!at) return null;
   if (at.docker !== "running") return "docker";
   if (!at.image) return "pull";
-  if (!at.worker) return "install";
-  if (!at.claude) return "signin";
+  if (!installed(at)) return "install";
+  if (!signedIn(at)) return "signin";
   if (!state.token) return "pair";
   return state.running ? null : "start";
 }
 
+/** The worker is in the box, and Codex beside it where the box thinks with it. */
+const installed = (at: api.Setup) => at.worker && (!codex() || at.codex_installed);
+/** The AI the box thinks with is signed in. */
+const signedIn = (at: api.Setup) => (codex() ? at.codex : at.claude);
+
 /** Each step by what it sets up, in words for someone who has never heard of a container or a worker. */
 const NAMES: Record<Exclude<Step, "start">, string> = { docker: "Install Docker", pull: "Install IMD Box", install: "Install IMD Agent", signin: "Connect Claude", pair: "Connect IMD Agent" };
+const nameOf = (step: Exclude<Step, "start">) => (step === "signin" ? `Connect ${ai()}` : NAMES[step]);
 
 let timer: ReturnType<typeof setTimeout> | null = null;
 /** Windows: Docker started by setup itself, once, on opening to it installed and not running, as after WSL's restart. */
@@ -109,7 +137,7 @@ async function check(): Promise<void> {
   // the panel's row: where setup has got
   const next = nextStep();
   const order: Step[] = ["docker", "pull", "install", "signin", "pair"];
-  void emit("setup-progress", next && next !== "start" ? `Step ${order.indexOf(next) + 1} of 5 · ${NAMES[next]}` : next === "start" ? "Ready to start" : null);
+  void emit("setup-progress", next && next !== "start" ? `Step ${order.indexOf(next) + 1} of 5 · ${nameOf(next)}` : next === "start" ? "Ready to start" : null);
   if (state.busy === "docker") timer = setTimeout(() => void check(), 2500);
   // reopened after WSL's restart on a Docker installed before it: setup carries on by itself
   else if (windows && !startedDocker && !state.intro && state.at?.docker === "stopped") {
@@ -145,12 +173,12 @@ async function step(): Promise<void> {
       state.since.docker = Date.now();
       return void check();
     }
-    if (next === "signin") await api.boxSignIn();
+    if (next === "signin") await (codex() ? api.boxSignInCodex() : api.boxSignIn());
     if (next === "pull") await api.boxPull();
-    if (next === "install") await api.boxInstall();
-    if (next === "pair") state.register = (await api.boxPair(settings.runtime ?? "claude")).register;
+    if (next === "install") await api.boxInstall(runtime);
+    if (next === "pair") state.register = (await api.boxPair(runtime)).register;
     if (next === "start") {
-      await api.boxStart(settings.runtime ?? "claude");
+      await api.boxStart(runtime);
       state.started = true;
     }
   } catch (error) {
@@ -165,6 +193,7 @@ async function step(): Promise<void> {
   state.copied = false;
   state.cancelled = false;
   state.signinOpen = false;
+  state.device = null;
   state.code = "";
   state.checking = false;
   await check();
@@ -248,6 +277,13 @@ void listen("box-signin-page", () => {
   state.signinOpen = true;
   render();
   document.querySelector<HTMLInputElement>("#setup [data-field=code]")?.focus();
+});
+
+// Codex's sign-in printed OpenAI's page, open in the browser now, and the code to enter there, good for 15 minutes
+void listen<{ url: string; code: string }>("box-signin-device", (event) => {
+  state.device = event.payload;
+  state.expires = Date.now() + 15 * 60_000;
+  render();
 });
 
 /** Hands Claude Code the code pasted from its page. The sign-in then ends by itself, signed in or saying why not. */
@@ -345,18 +381,19 @@ function docker(at: api.Setup | null, busy: boolean): { about: string; act: stri
 function button(next: Step | null): string {
   if (!next) return `<button id="go" class="primary big" data-action="done" title="Done (Enter)"><span class="label">Done</span></button>`;
   if (state.busy !== next) {
-    const label = next === "docker" ? docker(state.at, false).act : next === "start" ? `Start Agent #${state.token}` : NAMES[next];
+    const label = next === "docker" ? docker(state.at, false).act : next === "start" ? `Start Agent #${state.token}` : nameOf(next);
     return `<button id="go" class="primary big" data-action="step" title="${esc(label)} (Enter)"><span class="label">${esc(label)}</span></button>`;
   }
   // a code pasted from Claude's page: the button hands it over
   if (next === "signin" && state.signinOpen && state.code.trim() && !state.checking) {
     return `<button id="go" class="primary big" data-action="signin-code" title="Connect Claude (Enter)"><span class="label">Connect Claude</span></button>`;
   }
-  const signin = state.checking ? "Checking the code…" : state.signinOpen ? "Waiting for Claude's code…" : "Opening Claude's sign-in…";
+  const signin = state.checking ? "Checking the code…" : state.signinOpen ? "Waiting for Claude's code…" : state.device ? "Waiting for the code…" : `Opening ${ai()}'s sign-in…`;
   const words = next === "docker" ? docker(state.at, true).busy : next === "pull" ? state.words.pull ?? "Starting the download…" : next === "install" ? state.words.install ?? "Installing…"
     : next === "signin" ? signin : next === "pair" ? state.words.pair ?? (seat() === "friend" ? "Waiting for your friend…" : "Waiting for your wallet…") : "Starting…";
-  // the code counts down, where every other step counts up; signing in waits on the person, with no clock to hurry them
-  const clock = next === "pair" && state.pairing && state.expires ? left() : next === "signin" ? "" : elapsed(next);
+  // a code counts down, where every other step counts up; Claude's sign-in waits on the person, with no clock to hurry them
+  const counting = (next === "pair" && state.pairing) || (next === "signin" && state.device);
+  const clock = counting && state.expires ? left() : next === "signin" ? "" : elapsed(next);
   const [, got, total] = words.match(/([\d,]+) of ([\d,]+) MB/) ?? [];
   const share = got && total ? Math.min(100, (100 * Number(got.replace(/,/g, ""))) / Number(total.replace(/,/g, ""))) : null;
   return `<button id="go" class="primary big busy" disabled>${share === null ? `<span class="spinner"></span>` : `<span class="fill" style="width: ${share.toFixed(1)}%"></span>`}<span class="label">${esc(clock ? words.replace(/…$/, "") : words)}${clock}</span></button>`;
@@ -369,7 +406,7 @@ function nextHelp(next: Step | null): string {
   if (next === "docker") return docker(state.at, busy).help;
   if (next === "pull" && busy && state.words.pull === "Unpacking…") return `Docker is unpacking the box. On an older ${computer} this takes a few minutes.`;
   // the page, said before it opens; once it's out, step 4's own line says what to do there
-  if (next === "signin" && !busy) return "Claude's sign-in opens in your browser.";
+  if (next === "signin" && !busy) return `${codex() ? "OpenAI's" : "Claude's"} sign-in opens in your browser.`;
   // the page that approves the seat, said before it opens; once it's out, step 5's own line says what to do there
   if (next === "pair" && !busy && seat() === "lend") return "imdLend opens next, with your code filled in. Approve it there.";
   if (next === "pair" && !busy && seat() === "own") return "Your browser opens next. Approve there with the wallet that holds your seat.";
@@ -385,16 +422,17 @@ function approving(): string {
   return "Approve in your browser with your seat's wallet.";
 }
 
-type Screen = "intro" | "seat" | "steps" | "agent";
+type Screen = "intro" | "ai" | "seat" | "steps" | "agent";
 
 /**
- * Four screens, one job each: the first, until Continue, says what it is, why it's safe and what it needs; the
- * seat, asked once; the steps; then, once the five are done, the agent itself, its face lit when it runs.
+ * Five screens, one job each: the first, until Continue, says what it is, why it's safe and what it needs; the AI and
+ * the seat, each asked once; the steps; then, once the five are done, the agent itself, its face lit when it runs.
  */
 function screenOf(): Screen {
   const next = nextStep();
   if (state.at && (next === "start" || !next)) return "agent";
   if (state.intro) return "intro";
+  if (state.askingAi) return "ai";
   return state.asking ? "seat" : "steps";
 }
 const onIntro = () => screenOf() === "intro";
@@ -404,9 +442,9 @@ function introHtml(): string {
   const short = state.free !== null && state.free < NEEDED
     ? `<p class="note warn" role="status">This ${computer} has ${(state.free / 1e9).toFixed(1)} GB free. Setup needs about ${NEEDED / 1e9} GB.</p>`
     : "";
-  // what setup can't check for: Claude Code comes with every paid Claude plan, and Codex isn't in the box. The seat
-  // is the next screen's
-  const seat = `<p class="setup-needs">You'll need <button class="text-link" data-action="claude-plans" title="Claude's plans (C)">a paid Claude plan</button>.</p>`;
+  // what setup can't check for: Claude Code comes with every paid Claude plan, Codex with the paid ChatGPT ones. The
+  // seat is the next screen's
+  const seat = `<p class="setup-needs">You'll need a paid <button class="text-link" data-action="claude-plans" title="Claude's plans (C)">Claude</button> or <button class="text-link" data-action="chatgpt-plans" title="ChatGPT's plans">ChatGPT</button> plan.</p>`;
   return `<div class="hero">
       <img class="setup-icon" src="/app-icon.png" width="72" height="72" alt="">
       <h1>Run an IMD Agent</h1>
@@ -420,12 +458,62 @@ function introHtml(): string {
     ${foot(`${short}${seat}`, `<button id="go" class="primary big" data-action="begin" title="Continue (Enter)"><span class="label">Continue</span></button>`, false)}`;
 }
 
-/** Past the first screen, remembered, so setup reopened opens on its steps; the seat comes next, unless it's known. */
+/** Past the first screen, remembered, so setup reopened opens on its steps; the AI and the seat come next, unless known. */
 function begin(): void {
   state.intro = false;
   try { localStorage.setItem(BEGUN, "1"); } catch { /* setup reopened shows the first screen again */ }
+  if (state.ai === null) return askAi("first");
   if (state.seat === null) return ask("first");
   render();
+}
+
+/** The two answers: the AI by its name, and the plan it signs in with. */
+const AIS: Array<{ key: Ai; name: string; plan: string }> = [
+  { key: "claude", name: "Claude", plan: "Uses your Claude plan" },
+  { key: "codex", name: "Codex", plan: "Uses your ChatGPT plan" },
+];
+
+function askAi(mode: NonNullable<typeof state.askingAi>): void {
+  state.askingAi = mode;
+  state.aiFirst = mode === "first";
+  state.pickedAi = codex() ? "codex" : "claude";
+  render();
+}
+
+/** An answer picked on the AI screen, by click, number or arrow. */
+function pickAi(ai: Ai): void {
+  state.pickedAi = ai;
+  render();
+}
+
+/**
+ * Continue on the AI screen: the answer kept, and the box thinks with it from now on, as the panel keeps it too. The
+ * first time, the seat comes next.
+ */
+function keepAi(): void {
+  const first = state.askingAi === "first";
+  state.ai = state.pickedAi;
+  try { localStorage.setItem(AI, state.ai); } catch { /* asked again next time */ }
+  runtime = state.ai === "codex" ? runtime.replace(/^claude/, "codex") : runtime.replace(/^codex/, "claude");
+  void emit("setup-runtime", runtime);
+  state.askingAi = null;
+  state.error = null;
+  if (first && state.seat === null) return ask("first");
+  render();
+}
+
+/** Which AI it thinks with: one question, two answers, each with the plan it uses. Claude is picked to begin with. */
+function aiHtml(): string {
+  const rows = AIS.map((a, i) => `<button class="seat-choice${state.pickedAi === a.key ? " on" : ""}" role="radio" aria-checked="${state.pickedAi === a.key}" data-ai="${a.key}" title="${esc(a.name)} (${i + 1})">
+      <span class="radio" aria-hidden="true"></span><span class="step-lines"><span class="step-name">${esc(a.name)}</span><span class="sub">${esc(a.plan)}</span></span>
+    </button>`).join("");
+  const go = `<button id="go" class="primary big" data-action="keep-ai" title="Continue (Enter)"><span class="label">Continue</span></button>`;
+  return `<div class="question">
+      <h1>Which AI will it think with?</h1>
+      <p class="setup-intro">Your agent signs in with your own plan.</p>
+      <div class="seat-choices" role="radiogroup" aria-label="Which AI will it think with?">${rows}</div>
+    </div>
+    ${foot("", go, false)}`;
 }
 
 /** The three answers: where the seat is, said the way its person would. */
@@ -496,10 +584,20 @@ const SEAT_WORDS: Record<Seat, string> = { own: "Seat in your wallet", friend: "
 
 /** Step 5 waiting on its button: the one moment Change shows. */
 const changeable = () => nextStep() === "pair" && !state.busy;
+/** Step 4 not done and nothing under way: Change shows there, and asks which AI again. */
+const aiChangeable = () => Boolean(state.at && !signedIn(state.at) && !state.busy);
+
+/** Step 4's line: what to do on the page that's out, or what it is. */
+function signinAbout(): string {
+  if (state.busy === "signin" && state.signinOpen) return "Sign in on Claude's page, then paste its code below.";
+  if (state.busy === "signin" && state.device) return "Enter this code on OpenAI's page.";
+  return "The AI your agent thinks with. Sign in once.";
+}
 
 function html(): string {
   const screen = screenOf();
   if (screen === "intro") return introHtml();
+  if (screen === "ai") return aiHtml();
   if (screen === "seat") return seatHtml();
   if (screen === "agent") return agentHtml();
   const at = state.at;
@@ -509,14 +607,15 @@ function html(): string {
   const steps: Array<{ key: Exclude<Step, "start">; done: boolean; doneWords: string; about: string }> = [
     { key: "docker", done: at?.docker === "running", doneWords: "Running", about: docker(at, false).about },
     { key: "pull", done: Boolean(at?.image), doneWords: "Installed", about: "The sealed box your agent works in." },
-    { key: "install", done: Boolean(at?.worker), doneWords: "Installed", about: "The IMD worker and Claude Code, in the sealed box." },
-    { key: "signin", done: Boolean(at?.claude), doneWords: "Connected", about: state.busy === "signin" && state.signinOpen ? "Sign in on Claude's page, then paste its code below." : "The AI your agent thinks with. Sign in once." },
+    { key: "install", done: Boolean(at && installed(at)), doneWords: "Installed", about: `The IMD worker and ${codex() ? "Codex" : "Claude Code"}, in the sealed box.` },
+    { key: "signin", done: Boolean(at && signedIn(at)), doneWords: "Connected", about: signinAbout() },
     { key: "pair", done: Boolean(state.token), doneWords: `Connected · Agent #${state.token}`, about: state.busy === "pair" && state.pairing ? approving() : SEAT_WORDS[seat()] },
   ];
   const change = ` · <button class="text-link" data-action="change-seat" title="Change where your seat is (C)">Change</button>`;
+  const changeAi = ` · <button class="text-link" data-action="change-ai" title="Change which AI it thinks with (C)">Change</button>`;
   const list = steps.map((s, i) => `<div class="line step${s.done ? " complete" : s.key === next ? " next" : ""}" id="step-${s.key}">
       <span class="step-num" aria-hidden="true">${s.done ? CHECK : `<b>${i + 1}</b>`}</span>
-      <span class="step-lines"><span class="step-name">${esc(NAMES[s.key])}</span><span class="sub">${esc(s.done ? s.doneWords : s.about)}${s.key === "pair" && changeable() ? change : ""}</span></span>
+      <span class="step-lines"><span class="step-name">${esc(nameOf(s.key))}</span><span class="sub">${esc(s.done ? s.doneWords : s.about)}${s.key === "pair" && changeable() ? change : ""}${s.key === "signin" && aiChangeable() ? changeAi : ""}</span></span>
     </div>`).join("");
   const page = seat() === "lend" ? "Open imdLend" : seat() === "friend" ? "Copy link" : "Open page";
   const pairing = state.busy === "pair" && state.pairing
@@ -525,10 +624,13 @@ function html(): string {
   const signin = state.busy === "signin" && state.signinOpen
     ? `<div class="pairing"><label class="code-label" for="claude-code">Code from Claude</label><input id="claude-code" class="code-input" data-field="code" value="${esc(state.code)}" placeholder="Paste it here" spellcheck="false" autocomplete="off"${state.checking ? " disabled" : ""}><div class="actions"><button class="pill" data-action="signin-cancel" title="Cancel (Esc)">Cancel</button><button class="pill" data-action="signin-open" title="Open Claude's page again">Open Claude's page</button></div></div>`
     : "";
+  const device = state.busy === "signin" && state.device
+    ? `<div class="pairing"><div class="code">${esc(state.device.code)}</div><div class="actions"><button class="pill" data-action="signin-cancel" title="Cancel (Esc)">Cancel</button><button class="pill" data-action="signin-open" title="Open page (Enter)">Open page</button></div></div>`
+    : "";
   const help = nextHelp(next);
   const go = at ? button(next) : `<button id="go" class="primary big busy" disabled><span class="spinner"></span><span class="label">Looking at this computer…</span></button>`;
   return `<section class="steps">${list}</section>
-    ${foot(`${pairing}${signin}${help ? `<p class="step-help">${help}</p>` : ""}${errorLine()}`, go, true)}`;
+    ${foot(`${pairing}${signin}${device}${help ? `<p class="step-help">${help}</p>` : ""}${errorLine()}`, go, true)}`;
 }
 
 const root = document.getElementById("setup")!;
@@ -607,12 +709,17 @@ root.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
   const seat = target.closest<HTMLElement>("[data-seat]")?.dataset.seat as Seat | undefined;
   if (seat) return pick(seat);
+  const ai = target.closest<HTMLElement>("[data-ai]")?.dataset.ai as Ai | undefined;
+  if (ai) return pickAi(ai);
   const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action === "begin") return begin();
   if (action === "keep") return keep();
   if (action === "change-seat") return ask("change");
   if (action === "seats") return void api.openSeats();
   if (action === "claude-plans") return void api.openClaudePlans();
+  if (action === "chatgpt-plans") return void api.openChatgptPlans();
+  if (action === "keep-ai") return keepAi();
+  if (action === "change-ai") return askAi("change");
   if (action === "step") return void step();
   if (action === "done") return void api.setupDone();
   if (action === "docker-terms") return void api.openDockerTerms();
@@ -637,9 +744,30 @@ function seatKey(event: KeyboardEvent): void {
   if (event.key === "g") return void api.openSeats();
   if (event.key === "Enter") return keep();
   if (event.key === "Escape") {
-    // the first time, back to the first screen; from the steps, back to them as they were
-    if (state.asking === "first") state.intro = true;
+    // the first time, back to the screen before it; from the steps, back to them as they were
+    if (state.asking === "first") {
+      if (state.aiFirst) state.askingAi = "first";
+      else state.intro = true;
+    }
     state.asking = null;
+    render();
+  }
+}
+
+/** The AI screen by keys: 1, 2 or the arrows pick, Enter goes on, Escape goes back without a change. */
+function aiKey(event: KeyboardEvent): void {
+  const number = Number(event.key);
+  if (number >= 1 && number <= AIS.length) return pickAi(AIS[number - 1]!.key);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const at = AIS.findIndex((a) => a.key === state.pickedAi) + (event.key === "ArrowDown" ? 1 : -1);
+    return pickAi(AIS[(at + AIS.length) % AIS.length]!.key);
+  }
+  if (event.key === "Enter") return keepAi();
+  if (event.key === "Escape") {
+    // the first time, back to the first screen; from the steps, back to them as they were
+    if (state.askingAi === "first") state.intro = true;
+    state.askingAi = null;
     render();
   }
 }
@@ -652,10 +780,18 @@ window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") return cancelSignIn();
     return;
   }
+  // while OpenAI's page is out, Enter opens it again and Escape stops the sign-in
+  if (state.busy === "signin" && state.device) {
+    if (event.key === "Enter") return void api.boxSignInOpen().catch(() => undefined);
+    if (event.key === "Escape") return cancelSignIn();
+    return;
+  }
   if (event.key === "?") return void api.openSetupHelp();
+  if (screenOf() === "ai") return aiKey(event);
   if (screenOf() === "seat") return seatKey(event);
   if (event.key === "c" && onIntro()) return void api.openClaudePlans();
   if (event.key === "c" && changeable()) return ask("change");
+  if (event.key === "c" && aiChangeable()) return askAi("change");
   // while the wallet's page is out, Enter opens it again and Escape stops pairing
   if (state.busy === "pair" && state.pairing) {
     if (event.key === "Enter") return openApproval();

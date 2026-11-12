@@ -64,6 +64,9 @@ describe("an agent holding its own work", () => {
     // a login past its time limit, word for word as a box said it on 2026-11-11: signed out, and Sign in fixes it
     const ranOut = holdOf("self-test failed, taking no work: Failed to authenticate: this login reached its time limit and cannot be renewed. Run `claude auth login` to sign in again, or use `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN for unattended jobs. Checking again in 11m, or at once on a restart");
     expect(ranOut).toMatchObject({ kind: "fault", signedOut: true });
+    // Codex's own words for a box with no login, or one whose refresh was refused
+    expect(holdOf("self-test failed, taking no work: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header. Checking again in 10m, or at once on a restart")).toMatchObject({ kind: "fault", signedOut: true });
+    expect(holdOf("self-test failed, taking no work: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again. Checking again in 10m")).toMatchObject({ kind: "fault", signedOut: true });
     expect(holdingLine(ranOut, null)).toBe("Not taking jobs · Claude is signed out");
     expect(holdingWords(ranOut, null)).toBe("Claude's sign-in in this box ran out, so it takes no jobs. Sign in again, and it takes jobs at once.");
     // any other failed check is still only that
@@ -323,6 +326,10 @@ describe("numbers", () => {
     // Claude Code's sign-in turning down a code, as `claude auth login` writes it; one that can't reach Claude is the network
     expect(setupErrorWords("Login failed: Request failed with status code 400")).toMatch(/^Claude didn't take that code/);
     expect(setupErrorWords("Login failed: getaddrinfo ENOTFOUND platform.claude.com")).toMatch(/^This computer can't reach the internet/);
+    // Codex's sign-in: its code ran out, OpenAI turned it down, or it couldn't reach OpenAI
+    expect(setupErrorWords("Error logging in with device code: device auth timed out after 15 minutes")).toBe("The code ran out before it was entered. Connect again for a new one.");
+    expect(setupErrorWords("Error logging in with device code: device code request failed with status 403 Forbidden")).toMatch(/^Codex didn't sign in/);
+    expect(setupErrorWords("Error logging in with device code: error sending request for url (https://auth.openai.com/api/accounts/deviceauth/usercode): client error (Connect): dns error: failed to lookup address information: Name or service not known")).toMatch(/^This computer can't reach the internet/);
     // one it does not know: Docker's error, not the line after it
     expect(setupErrorWords("docker: Error response from daemon: range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available\nRun 'docker run --help' for more information")).toBe("range of CPUs is from 0.01 to 2.00, as there are only 2 CPUs available");
     expect(setupErrorWords("")).toBe("Something went wrong. Try again.");
