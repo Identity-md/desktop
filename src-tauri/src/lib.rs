@@ -1,4 +1,4 @@
-//! IMD Agents: every IMD agent a wallet holds, from the menu bar (macOS) or the tray (Windows, Linux).
+//! IMD Worker: every IMD agent a wallet holds, from the menu bar (macOS) or the tray (Windows, Linux).
 //!
 //! The webview draws; this side does everything that touches the network, the key or Docker, so the
 //! page never holds a credential and never gets a general "sign this" or "fetch that URL" power:
@@ -321,11 +321,11 @@ fn sign(key: &SigningKey, text: &str) -> String {
     B64.encode(signature.to_der().as_bytes())
 }
 
-/// What the approval page calls this app: "IMD Agents on MacBook Pro", never the computer's own name.
+/// What the approval page calls this app: "IMD Worker on MacBook Pro", never the computer's own name.
 fn app_name() -> String {
     let model = machine_model();
     let clean: String = model.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect();
-    let name = if clean.trim().is_empty() { "IMD Agents".to_string() } else { format!("IMD Agents on {}", clean.trim()) };
+    let name = if clean.trim().is_empty() { "IMD Worker".to_string() } else { format!("IMD Worker on {}", clean.trim()) };
     name.chars().take(64).collect()
 }
 
@@ -1376,7 +1376,7 @@ fn install_docker_from(app: &tauri::AppHandle, dir: &Path, dmg: &Path) -> Result
         }
         progress(app, "docker", "Waiting for your password…");
         let install = docker.join("Contents/MacOS/install");
-        run_as_admin(app, &format!("'{}' --accept-license --user={user}", install.display()), "IMD Agents is installing Docker Desktop.", &dir.join("install"))
+        run_as_admin(app, &format!("'{}' --accept-license --user={user}", install.display()), "IMD Worker is installing Docker Desktop.", &dir.join("install"))
     })();
     if !Command::new("hdiutil").args(["detach", "-quiet"]).arg(&mount).status().is_ok_and(|status| status.success()) {
         let _ = Command::new("hdiutil").args(["detach", "-force", "-quiet"]).arg(&mount).status();
@@ -1388,7 +1388,7 @@ fn install_docker_from(app: &tauri::AppHandle, dir: &Path, dmg: &Path) -> Result
     Ok(())
 }
 
-/// A command run as root after the macOS password box, asked from inside this app so the box names IMD Agents,
+/// A command run as root after the macOS password box, asked from inside this app so the box names this app,
 /// with its icon, rather than "osascript". The script has to run on the main thread, which it holds only while
 /// the box is up: the command itself goes on in the background, and its exit code is waited for here.
 #[cfg(target_os = "macos")]
@@ -3289,7 +3289,7 @@ async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// The setup window: its own window, which stays open beside Finder and Docker while they are in use, where
-/// the panel closes as soon as anything else is clicked. While it is open, IMD Agents is in the Dock and the
+/// the panel closes as soon as anything else is clicked. While it is open, the app is in the Dock and the
 /// app switcher, to come back to; closed, it is a menu bar app again. Async, so the window is made off the main
 /// thread, where making one waits on the main thread and never ends on Windows.
 #[tauri::command]
@@ -3308,7 +3308,7 @@ async fn open_setup(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     let win = tauri::WebviewWindowBuilder::new(&app, "setup", tauri::WebviewUrl::App("setup.html".into()))
-        .title("IMD Agents")
+        .title("IMD Worker")
         .inner_size(460.0, 556.0)
         .resizable(false)
         .visible(false)
@@ -3647,6 +3647,9 @@ fn tauri_plugin_nspanel_init() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 const AT_LOGIN: &str = "--at-login";
 /// What Windows passes after the restart setup asked for, so setup opens again where it left off.
 const SETUP: &str = "--setup";
+/// The login item's name: the app's name from before it was IMD Worker, kept so an updated app finds the item it
+/// made (a LaunchAgent named after it on macOS, a Run value on Windows) instead of making a second one.
+const LOGIN_ITEM: &str = "IMD Agents";
 
 /// Opened, or opened again while running: setup after its restart, nothing at login, otherwise the panel, as a
 /// menu bar manager may hide the icon.
@@ -3673,7 +3676,7 @@ fn set_open_at_login(app: tauri::AppHandle, on: bool) -> Result<(), String> {
         use windows_sys::Win32::System::Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ};
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let line = wide(format!("\"{}\" {AT_LOGIN}", exe.display()));
-        let (key, name) = (wide(r"Software\Microsoft\Windows\CurrentVersion\Run"), wide(&app.package_info().name));
+        let (key, name) = (wide(r"Software\Microsoft\Windows\CurrentVersion\Run"), wide(LOGIN_ITEM));
         unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), REG_SZ, line.as_ptr().cast(), (line.len() * 2) as u32) };
     }
     Ok(())
@@ -3685,7 +3688,13 @@ pub fn run() {
         // Opened again while running, on Windows and Linux: no second icon, the panel or setup opens instead.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| opened_with(app, &args)))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![AT_LOGIN])))
+        .plugin({
+            let login = tauri_plugin_autostart::Builder::new().args([AT_LOGIN]).app_name(LOGIN_ITEM);
+            // the launcher is a macOS choice only, and the builder has it only there
+            #[cfg(target_os = "macos")]
+            let login = login.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+            login.build()
+        })
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_nspanel_init())
         .invoke_handler(tauri::generate_handler![
@@ -3726,13 +3735,13 @@ pub fn run() {
             let icon = Image::from_bytes(tray_icon("idle"))?;
             // A small menu too: a right-click on macOS and Windows, and the only way in on a Linux tray
             // that sends no clicks.
-            let open = tauri::menu::MenuItem::with_id(app, "open", "Open IMD Agents", true, None::<&str>)?;
+            let open = tauri::menu::MenuItem::with_id(app, "open", "Open IMD Worker", true, None::<&str>)?;
             let quit_item = tauri::menu::MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = tauri::menu::Menu::with_items(app, &[&open, &quit_item])?;
             let tray = TrayIconBuilder::new()
                 .icon(icon)
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip("IMD Agents")
+                .tooltip("IMD Worker")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
@@ -3759,7 +3768,7 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while running IMD Agents")
+        .expect("error while running IMD Worker")
         .run(|_app, _event| {
             // Opened again while running, on macOS (Spotlight, Finder, Raycast): the panel opens.
             #[cfg(target_os = "macos")]

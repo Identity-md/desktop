@@ -120,7 +120,7 @@ const installed = (at: api.Setup) => at.worker && (!codex() || at.codex_installe
 const signedIn = (at: api.Setup) => (codex() ? at.codex : at.claude);
 
 /** Each step by what it sets up, in words for someone who has never heard of a container or a worker. */
-const NAMES: Record<Exclude<Step, "start">, string> = { docker: "Install Docker", pull: "Install IMD Box", install: "Install IMD Agent", signin: "Connect Claude", pair: "Connect IMD Agent" };
+const NAMES: Record<Exclude<Step, "start">, string> = { docker: "Install Docker", pull: "Install IMD Box", install: "Install the agent", signin: "Connect Claude", pair: "Connect your seat" };
 const nameOf = (step: Exclude<Step, "start">) => (step === "signin" ? `Connect ${ai()}` : NAMES[step]);
 
 let timer: ReturnType<typeof setTimeout> | null = null;
@@ -360,7 +360,7 @@ function dockerHelp(missing: boolean): string {
   if (windows && /^(Checking|Starting the download|Downloading|Verifying)/.test(words)) return "";
   if (words.startsWith("Downloading") || words.startsWith("Starting the download") || words.startsWith("Verifying")) return "Next, your Mac asks for your password to install Docker.";
   // macOS's own box takes it, and gives the app leave to install, never the password
-  if (words.startsWith("Waiting for your password")) return "Your Mac needs your password to install Docker. It goes to macOS, never to IMD Agents.";
+  if (words.startsWith("Waiting for your password")) return "Your Mac needs your password to install Docker. It goes to macOS, never to IMD Worker.";
   // Windows dims the screen for its own prompt, which names WSL and Microsoft as its publisher; Docker itself asks for none
   if (words.startsWith("Waiting for your OK")) return "Windows asks to let Windows Subsystem for Linux, which Docker runs on, make changes. Choose Yes.";
   if (/^(Installing|Updating) WSL/.test(words)) return `Docker runs on WSL, a part of Windows.<br>${words.startsWith("Updating") ? "Updating" : "Installing"} it takes a few minutes.`;
@@ -460,7 +460,7 @@ function introHtml(): string {
   const seat = `<p class="setup-needs">You'll need a paid <button class="text-link" data-action="claude-plans" title="Claude's plans (C)">Claude</button> or <button class="text-link" data-action="chatgpt-plans" title="ChatGPT's plans">ChatGPT</button> plan.</p>`;
   return `<div class="hero">
       <img class="setup-icon" src="/app-icon.png" width="72" height="72" alt="">
-      <h1>Run an IMD Agent</h1>
+      <h1>Run an agent here</h1>
       <p class="setup-intro">Your agent works in its own sealed box on this computer.</p>
       <ul class="setup-safe">
         <li>${LOCK}Your files, photos and passwords stay out of its sight</li>
@@ -558,12 +558,12 @@ function seatHtml(): string {
   const rows = SEATS.map((s, i) => `<button class="seat-choice${state.picked === s.key ? " on" : ""}" role="radio" aria-checked="${state.picked === s.key}" data-seat="${s.key}" title="${esc(s.name)} (${i + 1})">
       <span class="radio" aria-hidden="true"></span><span class="step-name">${esc(s.name)}</span>
     </button>`).join("");
-  const get = `<p class="setup-needs">No seat yet? <button class="text-link" data-action="seats" title="Agent seats on imd.fun (G)">Get one</button></p>`;
+  const get = `<p class="setup-needs">No seat yet? <button class="text-link" data-action="seats" title="Seats on imd.fun (G)">Get one</button></p>`;
   const go = `<button id="go" class="primary big" data-action="keep" title="Continue (Enter)"><span class="label">Continue</span></button>`;
   return `<div class="question">
-      <h1>Where's the agent seat?</h1>
+      <h1>Where's your seat?</h1>
       <p class="setup-intro">Your agent needs one to take jobs.</p>
-      <div class="seat-choices" role="radiogroup" aria-label="Where's the agent seat?">${rows}</div>
+      <div class="seat-choices" role="radiogroup" aria-label="Where's your seat?">${rows}</div>
     </div>
     ${foot(get, go, false)}`;
 }
@@ -631,7 +631,7 @@ function html(): string {
   const steps: Array<{ key: Exclude<Step, "start">; done: boolean; doneWords: string; about: string }> = [
     { key: "docker", done: at?.docker === "running", doneWords: "Running", about: docker(at, false).about },
     { key: "pull", done: Boolean(at?.image), doneWords: "Installed", about: "The sealed box your agent works in." },
-    { key: "install", done: Boolean(at && installed(at)), doneWords: "Installed", about: `The IMD worker and ${codex() ? "Codex" : "Claude Code"}, in the sealed box.` },
+    { key: "install", done: Boolean(at && installed(at)), doneWords: "Installed", about: `${codex() ? "Codex" : "Claude Code"} and IMD's tools, in the sealed box.` },
     { key: "signin", done: Boolean(at && signedIn(at)), doneWords: "Connected", about: signinAbout() },
     { key: "pair", done: Boolean(state.token), doneWords: `Connected · Agent #${state.token}`, about: state.busy === "pair" && state.pairing ? approving() : SEAT_WORDS[seat()] },
   ];

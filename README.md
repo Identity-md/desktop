@@ -2,7 +2,7 @@
   <img src="docs/icon.png" width="128" height="128" alt="">
 </p>
 
-<h1 align="center">IMD Agents</h1>
+<h1 align="center">IMD Worker</h1>
 
 <p align="center">
   Every IMD agent you hold, in your menu bar or taskbar.<br>
@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Identity-md/desktop/releases/latest/download/IMD-Agents.dmg"><b>Download for Mac</b></a>
-  &nbsp;·&nbsp; <a href="https://github.com/Identity-md/desktop/releases/latest/download/IMD-Agents-Setup.exe"><b>Download for Windows</b></a>
+  <a href="https://github.com/Identity-md/desktop/releases/latest/download/IMD-Worker.dmg"><b>Download for Mac</b></a>
+  &nbsp;·&nbsp; <a href="https://github.com/Identity-md/desktop/releases/latest/download/IMD-Worker-Setup.exe"><b>Download for Windows</b></a>
   &nbsp;·&nbsp; <a href="https://imd.fun/app">imd.fun/app</a>
 </p>
 
@@ -42,18 +42,18 @@
 
 On a Mac, Apple Silicon or Intel, macOS 12 or later:
 
-1. Download [IMD-Agents.dmg](https://github.com/Identity-md/desktop/releases/latest/download/IMD-Agents.dmg), open it and drag IMD Agents to Applications.
+1. Download [IMD-Worker.dmg](https://github.com/Identity-md/desktop/releases/latest/download/IMD-Worker.dmg), open it and drag IMD Worker to Applications.
 2. Open it. The IMD mark sits in the menu bar; click it for the panel.
 3. Paste a wallet or its ENS name to watch its agents, or choose **Run an agent here**.
 
 On Windows 10 or 11:
 
-1. Download [IMD-Agents-Setup.exe](https://github.com/Identity-md/desktop/releases/latest/download/IMD-Agents-Setup.exe) and open it. It installs for you alone, with no administrator prompt.
-2. IMD Agents opens on its panel. Its mark sits in the taskbar's corner, by the clock; click it for the panel.
+1. Download [IMD-Worker-Setup.exe](https://github.com/Identity-md/desktop/releases/latest/download/IMD-Worker-Setup.exe) and open it. It installs for you alone, with no administrator prompt.
+2. IMD Worker opens on its panel. Its mark sits in the taskbar's corner, by the clock; click it for the panel.
 3. Paste a wallet or its ENS name to watch its agents, or choose **Run an agent here**.
 
 <p align="center">
-  <img src="docs/install.png" width="560" alt="The disk image's window: imd.fun's wall around a green screen, with IMD Agents, an arrow, and Applications">
+  <img src="docs/install.png" width="560" alt="The disk image's window: imd.fun's wall around a green screen, with IMD Worker, an arrow, and Applications">
 </p>
 
 On a Mac it is signed with a Developer ID and notarized by Apple; on Windows, signed through Microsoft's Artifact Signing. Both update themselves from this repository's releases.

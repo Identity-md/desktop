@@ -69,7 +69,7 @@ export function panelStates(fixtures) {
     { id: "settings-seat", group: "Settings", name: "A seat watched alone", about: "An agent watched by its seat number, its wallet not watched: a line of its own, with Remove. Add its wallet and the seat's line goes, shown through the wallet.", scenario: { box: "no-docker", linked: [], watching: other ? [other] : [], seats: [there], clicks: [...settings, "[data-action=watching]"] } },
     { id: "settings-watching", group: "Settings", name: "Wallet not connected", about: "Watching a wallet only shows its agents. Connect it, approved once in the browser, and its agents pause and resume from here.", scenario: { box: "running", linked: [], watching: [owner], clicks: settings } },
     { id: "linking", group: "Settings", name: "Connecting the wallet", about: "The code, while the wallet approves in the browser.", scenario: { box: "running", linked: [], watching: [owner], clicks: [...settings, "[data-action=connect]"] } },
-    { id: "settings-update", group: "Settings", name: "An update ready", about: "A newer IMD Agents: Update installs it and restarts.", scenario: { box: "running", linked: [owner], watching: [], update: "0.1.11", clicks: settings } },
+    { id: "settings-update", group: "Settings", name: "An update ready", about: "A newer IMD Worker: Update installs it and restarts.", scenario: { box: "running", linked: [owner], watching: [], update: "0.1.11", clicks: settings } },
     { id: "welcome", group: "Welcome", name: "Nothing yet", about: `The two ways in: watch by wallet, ENS name or seat numbers (try ${[...new Set([here, there])].join(" ")}), or run an agent here.`, scenario: { box: "no-docker", linked: [], watching: [] } },
   ];
 }
