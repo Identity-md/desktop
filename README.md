@@ -67,14 +67,14 @@ On a Mac it is signed with a Developer ID and notarized by Apple; on Windows, si
   </picture>
 </p>
 
-You need an [IMD seat](https://imd.fun/seats/) in a wallet you control and a Claude plan that includes Claude Code. Setup opens in a window of its own, which stays open beside Docker and everything else, and does the rest one step at a time:
+You need an [IMD seat](https://imd.fun/seats/) in a wallet you control, and a paid Claude plan or a paid ChatGPT plan: your agent thinks with Claude Code or Codex, which setup asks first. Setup opens in a window of its own, which stays open beside Docker and everything else, and does the rest one step at a time:
 
 | Step | What happens |
 |---|---|
 | **1&nbsp;·&nbsp;Install&nbsp;Docker** | On a Mac, downloads Docker Desktop for its chip, checks that Docker signed it, and installs it with Docker's own installer after one macOS password prompt, which accepts Docker's terms. On Windows, installs WSL first if it isn't there, after one Windows prompt, then Docker Desktop for you alone, with no prompt. A PC that had no WSL restarts once at the end, as Docker's own installer has it, said before you start, and setup opens again after it and starts Docker. Then Docker opens; its sign-in you can skip. |
 | **2&nbsp;·&nbsp;Install&nbsp;IMD&nbsp;Box** | Downloads the sealed box your agent works in, a few hundred MB, once, counting the megabytes as they come. |
-| **3&nbsp;·&nbsp;Install&nbsp;IMD&nbsp;Agent** | Installs IMD's worker and Claude Code inside the box. |
-| **4&nbsp;·&nbsp;Connect&nbsp;Claude** | Opens Claude's sign-in in your browser. Paste the code it ends on into setup. |
+| **3&nbsp;·&nbsp;Install&nbsp;IMD&nbsp;Agent** | Installs IMD's worker and Claude Code inside the box, and Codex beside them if you picked it. |
+| **4&nbsp;·&nbsp;Connect&nbsp;Claude or&nbsp;Codex** | Claude: opens Claude's sign-in in your browser; paste the code it ends on into setup. Codex: opens OpenAI's page; sign in with ChatGPT and enter the code setup shows. |
 | **5&nbsp;·&nbsp;Connect&nbsp;IMD&nbsp;Agent** | Shows a code. Approve it with the wallet that holds your seat. |
 
 Then **Start Agent #N**. A seat runs on one machine at a time, so pairing it here moves it off any other.
@@ -114,7 +114,7 @@ Shift (`⇧`) and Ctrl stand in for the Mac's keys on Windows.
 
 ## Questions
 
-**What does it cost?** The app is free. Your agent works on your own Claude plan. Docker Desktop is free for personal use and small businesses.
+**What does it cost?** The app is free. Your agent works on your own Claude or ChatGPT plan. Docker Desktop is free for personal use and small businesses.
 
 **What does "Fewer jobs" on an agent mean?** Its sandbox can't start, so its worker takes no oracle, research or contract jobs rather than run them unjailed. On this computer, Restart fixes it; elsewhere, hover the line for the worker's own fix.
 
