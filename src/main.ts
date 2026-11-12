@@ -1,5 +1,5 @@
 import "./style.css";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { isEnabled as autostartIsOn } from "@tauri-apps/plugin-autostart";
 import morphdom from "morphdom";
 import * as api from "./api";
@@ -1350,7 +1350,23 @@ function computerHtml(): string {
   const rpc = state.rpcField
     ? `<form class="line" data-form="rpc"><span class="field-stack"><input class="inline-input" data-field="rpc" type="password" placeholder="Paste an Alchemy key" spellcheck="false" autocomplete="off" aria-label="Alchemy API key">${said}</span><button type="button" class="link" data-action="alchemy" title="Alchemy's sign-up: one free key covers all three chains">Get one</button><button class="pill" type="submit" title="Save (Enter)" ${state.rpcBusy ? "disabled" : ""}>${state.rpcBusy ? "Checking…" : "Save"}</button></form>`
     : `<div class="line"><span>RPC<span class="sub">${esc(named.length ? named.join(", ") : "One Alchemy key, for more jobs")}</span></span><button class="pill" data-action="rpc" title="${named.length ? "Change the key" : "Add an Alchemy key"} (K)">${named.length ? "Change" : "Add key"}</button></div>`;
-  return `<section class="card list spaced">${rpc}${juryLineHtml(state.localToken!, state.jury, named.length > 0)}</section>`;
+  return `<section class="card list spaced">${aiLineHtml()}${rpc}${juryLineHtml(state.localToken!, state.jury, named.length > 0)}</section>`;
+}
+
+/** The AI this computer's agent thinks with, as its box runs it. Change asks setup's question again, which takes it over. */
+function aiLineHtml(): string {
+  const ai = (state.box?.runtime ?? settings.runtime).startsWith("codex") ? "Codex" : "Claude";
+  return `<div class="line"><span>AI<span class="sub">${ai}</span></span><button class="pill" data-action="change-ai" title="Change which AI it thinks with (I)">Change</button></div>`;
+}
+
+/**
+ * Settings' AI line: setup opens on its question, "Which AI will it think with?", and takes it from there: installs and
+ * signs in whatever the answer needs, then restarts the agent on it. Setup already open hears it as an event.
+ */
+function askAiAgain(): void {
+  try { localStorage.setItem("imd-agents:ask-ai", "1"); } catch { /* setup opens as it would */ }
+  void emit("setup-ask-ai");
+  void api.openSetup();
 }
 
 function juryLineHtml(here: string, jury: api.Jury, rpc: boolean): string {
@@ -1815,6 +1831,7 @@ app.addEventListener("click", (event) => {
   if (action === "disconnect") return void disconnect();
   if (action === "quit") return void api.quit();
   if (action === "rpc") return openRpcField();
+  if (action === "change-ai") return askAiAgain();
   if (action === "alchemy") return void api.openAlchemy().catch(() => undefined);
   if (action === "jury-join" || action === "jury-open") return void joinJury();
   if (action === "jury-cancel") return void api.juryCancel().catch(() => undefined);
@@ -1944,6 +1961,7 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "L" && state.view === "home") return openLend(state.openAgent);
   if (state.view === "settings" && event.key === "k") { event.preventDefault(); return openRpcField(); }
+  if (state.view === "settings" && event.key === "i" && hereRunning() && state.jury) return askAiAgain();
   if (state.view === "settings" && event.key === "j") return void joinJury();
   if (event.key === "w") { event.preventDefault(); return focusWatch(); }
   if (event.key === "l") return void connect();

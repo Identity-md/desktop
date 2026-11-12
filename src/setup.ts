@@ -85,6 +85,8 @@ const state = {
   pickedAi: "claude" as Ai,
   /** The AI screen came first this time, so the seat's Esc goes back to it. */
   aiFirst: false,
+  /** What the running box thinks with, where that isn't the AI picked: it restarts on the one picked. */
+  other: null as string | null,
   register: null as string | null,
   error: null as string | null,
   errorDetail: null as string | null,
@@ -109,7 +111,7 @@ function nextStep(): Step | null {
   if (!installed(at)) return "install";
   if (!signedIn(at)) return "signin";
   if (!state.token) return "pair";
-  return state.running ? null : "start";
+  return state.running && !state.other ? null : "start";
 }
 
 /** The worker is in the box, and Codex beside it where the box thinks with it. */
@@ -131,7 +133,10 @@ async function check(): Promise<void> {
   state.at = await api.boxSetupState().catch(() => state.at);
   state.token = state.at?.device_key ? await api.deviceSeat(state.at.device_key).catch(() => state.token) : null;
   if (state.token) void loadFace(state.token, render);
-  state.running = (await api.boxState().catch(() => null))?.state === "running";
+  const box = await api.boxState().catch(() => null);
+  state.running = box?.state === "running";
+  // running on the other AI, as after Settings' Change: the box restarts on the one picked
+  state.other = state.running && box?.runtime && box.runtime.startsWith("codex") !== codex() ? box.runtime : null;
   if (state.busy === "docker" && state.at?.docker === "running") state.busy = null;
   render();
   // the panel's row: where setup has got
@@ -279,6 +284,14 @@ void listen("box-signin-page", () => {
   document.querySelector<HTMLInputElement>("#setup [data-field=code]")?.focus();
 });
 
+// Settings' AI line, with setup already open: its question, over whatever it showed
+void listen("setup-ask-ai", () => {
+  try { localStorage.removeItem("imd-agents:ask-ai"); } catch { /* asked once */ }
+  if (state.busy) return;
+  state.intro = false;
+  askAi("change");
+});
+
 // Codex's sign-in printed OpenAI's page, open in the browser now, and the code to enter there, good for 15 minutes
 void listen<{ url: string; code: string }>("box-signin-device", (event) => {
   state.device = event.payload;
@@ -381,7 +394,7 @@ function docker(at: api.Setup | null, busy: boolean): { about: string; act: stri
 function button(next: Step | null): string {
   if (!next) return `<button id="go" class="primary big" data-action="done" title="Done (Enter)"><span class="label">Done</span></button>`;
   if (state.busy !== next) {
-    const label = next === "docker" ? docker(state.at, false).act : next === "start" ? `Start Agent #${state.token}` : nameOf(next);
+    const label = next === "docker" ? docker(state.at, false).act : next === "start" ? (state.other ? `Restart on ${ai()}` : `Start Agent #${state.token}`) : nameOf(next);
     return `<button id="go" class="primary big" data-action="step" title="${esc(label)} (Enter)"><span class="label">${esc(label)}</span></button>`;
   }
   // a code pasted from Claude's page: the button hands it over
@@ -390,7 +403,7 @@ function button(next: Step | null): string {
   }
   const signin = state.checking ? "Checking the code…" : state.signinOpen ? "Waiting for Claude's code…" : state.device ? "Waiting for the code…" : `Opening ${ai()}'s sign-in…`;
   const words = next === "docker" ? docker(state.at, true).busy : next === "pull" ? state.words.pull ?? "Starting the download…" : next === "install" ? state.words.install ?? "Installing…"
-    : next === "signin" ? signin : next === "pair" ? state.words.pair ?? (seat() === "friend" ? "Waiting for your friend…" : "Waiting for your wallet…") : "Starting…";
+    : next === "signin" ? signin : next === "pair" ? state.words.pair ?? (seat() === "friend" ? "Waiting for your friend…" : "Waiting for your wallet…") : state.other ? "Restarting…" : "Starting…";
   // a code counts down, where every other step counts up; Claude's sign-in waits on the person, with no clock to hurry them
   const counting = (next === "pair" && state.pairing) || (next === "signin" && state.device);
   const clock = counting && state.expires ? left() : next === "signin" ? "" : elapsed(next);
@@ -429,10 +442,10 @@ type Screen = "intro" | "ai" | "seat" | "steps" | "agent";
  * the seat, each asked once; the steps; then, once the five are done, the agent itself, its face lit when it runs.
  */
 function screenOf(): Screen {
+  if (state.askingAi) return "ai";
   const next = nextStep();
   if (state.at && (next === "start" || !next)) return "agent";
   if (state.intro) return "intro";
-  if (state.askingAi) return "ai";
   return state.asking ? "seat" : "steps";
 }
 const onIntro = () => screenOf() === "intro";
@@ -569,6 +582,17 @@ function foot(message: string, go: string, help: boolean): string {
 function agentHtml(): string {
   const token = state.token ?? "";
   const running = !nextStep();
+  // running on the other AI: lit, as it works, and the one button restarts it on the AI picked
+  if (state.other) {
+    const was = state.other.startsWith("codex") ? "Codex" : "Claude";
+    const lit = faceFor(token, "on");
+    return `<div class="agent">
+      <span class="mask big">${lit ? `<img src="${esc(lit)}" alt="" draggable="false">` : `<span class="mask-blank"></span>`}<span class="dot on"></span></span>
+      <h1>Agent #${esc(token)} runs on ${was}</h1>
+      <p class="setup-intro">Restart it on ${ai()}. ${was} stays signed in, so you can switch back.</p>
+    </div>
+    ${foot(errorLine(), button(nextStep()), false)}`;
+  }
   const face = faceFor(token, running ? "on" : "away");
   const register = state.register ? `<p class="footnote">Agent #${esc(token)} isn't registered as an agent yet. <button class="text-link" data-action="register">Register it</button>, then start.</p>` : "";
   return `<div class="agent">
@@ -803,6 +827,15 @@ window.addEventListener("keydown", (event) => {
   void step();
 });
 
+// opened from Settings' AI line: its question first
+try {
+  if (localStorage.getItem("imd-agents:ask-ai") === "1") {
+    localStorage.removeItem("imd-agents:ask-ai");
+    state.intro = false;
+    state.askingAi = "change";
+    state.pickedAi = codex() ? "codex" : "claude";
+  }
+} catch { /* setup opens as it would */ }
 render();
 // a code already out comes back first, so Connect never shows over it
 void resume().then(check);

@@ -76,7 +76,8 @@ export function installMock({ fixtures, scenario }) {
     if (scenario.box !== "running" && scenario.box !== "stopped" && path.startsWith("/pair/wallet/") && !asked.includes(path)) return { status: 200, body: { tokens: [] } };
     return { status: hit.status, body };
   };
-  const box = { state: scenario.box, installed: scenario.box !== "no-docker", device_key: scenario.box === "running" ? deviceKey : null };
+  // what the running box thinks with: Claude, unless the scenario says (`boxRuntime`)
+  const box = { state: scenario.box, installed: scenario.box !== "no-docker", device_key: scenario.box === "running" ? deviceKey : null, runtime: scenario.box === "running" ? scenario.boxRuntime ?? "claude" : null };
   const handlers = {};
   /** Claude's sign-in under way, to end when a code is pasted or it's cancelled. */
   let signingIn = null;
