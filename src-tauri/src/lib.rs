@@ -592,6 +592,8 @@ struct BoxState {
     device_key: Option<String>,
     /// Whether it was made with the flags this app gives a box. No box is as good as one that was.
     current: bool,
+    /// What it runs on, while it runs: the panel starts it on that again, so a box switched outside the app stays so.
+    runtime: Option<String>,
 }
 
 /// The running box's id and its worker's device key, once read.
@@ -626,21 +628,24 @@ fn image_id(name: &str) -> Option<String> {
 async fn box_state() -> BoxState {
     tauri::async_runtime::spawn_blocking(|| {
         if docker().is_none() {
-            return BoxState { state: "no-docker", installed: false, device_key: None, current: true };
+            return BoxState { state: "no-docker", installed: false, device_key: None, current: true, runtime: None };
         }
         if !engine_listening() {
-            return BoxState { state: "docker-down", installed: true, device_key: None, current: true };
+            return BoxState { state: "docker-down", installed: true, device_key: None, current: true, runtime: None };
         }
         // The box answering means the engine does: Docker's own check only when there is no box to ask.
-        let inspected = run_docker(&["inspect", "-f", "{{.Id}} {{.State.Running}}", BOX_NAME], Duration::from_secs(10));
+        let inspected = run_docker(&["inspect", "-f", "{{.Id}} {{.State.Running}} {{json .Config.Cmd}}", BOX_NAME], Duration::from_secs(10));
         if !inspected.as_ref().is_some_and(|(ok, _)| *ok) && !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
-            return BoxState { state: "docker-down", installed: true, device_key: None, current: true };
+            return BoxState { state: "docker-down", installed: true, device_key: None, current: true, runtime: None };
         }
         let image = image_id(BOX_IMAGE);
         let installed = image.is_some();
-        let (container, running) = match &inspected {
-            Some((true, out)) => out.split_once(' ').map(|(id, up)| (id.to_string(), up == "true")).unwrap_or_default(),
-            _ => (String::new(), false),
+        let (container, running, command) = match &inspected {
+            Some((true, out)) => {
+                let mut fields = out.splitn(3, ' ');
+                (fields.next().unwrap_or_default().to_string(), fields.next() == Some("true"), fields.next().unwrap_or_default().to_string())
+            }
+            _ => (String::new(), false, String::new()),
         };
         let current = !running || image.as_deref().is_none_or(|image| box_current(&container, image));
         // The worker's key is the box's for its life: asked once per box, not on every look.
@@ -659,10 +664,11 @@ async fn box_state() -> BoxState {
         } else {
             None
         };
-        BoxState { state: if running { "running" } else { "stopped" }, installed, device_key, current }
+        let runtime = if running { runtime_of(&command) } else { None };
+        BoxState { state: if running { "running" } else { "stopped" }, installed, device_key, current, runtime }
     })
     .await
-    .unwrap_or(BoxState { state: "no-docker", installed: false, device_key: None, current: true })
+    .unwrap_or(BoxState { state: "no-docker", installed: false, device_key: None, current: true, runtime: None })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -780,12 +786,16 @@ struct Setup {
     worker: bool,
     /// Claude Code is signed in, in the box.
     claude: bool,
+    /// Codex is installed in the box's volume, for a box that runs on it.
+    codex_installed: bool,
+    /// Codex is signed in, in the box.
+    codex: bool,
     /// The worker's device key: the network says which agent it is paired to.
     device_key: Option<String>,
 }
 
-/// How far setting this computer's box up has got. One look inside the box answers the last three:
-/// whether the worker is there, whether Claude's sign-in file is (never what is in it), and the key.
+/// How far setting this computer's box up has got. One look inside the box answers the rest: whether the worker is
+/// there, whether Codex is, whether Claude's and Codex's sign-in files are (never what is in them), and the key.
 #[tauri::command]
 async fn box_setup_state(app: tauri::AppHandle) -> Setup {
     #[cfg(target_os = "windows")]
@@ -806,7 +816,7 @@ async fn box_setup_state(app: tauri::AppHandle) -> Setup {
 
 async fn setup_state(restart: bool) -> Setup {
     tauri::async_runtime::spawn_blocking(move || {
-        let none = |docker| Setup { docker, restart_ahead: false, image: false, worker: false, claude: false, device_key: None };
+        let none = |docker| Setup { docker, restart_ahead: false, image: false, worker: false, claude: false, codex_installed: false, codex: false, device_key: None };
         if docker().is_none() {
             // a Docker that wouldn't install before the restart goes in after it
             #[cfg(target_os = "windows")]
@@ -825,7 +835,7 @@ async fn setup_state(restart: bool) -> Setup {
         if !run_docker(&["image", "inspect", "--format", "{{.Id}}", BOX_IMAGE], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
             return none("running");
         }
-        let look = r#"command -v imd >/dev/null && echo worker; test -s "$HOME/.claude/.credentials.json" && echo claude && stat -c 'claude-at %Y' "$HOME/.claude/.credentials.json"; command -v imd >/dev/null && imd whoami 2>/dev/null | head -1; true"#;
+        let look = r#"command -v imd >/dev/null && echo worker; test -s "$HOME/.claude/.credentials.json" && echo claude && stat -c 'claude-at %Y' "$HOME/.claude/.credentials.json"; command -v codex >/dev/null && echo codex-installed; test -s "$HOME/.codex/auth.json" && echo codex && stat -c 'codex-at %Y' "$HOME/.codex/auth.json"; command -v imd >/dev/null && imd whoami 2>/dev/null | head -1; true"#;
         let running = run_docker(&["inspect", "-f", "{{.State.Running}}", BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, out)| ok && out == "true");
         let answer = if running {
             run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", look], Duration::from_secs(30))
@@ -836,20 +846,24 @@ async fn setup_state(restart: bool) -> Setup {
             run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(60))
         };
         let lines: Vec<String> = answer.filter(|(ok, _)| *ok).map(|(_, out)| out.lines().map(str::to_string).collect()).unwrap_or_default();
-        // A sign-in that ran out still leaves its file: the worker's check, newer than the file, is what says it did.
-        let signed_at = lines.iter().find_map(|l| l.strip_prefix("claude-at ")).and_then(|secs| secs.trim().parse::<u64>().ok()).map(|secs| secs * 1000);
-        let ran_out = running && signed_out_since(signed_at);
+        // A sign-in that ran out still leaves its file: the worker's check, newer than the file, is what says it did. The
+        // check is of the runtime the running box thinks with, so only that one's sign-in can have run out.
+        let signed_at = |runtime: &str| lines.iter().find_map(|l| l.strip_prefix(&format!("{runtime}-at "))).and_then(|secs| secs.trim().parse::<u64>().ok()).map(|secs| secs * 1000);
+        let thinks_with = if running { box_runtime().map(|runtime| if runtime.starts_with("codex") { "codex" } else { "claude" }) } else { None };
+        let ran_out = |runtime: &str| thinks_with == Some(runtime) && signed_out_since(signed_at(runtime));
         Setup {
             docker: "running",
             restart_ahead: false,
             image: true,
             worker: lines.iter().any(|l| l == "worker"),
-            claude: lines.iter().any(|l| l == "claude") && !ran_out,
+            claude: lines.iter().any(|l| l == "claude") && !ran_out("claude"),
+            codex_installed: lines.iter().any(|l| l == "codex-installed"),
+            codex: lines.iter().any(|l| l == "codex") && !ran_out("codex"),
             device_key: lines.into_iter().find(|l| l.len() == 64 && l.chars().all(|c| c.is_ascii_hexdigit())),
         }
     })
     .await
-    .unwrap_or(Setup { docker: "missing", restart_ahead: false, image: false, worker: false, claude: false, device_key: None })
+    .unwrap_or(Setup { docker: "missing", restart_ahead: false, image: false, worker: false, claude: false, codex_installed: false, codex: false, device_key: None })
 }
 
 /// Docker's signing team: Docker Desktop is installed only when it is Docker's own signed app.
@@ -1578,17 +1592,22 @@ fn pull_through_engine(mut stream: impl std::io::Read + std::io::Write, image: &
     Ok(())
 }
 
-/// Installs the worker and Claude Code into the box's volume, as `./box setup` does before its shell.
+/// Installs the worker and Claude Code into the box's volume, as `./box setup` does before its shell, and Codex beside them
+/// for a box that thinks with it. A box image from before Codex installs everything else: Codex then comes in after it.
 #[tauri::command]
-async fn box_install(app: tauri::AppHandle) -> Result<(), String> {
+async fn box_install(app: tauri::AppHandle, runtime: Option<String>) -> Result<(), String> {
+    let runtime = runtime.unwrap_or_else(|| "claude".into());
+    if !RUNTIMES.contains(&runtime.as_str()) {
+        return Err("unknown runtime".into());
+    }
     // installing or pairing may give the worker a new key: read it fresh
     *DEVICE_KEY.lock().unwrap_or_else(|e| e.into_inner()) = None;
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::{BufRead, Read};
-        let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "-e".into(), format!("IMD_RUNTIME={runtime}")];
         args.extend(box_flags());
-        args.extend([BOX_IMAGE.to_string(), "imd-box-setup".into()]);
+        args.extend([BOX_IMAGE.to_string(), "sh".into(), "-c".into(), INSTALL.into()]);
         let mut command = docker_command().ok_or("Docker is not installed")?;
         command.args(&args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let mut child = command.spawn().map_err(|e| e.to_string())?;
@@ -1596,7 +1615,9 @@ async fn box_install(app: tauri::AppHandle) -> Result<(), String> {
         // what setup.sh says it is doing, a line at a time, under the step
         if let Some(stdout) = child.stdout.take() {
             for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                let words = if line.starts_with("Installing Claude Code") {
+                let words = if line.starts_with("Installing Claude Code and Codex") || line.starts_with("Installing Claude Code, Codex") || line.starts_with("Installing Codex") {
+                    "Installing Codex…"
+                } else if line.starts_with("Installing Claude Code") {
                     "Installing Claude Code…"
                 } else if line.starts_with("Installing the IMD worker") {
                     "Installing the IMD worker…"
@@ -1622,6 +1643,10 @@ async fn box_install(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// What Install runs in its one-off box: the box's own setup, then Codex, where the box thinks with it and an image
+/// from before Codex left it out. `IMD_RUNTIME` names the runtime; nothing else of the app's goes in.
+const INSTALL: &str = r#"imd-box-setup && case "$IMD_RUNTIME" in codex*) command -v codex >/dev/null || { echo "Installing Codex…"; npm install --global --no-fund --no-audit @openai/codex >/dev/null; } ;; esac"#;
+
 /// Claude's sign-in, Claude Code's own: `claude auth login` in a one-off box, with no terminal. Its page opens in this
 /// computer's browser, and the code that page ends on is pasted into setup (`box_sign_in_code`). Without a terminal,
 /// Claude Code prints the page's link whole on one line, where a terminal breaks it across lines and a click on it, or
@@ -1631,16 +1656,7 @@ async fn box_install(app: tauri::AppHandle) -> Result<(), String> {
 async fn box_sign_in(app: tauri::AppHandle) -> Result<(), String> {
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
-        let _ = run_docker(&["rm", "-f", BOX_SIGNING_IN], Duration::from_secs(30));
-        // one left waiting, its window closed, would hold the app's own updates back: it stops by itself
-        let round = SIGN_IN_ROUND.fetch_add(1, Ordering::SeqCst) + 1;
-        std::thread::spawn(move || {
-            std::thread::sleep(SIGN_IN_WAITS);
-            if SIGN_IN_ROUND.load(Ordering::SeqCst) == round {
-                SIGN_IN_STOPPED.store(round, Ordering::SeqCst);
-                let _ = run_docker(&["rm", "-f", BOX_SIGNING_IN], Duration::from_secs(30));
-            }
-        });
+        let round = sign_in_clock(SIGN_IN_WAITS);
         let mut args: Vec<String> = vec!["run".into(), "-i".into(), "--rm".into(), "--name".into(), BOX_SIGNING_IN.into()];
         args.extend(box_flags());
         args.extend([BOX_IMAGE, "claude", "auth", "login", "--claudeai"].iter().map(|s| s.to_string()));
@@ -1649,15 +1665,61 @@ async fn box_sign_in(app: tauri::AppHandle) -> Result<(), String> {
             let _ = app.emit("box-signin-page", ());
             let _ = app.opener().open_url(page, None::<&str>);
         });
-        // signed in again on a box whose worker turned jobs away for want of it: its worker checks at once on a restart,
-        // and a worker held so has no job to lose
-        if signed.is_ok() && run_docker(&["inspect", "-f", "{{.State.Running}}", BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, out)| ok && out == "true") && signed_out_since(None) {
-            let _ = run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90));
-        }
-        signed.map_err(|why| if SIGN_IN_STOPPED.load(Ordering::SeqCst) == round { "timed out".into() } else { why })
+        signed_in(signed, round)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Codex's sign-in, with ChatGPT: `codex login --device-auth` in a one-off box. It prints OpenAI's page and a one-time
+/// code; the page opens in this computer's browser and setup shows the code to enter there, as the `box-signin-device`
+/// event says. It ends by itself once the code is entered and approved, the sign-in kept in the box's volume, or when
+/// the code runs out after 15 minutes. Nothing goes into the box: no paste, no input.
+#[tauri::command]
+async fn box_sign_in_codex(app: tauri::AppHandle) -> Result<(), String> {
+    let _busy = Busy::new();
+    tauri::async_runtime::spawn_blocking(move || {
+        let round = sign_in_clock(CODEX_SIGN_IN_WAITS);
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_SIGNING_IN.into()];
+        args.extend(box_flags());
+        args.extend([BOX_IMAGE, "codex", "login", "--device-auth"].iter().map(|s| s.to_string()));
+        let signed = device_sign_in_with(&args, |device| {
+            *SIGN_IN_PAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(device.url.clone());
+            let _ = app.emit("box-signin-device", device.clone());
+            let _ = app.opener().open_url(&device.url, None::<&str>);
+        });
+        signed_in(signed, round)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Codex's sign-in waits a minute past the 15 its code lasts, so Codex's own words for a code that ran out ("device auth
+/// timed out") come before this app's stop, which would read as a slow connection.
+const CODEX_SIGN_IN_WAITS: Duration = Duration::from_secs(16 * 60);
+
+/// Starts a sign-in's clock, clearing one left behind first: one left waiting, its window closed, would hold the app's own
+/// updates back, so it stops by itself after `waits`. The round it returns tells that stop from any other.
+fn sign_in_clock(waits: Duration) -> u64 {
+    let _ = run_docker(&["rm", "-f", BOX_SIGNING_IN], Duration::from_secs(30));
+    let round = SIGN_IN_ROUND.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(waits);
+        if SIGN_IN_ROUND.load(Ordering::SeqCst) == round {
+            SIGN_IN_STOPPED.store(round, Ordering::SeqCst);
+            let _ = run_docker(&["rm", "-f", BOX_SIGNING_IN], Duration::from_secs(30));
+        }
+    });
+    round
+}
+
+/// How a sign-in ended. Signed in again on a box whose worker turned jobs away for want of it, the box restarts: its
+/// worker checks at once on a restart, and a worker held so has no job to lose.
+fn signed_in(signed: Result<(), String>, round: u64) -> Result<(), String> {
+    if signed.is_ok() && run_docker(&["inspect", "-f", "{{.State.Running}}", BOX_NAME], Duration::from_secs(10)).is_some_and(|(ok, out)| ok && out == "true") && signed_out_since(None) {
+        let _ = run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90));
+    }
+    signed.map_err(|why| if SIGN_IN_STOPPED.load(Ordering::SeqCst) == round { "timed out".into() } else { why })
 }
 
 /// How long a sign-in waits for its code before it stops.
@@ -1699,11 +1761,146 @@ fn sign_in_with(args: &[String], opened: impl Fn(&str)) -> Result<(), String> {
     Err(errors.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("Claude's sign-in stopped").to_string())
 }
 
-/// A check the worker failed on its runtime's sign-in, as Claude Code words one: a login past its time limit, which
-/// nothing in the box renews, one signed out, or none.
+/// The one-time code Codex's sign-in prints, and the page it's entered on.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+struct DeviceCode {
+    url: String,
+    code: String,
+}
+
+/// Codex's sign-in, run by Docker with `args`: OpenAI's page and its code handed to `shown` once it has printed both, and
+/// its own words on the way out if it doesn't sign in. It prints them in colour even with no terminal, so each line is
+/// read without its escapes, from either stream.
+fn device_sign_in_with(args: &[String], shown: impl Fn(&DeviceCode)) -> Result<(), String> {
+    use std::io::BufRead;
+    let mut command = docker_command().ok_or("Docker is not installed")?;
+    command.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let (lines, said) = std::sync::mpsc::channel::<String>();
+    let streams: Vec<Box<dyn std::io::Read + Send>> = [
+        child.stdout.take().map(|out| Box::new(out) as Box<dyn std::io::Read + Send>),
+        child.stderr.take().map(|err| Box::new(err) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    // read side by side, so neither pipe fills while the other is waited on
+    let readers: Vec<_> = streams
+        .into_iter()
+        .map(|stream| {
+            let lines = lines.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stream).lines().map_while(Result::ok) {
+                    let _ = lines.send(line);
+                }
+            })
+        })
+        .collect();
+    drop(lines);
+    let mut reading = DeviceReading::default();
+    let mut last = String::new();
+    for line in said {
+        let line = plain(&line);
+        if let Some(device) = reading.read(&line) {
+            shown(&device);
+        }
+        let line = line.trim();
+        // its error, said last, wins over whatever came after it
+        if !line.is_empty() && (last.is_empty() || !last.contains("rror") || line.contains("rror")) {
+            last = line.to_string();
+        }
+    }
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(if last.is_empty() { "Codex's sign-in stopped".into() } else { last })
+}
+
+/// The page and the code, as Codex's sign-in prints them, each on a line of its own: the page first, then the code.
+#[derive(Default)]
+struct DeviceReading {
+    url: Option<String>,
+    code: Option<String>,
+    shown: bool,
+}
+
+impl DeviceReading {
+    /// Reads one plain line; both found for the first time, the two of them.
+    fn read(&mut self, line: &str) -> Option<DeviceCode> {
+        let line = line.trim();
+        if self.url.is_none() && codex_page(line) {
+            self.url = Some(line.to_string());
+        } else if self.code.is_none() && device_code(line) {
+            self.code = Some(line.to_string());
+        }
+        match (&self.url, &self.code, self.shown) {
+            (Some(url), Some(code), false) => {
+                self.shown = true;
+                Some(DeviceCode { url: url.clone(), code: code.clone() })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A line as a person reads it: no colour or other terminal escapes (CSI, and OSC up to its end).
+fn plain(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// OpenAI's own sign-in page, the only one Codex's sign-in opens: https, on OpenAI's sign-in host, in one plain line.
+fn codex_page(link: &str) -> bool {
+    let host = link.strip_prefix("https://").and_then(|rest| rest.split(['/', '?', '#']).next()).unwrap_or_default();
+    link.len() < 2048 && link.chars().all(|c| c.is_ascii_graphic()) && host == "auth.openai.com"
+}
+
+/// A one-time code as Codex prints one: two groups of capitals and digits joined by a hyphen, as `ABCD-EFGHI`.
+fn device_code(line: &str) -> bool {
+    let mut parts = line.split('-');
+    let group = |part: Option<&str>| part.is_some_and(|part| (4..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+    group(parts.next()) && group(parts.next()) && parts.next().is_none()
+}
+
+/// A check the worker failed on its runtime's sign-in, as Claude Code or Codex words one: a login past its time limit,
+/// which nothing in the box renews, one signed out, one refused, or none.
 fn signed_out_words(words: &str) -> bool {
     words.starts_with("self-test failed")
-        && ["Failed to authenticate", "claude auth login", "run /login", "not logged in", "Not logged in", "signed out", "OAuth token has expired", "OAuth token has been revoked"].iter().any(|said| words.contains(said))
+        && [
+            "Failed to authenticate", "claude auth login", "run /login", "not logged in", "Not logged in", "signed out", "OAuth token has expired", "OAuth token has been revoked",
+            // Codex: a request with no login, or a login whose refresh was refused
+            "401 Unauthorized", "codex login", "refresh token", "sign in again",
+        ]
+        .iter()
+        .any(|said| words.contains(said))
 }
 
 /// When the worker's newest check failed on its sign-in, in milliseconds; None when its newest check said anything else.
@@ -2780,6 +2977,11 @@ async fn box_hold() -> Option<String> {
     .flatten()
 }
 
+/// What the box runs on, from its container's command, where it is a runtime this app starts.
+fn box_runtime() -> Option<String> {
+    run_docker(&["inspect", "--format", "{{json .Config.Cmd}}", BOX_NAME], Duration::from_secs(10)).filter(|(ok, _)| *ok).and_then(|(_, command)| runtime_of(&command))
+}
+
 /// The runtime a box was started on, from `docker inspect`'s `.Config.Cmd`, if it is one this app starts.
 fn runtime_of(command: &str) -> Option<String> {
     let words: Vec<String> = serde_json::from_str(command).ok()?;
@@ -3187,6 +3389,12 @@ fn open_claude_plans(app: tauri::AppHandle) -> Result<(), String> {
     app.opener().open_url("https://claude.com/pricing", None::<&str>).map_err(|e| e.to_string())
 }
 
+/// ChatGPT's plans: Codex comes with the paid ones, and setup's first screen links them beside Claude's.
+#[tauri::command]
+fn open_chatgpt_plans(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener().open_url("https://chatgpt.com/pricing", None::<&str>).map_err(|e| e.to_string())
+}
+
 /// Light, dark, or the computer's own: every window of the app, its pages following through their color scheme.
 #[tauri::command]
 fn set_theme(app: tauri::AppHandle, theme: String) {
@@ -3477,8 +3685,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             api_get, explorer_get, agent_svg, link_start, link_poll, link_reopen, seat_pause, unlink,
             box_state, box_start, box_stop, box_restart, box_renewal, box_hold, worker_releases, open_explorer,
-            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_sign_in_code, box_sign_in_open, box_sign_in_cancel, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
-            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, free_space, play_sound, set_theme,
+            box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_sign_in_codex, box_sign_in_code, box_sign_in_open, box_sign_in_cancel, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
+            docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, open_chatgpt_plans, free_space, play_sound, set_theme,
             restart_pc, set_open_at_login, lend_owned, rpc_state, rpc_setup, open_alchemy, jury_state, jury_join, jury_open, jury_cancel
         ])
         .setup(|app| {
@@ -3731,6 +3939,45 @@ mod tests {
         }
     }
 
+    /// Codex's sign-in as it printed in a box on 2026-11-12 (Codex 0.167.2, no terminal, in colour all the same): the
+    /// page and the code come off their own lines, once, and nothing else reads as either.
+    #[test]
+    fn reads_codexs_page_and_code() {
+        let printed = [
+            "",
+            "Welcome to Codex [v\u{1b}[90m0.167.2\u{1b}[0m]",
+            "\u{1b}[90mOpenAI's command-line coding agent\u{1b}[0m",
+            "",
+            "Follow these steps to sign in with ChatGPT using device code authorization:",
+            "",
+            "1. Open this link in your browser and sign in to your account",
+            "   \u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m",
+            "",
+            "2. Enter this one-time code \u{1b}[90m(expires in 15 minutes)\u{1b}[0m",
+            "   \u{1b}[94mK7QD-3WMPX\u{1b}[0m",
+            "",
+            "\u{1b}[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\u{1b}[0m",
+        ];
+        let mut reading = super::DeviceReading::default();
+        let found: Vec<_> = printed.iter().filter_map(|line| reading.read(&super::plain(line))).collect();
+        assert_eq!(found, vec![super::DeviceCode { url: "https://auth.openai.com/codex/device".into(), code: "K7QD-3WMPX".into() }]);
+        assert_eq!(super::plain("\u{1b}]8;;https://x.example\u{7}link\u{1b}]8;;\u{1b}\\ done"), "link done");
+        for not in ["http://auth.openai.com/codex/device", "https://auth.openai.com.example.com/", "https://auth.openai.com@example.com/", "https://chatgpt.com/codex", "https://auth.openai.com/codex/device and more"] {
+            assert!(!super::codex_page(not), "{not}");
+        }
+        for not in ["K7QD", "k7qd-3wmpx", "K7QD-3WMPX-ABCD", "1. Open", "ABC-DEFG", "(expires in 15 minutes)"] {
+            assert!(!super::device_code(not), "{not}");
+        }
+    }
+
+    /// A worker whose Codex lost its login says so in its own words, which count as signed out like Claude Code's.
+    #[test]
+    fn codex_signed_out_counts() {
+        assert!(super::signed_out_words("self-test failed, taking no work: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header. Checking again in 10m"));
+        assert!(super::signed_out_words("self-test failed, taking no work: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again. Checking again in 10m"));
+        assert!(!super::signed_out_words("self-test: You've hit your usage limit. Holding work for 11m"));
+    }
+
     /// `claude auth login` in a throwaway box with the app's flags: its page read whole off one line, the code handed
     /// to it, and Claude's own words when it turns the code down. Needs Docker, the box with its worker installed, and
     /// the network.
@@ -3760,6 +4007,38 @@ mod tests {
         // the words after it are Claude Code's own, and change; this start is what the panel reads
         let ended = ended.expect_err("a made-up code is turned down");
         assert!(ended.starts_with("Login failed:"), "{ended}");
+    }
+
+    /// `codex login --device-auth` in a throwaway box with the app's flags and a volume of its own: OpenAI's page and the
+    /// one-time code read off its colour output, then the sign-in stopped, as Cancel stops it. Needs Docker, the box image
+    /// and the network; nothing is approved.
+    #[test]
+    #[ignore]
+    fn reads_a_real_codex_sign_in() {
+        use std::time::Duration;
+        let volume = "imd-codex-signin-test";
+        let _ = super::run_docker(&["volume", "rm", "-f", volume], Duration::from_secs(30));
+        let home = format!("{}:/home/imd", super::BOX_VOLUME);
+        let flags: Vec<String> = super::box_flags().into_iter().map(|flag| if flag == home { format!("{volume}:/home/imd") } else { flag }).collect();
+        let mut install: Vec<String> = vec!["run".into(), "--rm".into()];
+        install.extend(flags.clone());
+        install.extend([super::BOX_IMAGE, "npm", "install", "--global", "--no-fund", "--no-audit", "@openai/codex"].iter().map(|s| s.to_string()));
+        let installed = super::run_docker(&install.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(300));
+        assert!(installed.is_some_and(|(ok, _)| ok), "Codex installed");
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), volume.into()];
+        args.extend(flags);
+        args.extend([super::BOX_IMAGE, "codex", "login", "--device-auth"].iter().map(|s| s.to_string()));
+        let shown = std::sync::Mutex::new(None::<super::DeviceCode>);
+        let ended = super::device_sign_in_with(&args, |device| {
+            *shown.lock().unwrap() = Some(device.clone());
+            // Cancel, as setup's: the box goes, and the sign-in ends unsigned
+            std::thread::spawn(|| super::run_docker(&["rm", "-f", "imd-codex-signin-test"], Duration::from_secs(30)));
+        });
+        let _ = super::run_docker(&["volume", "rm", "-f", volume], Duration::from_secs(30));
+        let device = shown.into_inner().unwrap().expect("a page and a code");
+        assert_eq!(device.url, "https://auth.openai.com/codex/device");
+        assert!(super::device_code(&device.code), "{}", device.code);
+        assert!(ended.is_err(), "stopped before anything was approved");
     }
 
     #[test]

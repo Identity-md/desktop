@@ -3,23 +3,27 @@
 // what the app would to get there: `click` presses the button, `press` clicks what each selector names, in turn,
 // `words` is the app's progress line for a step, `hang` keeps a command waiting, `resolve` answers one at once, `fail`
 // makes one fail as Docker would, `code` is pasted into Claude's sign-in and `send` hands it over, and `seat` is
-// where the seat was said to be, "own" unless the state says otherwise.
+// where the seat was said to be, "own" unless the state says otherwise, `ai` the AI picked, Claude unless it says otherwise
+// (null: not asked yet), and `runtime` what the box thinks with, Claude unless the state says Codex.
 // A state with `os` is only that computer's.
 import { installMock } from "./mock.mjs";
 import { forceTheme, holdStill, ready } from "./preview.js";
 
 const E = "e".padEnd(64, "0"); // a box with its key, not paired yet
 const D = "d5e40d01".padEnd(64, "0"); // the mock's paired box: this computer's agent
-const none = { docker: "missing", restart_ahead: false, image: false, worker: false, claude: false, device_key: null };
+const none = { docker: "missing", restart_ahead: false, image: false, worker: false, claude: false, codex_installed: false, codex: false, device_key: null };
 const docker = { ...none, docker: "running" };
 const box = { ...docker, image: true };
 const agent = { ...box, worker: true, device_key: E };
 const claude = { ...agent, claude: true };
 const paired = { ...claude, device_key: D };
+const codex = { ...agent, codex_installed: true };
 
 export const STATES = [
   { id: "intro", group: "Opening", name: "First screen", setup: none, intro: true, about: "What it is, why it's safe and what it needs. Press Continue: the button travels to its place on the steps." },
   { id: "intro-short", group: "Opening", name: "Short of space", setup: none, intro: true, free: 3.2e9, about: "The disk is read, not asked about: a Mac short of room hears it here, before anything downloads." },
+  { id: "ai", group: "Opening", name: "Which AI", setup: none, intro: true, ai: null, seat: null, press: ["[data-action=begin]"], about: "Continue pressed: which AI the agent thinks with, each with the plan it uses, Claude picked to begin with. 1, 2 or the arrows pick, Esc goes back. Continue goes on to the seat." },
+  { id: "ai-codex", group: "Opening", name: "Codex picked", setup: none, intro: true, ai: null, seat: null, press: ["[data-action=begin]", "[data-ai=codex]"], about: "Codex picked: it signs in with a ChatGPT plan. Step 3 installs it beside the worker, and step 4 connects it." },
   { id: "seat", group: "Opening", name: "Your seat", setup: none, intro: true, seat: null, press: ["[data-action=begin]"], about: "Continue pressed: one question before the steps, since where the seat is says what approves it. The person's own wallet is picked to begin with; 1 to 3 or the arrows pick, G opens imd.fun's seats, Esc goes back." },
   { id: "seat-friend", group: "Opening", name: "In a friend's wallet", setup: none, intro: true, seat: null, press: ["[data-action=begin]", "[data-seat=friend]"], about: "A seat that stays in a friend's wallet: they approve this box from it, through a link sent to them. Nothing to buy, take or sign here." },
   { id: "seat-lend", group: "Opening", name: "On imdLend", setup: none, intro: true, seat: null, press: ["[data-action=begin]", "[data-seat=lend]"], about: "Borrowed on imdLend: the seat sits in a vault there, and imdLend approves the pairing." },
@@ -44,10 +48,15 @@ export const STATES = [
   { id: "box-unpacking", group: "Install IMD Box", name: "Unpacking", setup: docker, click: true, hang: ["box_pull"], words: ["pull", "Unpacking…"], about: "Docker unpacking the box. A few minutes on an older Mac." },
   { id: "agent", group: "Install IMD Agent", name: "Install IMD Agent", setup: box, about: "The box is in. The IMD worker goes inside it." },
   { id: "agent-installing", group: "Install IMD Agent", name: "Installing", setup: box, click: true, hang: ["box_install"], words: ["install", "Installing Claude Code…"], about: "Claude Code, the IMD worker, then its browser, each in turn, inside the box." },
-  { id: "claude", group: "Connect Claude", name: "Connect Claude", setup: agent, about: "The AI the agent thinks with, signed in once." },
+  { id: "agent-codex", group: "Install IMD Agent", name: "With Codex", setup: box, ai: "codex", runtime: "codex", about: "Codex picked: step 3 installs it beside the worker, in the same sealed box." },
+  { id: "agent-installing-codex", group: "Install IMD Agent", name: "Installing Codex", setup: box, ai: "codex", runtime: "codex", click: true, hang: ["box_install"], words: ["install", "Installing Codex…"], about: "Codex goes in where Claude Code would be said: the worker, then its browser, as before." },
+  { id: "claude", group: "Connect Claude", name: "Connect Claude", setup: agent, about: "The AI the agent thinks with, signed in once. Change (C) asks which AI again." },
+  { id: "ai-change", group: "Connect Claude", name: "Change", setup: agent, press: ["[data-action=change-ai]"], about: "Change, from step 4: the question again, the answer as it was. Continue or Esc goes back to the steps." },
   { id: "claude-waiting", group: "Connect Claude", name: "Waiting for sign-in", setup: agent, click: true, about: "Claude's sign-in opened in the browser, from Claude Code in the box with no terminal. The page ends on a code, which goes in the field under its name: pasted whole, it goes straight in. Enter opens the page again, Esc cancels." },
   { id: "claude-code", group: "Connect Claude", name: "Code typed", setup: agent, click: true, code: "Kq3vW9sTzX0aPbR7mN2cYd5LhE8uJf1Gk4iOp6Vx#Tz8qL2mN5bV7cX1", about: "A code typed in rather than pasted: the button hands it to Claude Code, as Enter does." },
   { id: "claude-checking", group: "Connect Claude", name: "Checking the code", setup: agent, click: true, code: "Kq3vW9sTzX0aPbR7mN2cYd5LhE8uJf1Gk4iOp6Vx#Tz8qL2mN5bV7cX1", send: true, hang: ["box_sign_in_code"], about: "Claude Code trading the code for its sign-in, a second or two. Signed in, the step is done." },
+  { id: "codex", group: "Connect Claude", name: "Connect Codex", setup: codex, ai: "codex", runtime: "codex", about: "Codex picked: its sign-in is OpenAI's, with a ChatGPT plan." },
+  { id: "codex-code", group: "Connect Claude", name: "Codex's code", setup: codex, ai: "codex", runtime: "codex", click: true, about: "OpenAI's page open in the browser, and the one-time code to enter there. The button counts down its 15 minutes; the sign-in ends by itself once the code is in. Enter opens the page again, Esc cancels." },
   { id: "pair", group: "Connect IMD Agent", name: "Connect IMD Agent", setup: claude, about: "Pairs this box with a seat in the wallet: the line above the button says the browser opens next. Change (C) asks where the seat is again." },
   { id: "pair-code", group: "Connect IMD Agent", name: "Pairing code", setup: claude, click: true, about: "The pairing page opened in the browser. The button counts down to the code's own end, as the network sets it. Enter opens the page again, Esc cancels." },
   { id: "pair-friend", group: "Connect IMD Agent", name: "A friend's seat", setup: claude, seat: "friend", about: "Step 5 for a friend's seat: a link comes next, for the friend to approve before the code runs out." },
@@ -63,6 +72,7 @@ export const STATES = [
   { id: "error-docker", group: "If a step fails", name: "Docker's download", setup: none, click: true, fail: { docker_install: "Docker's download answered 503 Service Unavailable. Try again in a few minutes." }, about: "The longest foot there is: Docker's terms line and an error over the button." },
   { id: "error-expired", group: "If a step fails", name: "Code ran out", setup: claude, click: true, fail: { box_pair: "pairing code expired before it was signed" }, about: "Five minutes passed before the wallet approved: the button asks for a new code." },
   { id: "error-claude", group: "If a step fails", name: "Code turned down", setup: agent, click: true, fail: { box_sign_in: "Login failed: Request failed with status code 400" }, about: "Claude Code didn't take the code, as when it's mistyped or from an older page: Connect again opens a new page." },
+  { id: "error-codex", group: "If a step fails", name: "Codex's code ran out", setup: codex, ai: "codex", runtime: "codex", click: true, fail: { box_sign_in_codex: "Error logging in: device auth timed out after 15 minutes" }, about: "Fifteen minutes passed before the code was entered on OpenAI's page: Connect Codex asks for a new one." },
   { id: "error", group: "If a step fails", name: "Out of disk space", setup: docker, click: true, fail: { box_pull: "Error: no space left on device" }, about: "A failed step says what happened and what to do, under the button." },
 ];
 
@@ -85,6 +95,10 @@ export function stage(id, theme, os, fixtures) {
   const seat = "seat" in s ? s.seat : "own";
   try { if (seat) localStorage.setItem("imd-agents:seat", seat); else localStorage.removeItem("imd-agents:seat"); } catch {}
   installMock({ fixtures: fixtures ?? { api: {}, svg: {} }, scenario: { box: s.box ?? "no-docker", linked: [], watching: [], setup: s.setup, fail: s.fail, pending: s.pending } });
+  // the AI as answered, Claude unless the state asks again; and what the box thinks with, as the panel keeps it
+  const ai = "ai" in s ? s.ai : "claude";
+  try { if (ai) localStorage.setItem("imd-agents:ai", ai); else localStorage.removeItem("imd-agents:ai"); } catch {}
+  if (s.runtime) try { localStorage.setItem("imd-agents:settings", JSON.stringify({ ...JSON.parse(localStorage.getItem("imd-agents:settings") ?? "{}"), runtime: s.runtime })); } catch {}
   const invoke = window.__TAURI_INTERNALS__.invoke;
   let registered = false;
   let started = false;

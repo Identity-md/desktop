@@ -35,7 +35,7 @@ export type Agent = {
 };
 
 /** The box on this computer, as the app reads it from Docker. */
-export type Box = { state: "running" | "stopped" | "docker-down" | "no-docker" | "starting" | "stopping"; installed: boolean; deviceKey: string | null; dockerClosed?: boolean; current?: boolean };
+export type Box = { state: "running" | "stopped" | "docker-down" | "no-docker" | "starting" | "stopping"; installed: boolean; deviceKey: string | null; dockerClosed?: boolean; current?: boolean; runtime?: string | null };
 
 /**
  * Why a worker holds its own work, in its own words. Only its log says, so only this computer's agent has one:
@@ -91,10 +91,11 @@ export function localPhase(box: Box, agent: Agent | null, now = new Date(), hold
 }
 
 /**
- * A check failed on the runtime's sign-in, as Claude Code words it: a login past its time limit ("cannot be renewed"),
- * one signed out, or none. Nothing in the box renews it; signing in again does.
+ * A check failed on the runtime's sign-in, as Claude Code or Codex words it: a login past its time limit ("cannot be
+ * renewed"), one signed out, a request with none (Codex's 401), a refresh refused, or none. Nothing in the box renews
+ * it; signing in again does.
  */
-const SIGNED_OUT = /Failed to authenticate|claude auth login|run \/login|not logged in|signed out|OAuth token (?:has )?(?:expired|been revoked)/i;
+const SIGNED_OUT = /Failed to authenticate|claude auth login|run \/login|not logged in|signed out|OAuth token (?:has )?(?:expired|been revoked)|401 Unauthorized|codex login|refresh token|sign in again/i;
 
 /**
  * Why this computer's worker holds its work, from the newest line its self-test wrote in its log, the stamp
@@ -540,9 +541,12 @@ export function setupErrorWords(raw: string): string {
     [/cannot connect to the docker daemon|is the docker daemon running|docker is not installed|error during connect.*pipe/i, "Docker isn't running. Open Docker, then try again."],
     [/no space left on device/i, "Docker is out of disk space. Raise its disk limit in Docker's settings or delete images you don't use, then try again."],
     [/computed checksum did not match|sha256sums?: .*failed|: FAILED$/im, "The worker's download didn't match its published checksum, so nothing was installed. Try again."],
-    [/no such host|could not resolve|network is unreachable|i\/o timeout|tls handshake timeout|connection reset|eai_again|enotfound|etimedout/i, "This computer can't reach the internet right now. Check the connection, then try again."],
+    [/no such host|could not resolve|network is unreachable|i\/o timeout|tls handshake timeout|connection reset|eai_again|enotfound|etimedout|dns error|failed to lookup address/i, "This computer can't reach the internet right now. Check the connection, then try again."],
     // Claude Code's sign-in, turning down the code pasted from its page
     [/^login failed/im, "Claude didn't take that code. Connect again, then paste the code from the page that opens."],
+    // Codex's: its code ran out before it was entered, or OpenAI turned the sign-in down
+    [/device (?:auth|code)[^\n]*(?:timed out|expired)/i, "The code ran out before it was entered. Connect again for a new one."],
+    [/^error logging in\b/im, "Codex didn't sign in. Connect again, then enter the new code on OpenAI's page."],
     [/\bdenied\b|unauthorized|authentication required/i, "GitHub refused the box download. Try again in a few minutes."],
     [/^timed out$/i, "That took too long. Check the connection, then try again."],
     // `imd pair`'s own two endings short of paired: the code ran out, or the approval was refused

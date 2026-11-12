@@ -100,8 +100,8 @@ export async function earnings(wallet: string): Promise<Earning[]> {
 export const agentSvg = (tokenId: string) => invoke<string | null>("agent_svg", { tokenId });
 
 export const boxState = async (): Promise<Box> => {
-  const raw = await invoke<{ state: Box["state"]; installed: boolean; device_key: string | null; current: boolean }>("box_state");
-  return { state: raw.state, installed: raw.installed, deviceKey: raw.device_key, current: raw.current };
+  const raw = await invoke<{ state: Box["state"]; installed: boolean; device_key: string | null; current: boolean; runtime: string | null }>("box_state");
+  return { state: raw.state, installed: raw.installed, deviceKey: raw.device_key, current: raw.current, runtime: raw.runtime };
 };
 export const boxStart = (runtime: string) => invoke<void>("box_start", { runtime });
 export const boxStop = () => invoke<void>("box_stop");
@@ -114,7 +114,7 @@ export const boxRenewal = () => invoke<string | null>("box_renewal");
 export const boxHold = () => invoke<string | null>("box_hold");
 
 /** How far setting this computer's box up has got. On Windows Docker can wait on a restart, which finishes installing WSL. */
-export type Setup = { docker: "missing" | "stopped" | "running" | "restart" | "restart-wsl"; restart_ahead: boolean; image: boolean; worker: boolean; claude: boolean; device_key: string | null };
+export type Setup = { docker: "missing" | "stopped" | "running" | "restart" | "restart-wsl"; restart_ahead: boolean; image: boolean; worker: boolean; claude: boolean; codex_installed: boolean; codex: boolean; device_key: string | null };
 export const boxSetupState = () => invoke<Setup>("box_setup_state");
 /** Docker Desktop: its download page if it is not installed, the app if it is not running. */
 export const dockerOpen = () => invoke<void>("docker_open");
@@ -141,15 +141,21 @@ export const setTheme = (theme: Theme) => invoke<void>("set_theme", { theme });
 export type Theme = "system" | "light" | "dark";
 /** Claude's plans: every paid one comes with Claude Code, which the box thinks with. */
 export const openClaudePlans = () => invoke<void>("open_claude_plans");
+/** ChatGPT's plans: the paid ones come with Codex, which a box can think with instead. */
+export const openChatgptPlans = () => invoke<void>("open_chatgpt_plans");
 /** Bytes free on the disk Docker and the box will use, or null where the app can't tell. */
 export const freeSpace = () => invoke<number | null>("free_space");
-export const boxInstall = () => invoke<void>("box_install");
+/** The worker and Claude Code into the box, and Codex beside them where the box thinks with it. */
+export const boxInstall = (runtime: string) => invoke<void>("box_install", { runtime });
 /** Claude's sign-in, its page opened in the browser as the `box-signin-page` event says; ends signed in, or with why not. */
 export const boxSignIn = () => invoke<void>("box_sign_in");
 /** The code Claude's page ended on, for the sign-in waiting for it. */
 export const boxSignInCode = (code: string) => invoke<void>("box_sign_in_code", { code });
 export const boxSignInOpen = () => invoke<void>("box_sign_in_open");
 export const boxSignInCancel = () => invoke<void>("box_sign_in_cancel");
+/** Codex's sign-in with ChatGPT: OpenAI's page opened and its one-time code given as the `box-signin-device` event says;
+ * ends once the code is entered there, or with why not. Cancel and Open page are Claude's. */
+export const boxSignInCodex = () => invoke<void>("box_sign_in_codex");
 /** Pairs the box, then starts it; its code arrives first as the `box-pairing` event, and its end as `box-pair-ended`. */
 export const boxPair = (runtime: string) => invoke<{ token_id: string | null; register: string | null }>("box_pair", { runtime });
 /** The pairing under way, if setup is opened again while its code waits. */

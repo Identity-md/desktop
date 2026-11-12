@@ -195,6 +195,8 @@ async function refresh(full = false): Promise<void> {
     const box = await api.boxState().catch(() => null);
     state.pairingOut = Boolean(await api.pairingPending().catch(() => null));
     if (box && !(state.box?.state === "starting" || state.box?.state === "stopping") ) state.box = box;
+    // what the running box thinks with is what it starts on again, so a box switched outside the app (`./box runtime`) stays so
+    if (box?.runtime && box.runtime !== settings.runtime) { settings.runtime = box.runtime; save(); }
     // the switch gave up waiting on Docker, which came up after all and brought the box back
     if (box?.state === "running" && state.note?.box) state.note = null;
     if (box?.deviceKey && (full || box.deviceKey !== lastDeviceKey || !state.localToken || Date.now() - lastSeatAsked > 60_000)) {
@@ -1696,6 +1698,8 @@ function close(): void {
 
 void listen<string>("update-available", (event) => { state.update = event.payload; render(); });
 void listen<string | null>("setup-progress", (event) => { state.settingUp = event.payload; render(); });
+// setup's step 4, changed between Claude and Codex: the box starts on that from now on
+void listen<string>("setup-runtime", (event) => { settings.runtime = event.payload; save(); });
 // a pairing ended, its agent started or not: read again, so the agent shows at once
 void listen("box-pair-ended", () => void refresh(true));
 // the new box's download, as setup counts it, while the jury's Update fetches it
