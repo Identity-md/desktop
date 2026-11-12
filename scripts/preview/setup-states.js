@@ -65,6 +65,10 @@ export const STATES = [
   { id: "pair-lend", group: "Connect IMD Agent", name: "A seat from imdLend", setup: claude, seat: "lend", about: "Step 5 for a borrowed seat: imdLend opens next, with the code copied." },
   { id: "pair-lend-code", group: "Connect IMD Agent", name: "Pairing on imdLend", setup: claude, seat: "lend", click: true, about: "The code on the clipboard and imdLend's pairing page open: paste, pick the seat, approve. Enter copies it and opens the page again, Esc cancels." },
   { id: "pair-change", group: "Connect IMD Agent", name: "Change", setup: claude, seat: "lend", press: ["[data-action=change-seat]"], about: "Change, from step 5: the question again, the answer as it was. Continue or Esc goes back to the steps." },
+  { id: "switch", group: "Switching AI", name: "From Settings", setup: paired, box: "running", askAi: true, about: "Settings' AI line, Change, on an agent running on Claude: setup opens on its question, Claude picked, as it runs. Esc goes back." },
+  { id: "switch-codex", group: "Switching AI", name: "Codex picked", setup: paired, box: "running", askAi: true, press: ["[data-ai=codex]"], about: "Codex picked. Continue does only what Codex still needs." },
+  { id: "switch-steps", group: "Switching AI", name: "What Codex needs", setup: paired, box: "running", ai: "codex", runtime: "codex", about: "Codex not in the box yet: step 3 installs it, step 4 signs it in. The rest stays done." },
+  { id: "switch-ready", group: "Switching AI", name: "Restart on Codex", setup: { ...paired, codex_installed: true, codex: true }, box: "running", ai: "codex", runtime: "codex", about: "Codex in and signed in, the agent still on Claude: one button restarts it on Codex. Claude stays signed in, so switching back is this screen again, with no sign-in." },
   { id: "register", group: "Your agent", name: "Not registered yet", setup: claude, click: true, register: true, about: "Paired, but the seat isn't registered as an agent yet." },
   { id: "start", group: "Your agent", name: "Set up", setup: paired, box: "stopped", about: "The five steps done: the agent's own face, grey until it runs. Press Start and it lights up." },
   { id: "starting", group: "Your agent", name: "Starting", setup: paired, box: "stopped", click: true, hang: ["box_start"], about: "The box starting." },
@@ -94,7 +98,9 @@ export function stage(id, theme, os, fixtures) {
   // where the seat was said to be: in the wallet, unless the state asks again
   const seat = "seat" in s ? s.seat : "own";
   try { if (seat) localStorage.setItem("imd-agents:seat", seat); else localStorage.removeItem("imd-agents:seat"); } catch {}
-  installMock({ fixtures: fixtures ?? { api: {}, svg: {} }, scenario: { box: s.box ?? "no-docker", linked: [], watching: [], setup: s.setup, fail: s.fail, pending: s.pending } });
+  installMock({ fixtures: fixtures ?? { api: {}, svg: {} }, scenario: { box: s.box ?? "no-docker", boxRuntime: s.boxRuntime, linked: [], watching: [], setup: s.setup, fail: s.fail, pending: s.pending } });
+  // opened from Settings' AI line
+  try { if (s.askAi) localStorage.setItem("imd-agents:ask-ai", "1"); else localStorage.removeItem("imd-agents:ask-ai"); } catch {}
   // the AI as answered, Claude unless the state asks again; and what the box thinks with, as the panel keeps it
   const ai = "ai" in s ? s.ai : "claude";
   try { if (ai) localStorage.setItem("imd-agents:ai", ai); else localStorage.removeItem("imd-agents:ai"); } catch {}

@@ -1643,9 +1643,15 @@ async fn box_install(app: tauri::AppHandle, runtime: Option<String>) -> Result<(
     .map_err(|e| e.to_string())?
 }
 
-/// What Install runs in its one-off box: the box's own setup, then Codex, where the box thinks with it and an image
-/// from before Codex left it out. `IMD_RUNTIME` names the runtime; nothing else of the app's goes in.
-const INSTALL: &str = r#"imd-box-setup && case "$IMD_RUNTIME" in codex*) command -v codex >/dev/null || { echo "Installing Codex…"; npm install --global --no-fund --no-audit @openai/codex >/dev/null; } ;; esac"#;
+/// What Install runs in its one-off box. For a box that thinks with Codex and already has its worker, as one switching
+/// from Claude in Settings, Codex alone goes in, beside a worker that may be running a job: the box's setup would
+/// install the worker again underneath it. Otherwise the box's own setup, then Codex where an image from before Codex
+/// left it out. `IMD_RUNTIME` names the runtime; nothing else of the app's goes in.
+const INSTALL: &str = r#"add_codex() { command -v codex >/dev/null || { echo "Installing Codex…"; npm install --global --no-fund --no-audit @openai/codex >/dev/null; }; }
+case "$IMD_RUNTIME" in
+  codex*) if command -v imd >/dev/null; then add_codex; else imd-box-setup && add_codex; fi ;;
+  *) imd-box-setup ;;
+esac"#;
 
 /// Claude's sign-in, Claude Code's own: `claude auth login` in a one-off box, with no terminal. Its page opens in this
 /// computer's browser, and the code that page ends on is pasted into setup (`box_sign_in_code`). Without a terminal,
