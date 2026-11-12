@@ -1097,7 +1097,7 @@ function homeHtml(): string {
   const known = state.loaded || state.box !== null;
   const empty = known && !watched().length && !settings.seats.length && !state.box?.installed;
   return `<header>
-      <div><div class="title">IMD Agents</div>${empty ? "" : `<div class="summary">${esc(summary)}</div>`}</div>
+      <div><div class="title">IMD Worker</div>${empty ? "" : `<div class="summary">${esc(summary)}</div>`}</div>
       <button class="icon" data-action="settings" title="Settings (,)" aria-label="Settings">${GEAR}</button>
     </header>
     ${empty ? welcomeHtml() : settingUpHtml() + agentsHtml() + workHtml() + networkHtml()}
@@ -1247,7 +1247,7 @@ const lendable = (agent: Agent) => linked(agent.wallet);
  * Said for a friend who has the app as well as one who hasn't: either way the seat question comes with setting a computer
  * up, and a computer runs one seat, so it's one not running an agent yet.
  */
-const inviteText = (tokenId: string) => `I'm lending you my IMD agent seat #${tokenId}. In IMD Agents (https://imd.fun/app), set up a computer that isn't running an agent yet, and pick "In a friend's wallet" when it asks where the seat is. Send me the link it copies right away and I'll approve it.`;
+const inviteText = (tokenId: string) => `I'm lending you my IMD seat #${tokenId}. In IMD Worker (https://imd.fun/app), set up a computer that isn't running an agent yet, and pick "In a friend's wallet" when it asks where the seat is. Send me the link it copies right away and I'll approve it.`;
 
 /** Where a seat runs: on this computer, which serves it whether its box is up or not; on another; or nowhere. */
 function runsOn(agent: Agent): "here" | "elsewhere" | null {
@@ -1315,7 +1315,7 @@ function settingsHtml(): string {
       <div class="line"><span>Appearance</span><span class="choices" role="radiogroup" title="Appearance (A)">${THEMES.map(([theme, name]) => `<button role="radio" aria-checked="${settings.theme === theme}" class="${settings.theme === theme ? "on" : ""}" data-action="theme" data-theme="${theme}">${name}</button>`).join("")}</span></div>
       <label class="line"><span>Sounds<span class="sub">When a job is taken or accepted</span></span><button class="switch${settings.sounds ? " on" : ""}" role="switch" aria-checked="${settings.sounds}" data-action="sounds" title="Sounds"><span></span></button></label>
       ${state.update ? `<div class="line"><span>Update to ${esc(state.update)}<span class="sub">It restarts on the new version</span></span><button class="pill" data-action="update" title="Update (${shift("U")})" ${state.updating ? "disabled" : ""}>${state.updating ? "Updating…" : "Update"}</button></div>` : ""}
-      <div class="line"><span>Quit IMD Agents${appVersion ? `<span class="sub">Version ${esc(appVersion)}</span>` : ""}</span><button class="pill" data-action="quit" title="Quit (${ctrl("Q")})">Quit</button></div>
+      <div class="line"><span>Quit IMD Worker${appVersion ? `<span class="sub">Version ${esc(appVersion)}</span>` : ""}</span><button class="pill" data-action="quit" title="Quit (${ctrl("Q")})">Quit</button></div>
     </section>
     ${noteHtml()}`;
 }

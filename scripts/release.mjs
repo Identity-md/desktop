@@ -1,4 +1,4 @@
-// Releases IMD Agents from the maintainer's Mac: `pnpm release 0.1.1`, or `pnpm release --dry-run`
+// Releases IMD Worker from the maintainer's Mac: `pnpm release 0.1.1`, or `pnpm release --dry-run`
 // to build, sign and notarize the current version without publishing anything.
 //
 // Signing stays on this Mac on purpose. The Developer ID certificate, the notarization credentials,
@@ -26,7 +26,14 @@ import { ICONS, TITLE_BAR, WINDOW } from "./installer/window.mjs";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const REPO = "Identity-md/desktop";
-const NAME = "IMD Agents";
+const NAME = "IMD Worker";
+// Windows' installer finds the copy it updates by the product name: its uninstall entry, its folder and its Start menu
+// item are named after it. So on Windows the app keeps the name it was first installed under (tauri.windows.conf.json)
+// until a release moves those installs over, and everything the app itself shows says IMD Worker.
+const WINDOWS_NAME = "IMD Agents";
+// The files a release carries, and the files' names from before the rename, published as well so old links still work.
+const FILES = { dmg: "IMD-Worker.dmg", update: "IMD-Worker.app.tar.gz", setup: "IMD-Worker-Setup.exe" };
+const OLD = { dmg: "IMD-Agents.dmg", setup: "IMD-Agents-Setup.exe" };
 // The Developer ID's team, and the keychain profile `xcrun notarytool store-credentials` saved for it.
 const TEAM_ID = process.env.APPLE_TEAM_ID ?? "P4HYHYKX7H";
 const NOTARY_PROFILE = process.env.NOTARY_PROFILE ?? "skillet-notary";
@@ -182,7 +189,7 @@ step("Building, signing and notarizing the disk image");
 const stage = join(out, "stage");
 mkdirSync(stage);
 run("ditto", [app, join(stage, `${NAME}.app`)]);
-const dmg = join(out, "IMD-Agents.dmg");
+const dmg = join(out, FILES.dmg);
 run("create-dmg", ["--volname", NAME, "--background", join(ROOT, "src-tauri/installer/dmg-background.tiff"),
   "--window-pos", "200", "120", "--window-size", String(WINDOW.width), String(WINDOW.height + TITLE_BAR), "--icon-size", "128", "--text-size", "12",
   "--icon", `${NAME}.app`, ...ICONS.app.map(String), "--hide-extension", `${NAME}.app`, "--app-drop-link", ...ICONS.applications.map(String),
@@ -192,6 +199,7 @@ run("codesign", ["--sign", identity, "--timestamp", dmg]);
 notarize(dmg);
 run("xcrun", ["stapler", "staple", dmg]);
 assess(["--assess", "--type", "open", "--context", "context:primary-signature"], dmg);
+cpSync(dmg, join(out, OLD.dmg));
 
 // Windows: the same version, cross-compiled here for x64 into a per-user NSIS installer. `tauri build` runs
 // sign-windows.mjs on each program as it makes it, the app, NSIS's own and the installer last, and only then signs
@@ -204,9 +212,9 @@ if (!macOnly) {
   // the signer by absolute paths, as the installer's own build runs it from another folder; nothing secret in them,
   // as they are written into the installer's script
   const signing = azure ? { windows: { signCommand: { cmd: process.execPath, args: [join(ROOT, "scripts/sign-windows.mjs"), "%1"] } } } : {};
-  const built = spawnSync("pnpm", ["tauri", "build", "--runner", "cargo-xwin", "--target", WINDOWS, "--bundles", "nsis", "--config", JSON.stringify({ bundle: { createUpdaterArtifacts: true, ...signing } })], { cwd: ROOT, stdio: "inherit", env });
+  const built = spawnSync("pnpm", ["tauri", "build", "--runner", "cargo-xwin", "--target", WINDOWS, "--bundles", "nsis", "--config", JSON.stringify({ productName: WINDOWS_NAME, bundle: { createUpdaterArtifacts: true, ...signing } })], { cwd: ROOT, stdio: "inherit", env });
   if (built.status !== 0) fail("The Windows build failed.");
-  const setup = join(ROOT, `src-tauri/target/${WINDOWS}/release/bundle/nsis/${NAME}_${version}_x64-setup.exe`);
+  const setup = join(ROOT, `src-tauri/target/${WINDOWS}/release/bundle/nsis/${WINDOWS_NAME}_${version}_x64-setup.exe`);
   for (const file of [setup, `${setup}.sig`]) if (!existsSync(file)) fail(`The Windows build left no ${file}.`);
   if (azure) {
     // the installer, and the app and its uninstaller in it, as Windows meets them: the build signs the app before it
@@ -217,15 +225,16 @@ if (!macOnly) {
     rmSync(unpacked, { recursive: true });
     console.log("  the installer, and the app and uninstaller in it, are signed");
   }
-  cpSync(setup, join(out, "IMD-Agents-Setup.exe"));
-  windows = { signature: readFileSync(`${setup}.sig`, "utf8").trim(), url: `https://github.com/${REPO}/releases/download/v${version}/IMD-Agents-Setup.exe` };
+  cpSync(setup, join(out, FILES.setup));
+  cpSync(setup, join(out, OLD.setup));
+  windows = { signature: readFileSync(`${setup}.sig`, "utf8").trim(), url: `https://github.com/${REPO}/releases/download/v${version}/${FILES.setup}` };
 }
 
 // The update is the app as signed, before stapling: the same code Apple notarized, and an update
 // the app downloads itself is never quarantined, so Gatekeeper does not ask for the ticket.
 step("Writing the update");
-cpSync(tarball, join(out, "IMD-Agents.app.tar.gz"));
-const url = `https://github.com/${REPO}/releases/download/v${version}/IMD-Agents.app.tar.gz`;
+cpSync(tarball, join(out, FILES.update));
+const url = `https://github.com/${REPO}/releases/download/v${version}/${FILES.update}`;
 const platform = { signature: readFileSync(`${tarball}.sig`, "utf8").trim(), url };
 writeFileSync(join(out, "latest.json"), `${JSON.stringify({
   version,
@@ -234,7 +243,7 @@ writeFileSync(join(out, "latest.json"), `${JSON.stringify({
   // One build runs on both Macs, so both point at it; Windows updates by running its new installer.
   platforms: { "darwin-aarch64": platform, "darwin-x86_64": platform, ...(windows ? { "windows-x86_64": windows } : {}) },
 }, null, 2)}\n`);
-console.log(`  ${out}: IMD-Agents.dmg, IMD-Agents.app.tar.gz${windows ? ", IMD-Agents-Setup.exe" : ""}, latest.json`);
+console.log(`  ${out}: ${FILES.dmg}, ${FILES.update}${windows ? `, ${FILES.setup}` : ""}, latest.json, and ${OLD.dmg}${windows ? ` and ${OLD.setup}` : ""} for old links`);
 
 if (dryRun) {
   console.log(`\n✓ Dry run: built, signed, notarized and stapled${windows && !azure ? ", Windows unsigned" : ""}. Nothing was committed or published.`);
@@ -248,8 +257,8 @@ run("git", ["commit", "--quiet", "-m", `Release ${version}`]);
 run("git", ["push", "--quiet", "origin", "main"]);
 const sha = run("git", ["rev-parse", "HEAD"]);
 run("gh", ["release", "create", `v${version}`, "--repo", REPO, "--target", sha, "--title", `${NAME} ${version}`, "--notes", notes ?? `${NAME} ${version}`, "--draft",
-  join(out, "IMD-Agents.dmg"), join(out, "IMD-Agents.app.tar.gz"), ...(windows ? [join(out, "IMD-Agents-Setup.exe")] : []), join(out, "latest.json")]);
+  ...[FILES.dmg, OLD.dmg, FILES.update].map((file) => join(out, file)), ...(windows ? [FILES.setup, OLD.setup].map((file) => join(out, file)) : []), join(out, "latest.json")]);
 run("gh", ["release", "edit", `v${version}`, "--repo", REPO, "--draft=false", "--latest"]);
 console.log(`\n✓ ${NAME} ${version} is out: https://github.com/${REPO}/releases/tag/v${version}`);
-console.log(`  Download: https://github.com/${REPO}/releases/latest/download/IMD-Agents.dmg`);
-if (windows) console.log(`  Windows: https://github.com/${REPO}/releases/latest/download/IMD-Agents-Setup.exe`);
+console.log(`  Download: https://github.com/${REPO}/releases/latest/download/${FILES.dmg}`);
+if (windows) console.log(`  Windows: https://github.com/${REPO}/releases/latest/download/${FILES.setup}`);
