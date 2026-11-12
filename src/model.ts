@@ -546,7 +546,7 @@ export function setupErrorWords(raw: string): string {
     [/^login failed/im, "Claude didn't take that code. Connect again, then paste the code from the page that opens."],
     // Codex's: its code ran out before it was entered, or OpenAI turned the sign-in down
     [/device (?:auth|code)[^\n]*(?:timed out|expired)/i, "The code ran out before it was entered. Connect again for a new one."],
-    [/error logging in with device code/i, "Codex didn't sign in. Connect again, then enter the new code on OpenAI's page."],
+    [/^error logging in\b/im, "Codex didn't sign in. Connect again, then enter the new code on OpenAI's page."],
     [/\bdenied\b|unauthorized|authentication required/i, "GitHub refused the box download. Try again in a few minutes."],
     [/^timed out$/i, "That took too long. Check the connection, then try again."],
     // `imd pair`'s own two endings short of paired: the code ran out, or the approval was refused

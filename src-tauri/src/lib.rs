@@ -1656,7 +1656,7 @@ const INSTALL: &str = r#"imd-box-setup && case "$IMD_RUNTIME" in codex*) command
 async fn box_sign_in(app: tauri::AppHandle) -> Result<(), String> {
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
-        let round = sign_in_clock();
+        let round = sign_in_clock(SIGN_IN_WAITS);
         let mut args: Vec<String> = vec!["run".into(), "-i".into(), "--rm".into(), "--name".into(), BOX_SIGNING_IN.into()];
         args.extend(box_flags());
         args.extend([BOX_IMAGE, "claude", "auth", "login", "--claudeai"].iter().map(|s| s.to_string()));
@@ -1679,7 +1679,7 @@ async fn box_sign_in(app: tauri::AppHandle) -> Result<(), String> {
 async fn box_sign_in_codex(app: tauri::AppHandle) -> Result<(), String> {
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
-        let round = sign_in_clock();
+        let round = sign_in_clock(CODEX_SIGN_IN_WAITS);
         let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_SIGNING_IN.into()];
         args.extend(box_flags());
         args.extend([BOX_IMAGE, "codex", "login", "--device-auth"].iter().map(|s| s.to_string()));
@@ -1694,13 +1694,17 @@ async fn box_sign_in_codex(app: tauri::AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Codex's sign-in waits a minute past the 15 its code lasts, so Codex's own words for a code that ran out ("device auth
+/// timed out") come before this app's stop, which would read as a slow connection.
+const CODEX_SIGN_IN_WAITS: Duration = Duration::from_secs(16 * 60);
+
 /// Starts a sign-in's clock, clearing one left behind first: one left waiting, its window closed, would hold the app's own
-/// updates back, so it stops by itself after `SIGN_IN_WAITS`. The round it returns tells that stop from any other.
-fn sign_in_clock() -> u64 {
+/// updates back, so it stops by itself after `waits`. The round it returns tells that stop from any other.
+fn sign_in_clock(waits: Duration) -> u64 {
     let _ = run_docker(&["rm", "-f", BOX_SIGNING_IN], Duration::from_secs(30));
     let round = SIGN_IN_ROUND.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
-        std::thread::sleep(SIGN_IN_WAITS);
+        std::thread::sleep(waits);
         if SIGN_IN_ROUND.load(Ordering::SeqCst) == round {
             SIGN_IN_STOPPED.store(round, Ordering::SeqCst);
             let _ = run_docker(&["rm", "-f", BOX_SIGNING_IN], Duration::from_secs(30));
