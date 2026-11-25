@@ -88,7 +88,7 @@ Then **Start Agent #N**. A seat runs on one machine at a time, so pairing it her
 - **The box sees nothing of this computer.** Nothing is mounted, a firewall is set before the worker starts, and every capability is dropped. `./box check` in the [box repository](https://github.com/Identity-md/box) proves each wall.
 - **Signed updates only.** The app refuses any update not signed with the release key, which never leaves the maintainer's Mac.
 
-The link never expires. Disconnect in Settings unlinks every wallet and deletes the key.
+The link never expires. Disconnect in Settings, Wallets unlinks every wallet and deletes the key.
 
 ## Keys
 

@@ -39,6 +39,8 @@ export function installMock({ fixtures, scenario }) {
     }
     // the box's pairing, retired when its seat moved on: `unpaired: true`, or `window.__unpaired = true` once open
     if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: scenario.unpaired || window.__unpaired ? "stale" : "active", tokenId: local } } };
+    // the plane's one outside desk, as GET /github/desks listed it on 2026-11-25
+    if (path === "/github/desks") return { status: 200, body: { desks: [{ name: "pequalnp", kind: "pequalnp-v1", repo: "open-goat/pequalnp-proofs", path: "lean/PEqualNP/Outside/L_<gap>.lean" }] } };
     const hit = window.__fixtures.api[path];
     if (!hit) return { status: 404, body: null };
     const body = structuredClone(hit.body);
@@ -86,6 +88,18 @@ export function installMock({ fixtures, scenario }) {
   /** This computer's RPC and jury seat: none and not joined, unless the scenario says (`rpc`, `jury`). */
   let rpc = scenario.rpc ?? { chains: [], goals: false };
   const jury = { able: true, boxed: true, joined: false, key: null, seat: null, said_secs: null, chains: [], link: null, ...scenario.jury };
+  /** This computer's box's memory: off, its box at 6 GB, Docker given 16 GB, unless the scenario says (`memory`). */
+  const GIB = 2 ** 30;
+  let memory = { on: false, docker_bytes: Math.round(15.6 * GIB), box_bytes: 6 * GIB, ...scenario.memory };
+  /** This computer's agent on GitHub: no line unless the scenario says (`github`), as for an Arm Mac's box today. An x64
+   * box with gh, signed out and not linked, unless it says otherwise. */
+  let github = scenario.github ? { arch: "x86_64", gh: true, signed_in: null, linked: null, repos: [], mode: null, network: [], denied: [], device: null, ...scenario.github } : null;
+  /** A GitHub sign-in waiting for its code, to end when it's cancelled. */
+  let signingGithub = null;
+  /** What `imd github link` (worker 0.1.47) says before it asks, from its own linkNotice and desksNotice, for "octocat"
+   * (src/github-link.fixture.txt, which the tests read). Here, as Playwright runs this function alone. */
+  const githubSays = "This links this machine to the GitHub account octocat for outside proof desks: public proof efforts whose steps the\nnetwork works and submits as pull requests.\n\nWhat it means:\n  - The network takes a desk's steps under your handle, octocat, at most five at a time, and works them on this machine.\n  - It runs on this machine and uses your own Claude Code or Codex usage, as any task here does.\n  - The network may add the public contest repositories it runs, the ones listed below and any it runs later, each checked\n    here to be public. Each pull request is one proof file, under your GitHub name. imd github deny <owner/repo> blocks\n    one; imd github desks mine lets you choose them yourself (imd github allow <owner/repo>).\n\nWhat becomes public, for each proof this machine writes that passes its checks:\n  - a pull request opened by octocat on one of those public repositories, showing your handle and avatar, and a\n    fork of that repository in your account if you have none;\n  - one commit on it, authored and committed as octocat <583231+octocat@users.noreply.github.com>, GitHub's noreply address for you.\n\nTo prove the account is yours, a short-lived secret gist is made in it and deleted as soon as the network has read it.\n\nWhile linked, every task on this machine runs jailed, whatever it is: away from your home folder, where gh keeps your token\n(in plain text on a server, ~/.config/gh/hosts.yml), a task reads only its own workspace and the tools it runs. Where the jail\nstops holding, this machine takes no task until it holds again or you unlink (imd doctor says which).\n\nIt is opened by this worker through your own gh, which keeps your token; the worker never reads it, and no task is told your login.\nThe worker opens only a file one of its own tasks on this machine wrote, at a path the desk's kind allows, in a repository\nworked here. Nothing is ever opened under anyone else's account. imd github unlink stops it at any time.\nThe desks this plane works now, each allowed here only if you say yes to it:\n  - open-goat/pequalnp-proofs (desk pequalnp, kind pequalnp-v1): Lean 4 proofs against Mathlib, one file a step, held to pequalnp.com's contributing rules.\n    Each proof goes at lean/PEqualNP/Outside/L_<gap>.lean, <gap> being the step. Lean and Mathlib take about 10 GB of disk here, fetched once and kept.\n\n\nnot linked.\n";
+  const githubNotice = (login) => githubSays.trimEnd().replace(/\nnot linked\.$/, "").replaceAll("octocat", login);
   window.__emit = (event, payload) => { const id = handlers[event]; if (id) window[`_${id}`]({ event, id: 1, payload }); };
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "panel" }, currentWebview: { windowLabel: "panel", label: "panel" } },
@@ -167,6 +181,25 @@ export function installMock({ fixtures, scenario }) {
           return new Promise((done, failed) => { joining = { done, failed }; });
         case "jury_cancel": window.__emit("jury-link", null); joining?.failed("stopped"); return null;
         case "jury_open": case "open_alchemy": return null;
+        case "github_state": return github;
+        // gh prints GitHub's page and a code, then waits for it to be entered there: only Cancel ends it here
+        case "github_sign_in":
+          setTimeout(() => window.__emit("github-device", { url: "https://github.com/login/device", code: "4F2A-9C1D" }), 700);
+          return new Promise((done, failed) => { signingGithub = { done, failed }; });
+        case "github_sign_in_cancel": window.__emit("github-device", null); signingGithub?.failed("stopped"); return null;
+        case "github_open": return null;
+        case "github_preview": return { login: github?.signed_in ?? "octocat", text: githubNotice(github?.signed_in ?? "octocat") };
+        // worker 0.1.46: a link follows the network's desks, which it reads at once
+        case "github_link": return new Promise((done) => setTimeout(() => { github = { ...github, linked: github.signed_in, repos: [], mode: "network", network: ["open-goat/pequalnp-proofs"] }; done(null); }, 1500));
+        case "github_unlink": github = { ...github, linked: null, signed_in: null, repos: [], mode: null, network: [], denied: [] }; return null;
+        case "github_jobs": return new Promise((done) => setTimeout(() => {
+          github = args.on
+            ? { ...github, mode: "network", network: ["open-goat/pequalnp-proofs"], denied: github.denied.filter((r) => !args.repos.includes(r)) }
+            : { ...github, mode: "mine", network: [], repos: [], denied: [...github.denied, ...args.repos] };
+          done(null);
+        }, 600));
+        case "memory_state": return memory;
+        case "memory_set": memory = { ...memory, on: args.on }; return null;
         case "docker_install": return new Promise(() => {});
         case "update_install": return new Promise(() => {});
         default: return null;

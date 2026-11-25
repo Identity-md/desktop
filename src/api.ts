@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 export { getVersion as appVersion } from "@tauri-apps/api/app";
 import type { Span, Terms } from "./lending";
-import { sumOf, worthOf, type Box, type Earning, type ReleaseRow, type RewardValue, type Standing, type WorkRow } from "./model";
+import { sumOf, worthOf, type Box, type Desk, type Earning, type ReleaseRow, type RewardValue, type Standing, type WorkRow } from "./model";
 
 /**
  * Everything the panel asks of the app's Rust side. The page itself reaches no network, holds no key
@@ -236,3 +236,35 @@ export const juryState = () => invoke<Jury | null>("jury_state");
 export const juryJoin = () => invoke<void>("jury_join");
 export const juryOpen = () => invoke<void>("jury_open");
 export const juryCancel = () => invoke<void>("jury_cancel");
+
+/** This computer's box's memory: Memory on or off, Docker's memory and the running box's limit, in bytes. */
+export type Memory = { on: boolean; docker_bytes: number | null; box_bytes: number | null };
+export const memoryState = () => invoke<Memory>("memory_state");
+/** Memory on or off. The box takes it once the panel restarts it. */
+export const memorySet = (on: boolean) => invoke<void>("memory_set", { on });
+
+/** This computer's agent on GitHub, as its box says: its chip, gh and who it's signed in as, the link and its repositories. */
+export type Github = {
+  arch: string; gh: boolean; signed_in: string | null; linked: string | null; repos: string[];
+  /** The page and code a sign-in waits at, as `github-device` says it too. */
+  device: { url: string; code: string } | null;
+};
+export const githubState = () => invoke<Github | null>("github_state");
+/** gh's own sign-in in a one-off box: GitHub's page opens, the code comes as `github-device`; ends signed in, or why not. */
+export const githubSignIn = () => invoke<void>("github_sign_in");
+export const githubOpen = () => invoke<void>("github_open");
+export const githubSignInCancel = () => invoke<void>("github_sign_in_cancel");
+/** What linking means, in the worker's own words, and the account. Nothing changes by it. */
+export type GithubPreview = { login: string; text: string };
+export const githubPreview = () => invoke<GithubPreview>("github_preview");
+/** GitHub's one switch, the link kept: on follows the network's desks, each of `repos` allowed again; off works only
+ * its holder's own, each of `repos` denied. */
+export const githubJobs = (on: boolean, repos: string[]) => invoke<void>("github_jobs", { on, repos });
+/** Links, with the repositories the preview named; a gist it couldn't delete comes back as its line. */
+export const githubLink = (repos: string[]) => invoke<string | null>("github_link", { repos });
+export const githubUnlink = () => invoke<void>("github_unlink");
+/** The plane's outside desks, as `GET /github/desks` lists them: what a machine needs, where a desk says. */
+export async function githubDesks(): Promise<Desk[] | null> {
+  const answer = await get<{ desks?: Desk[] }>("/github/desks");
+  return answer.status === 200 && Array.isArray(answer.body?.desks) ? answer.body!.desks!.filter((desk) => typeof desk?.repo === "string" && typeof desk.name === "string") : null;
+}

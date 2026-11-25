@@ -610,7 +610,7 @@ fn box_current(id: &str, image: &str) -> bool {
         return true;
     }
     match run_docker(&["inspect", "--format", BOX_MADE, BOX_NAME], Duration::from_secs(10)) {
-        Some((true, out)) if !made_current(&out, image) => false,
+        Some((true, out)) if !made_current(&out, image) || !made_with_memory(&out, wanted_memory()) => false,
         Some((true, _)) => {
             *known = Some((id.to_string(), image.to_string()));
             true
@@ -726,8 +726,13 @@ fn wide(text: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
 /// capability dropped but the few its firewall needs before it hands over to the worker's own user.
 /// `--init` starts a small process first, to clear what jobs leave behind: the worker can't, and what
 /// Claude's sandbox orphans (bwrap, socat) otherwise piles up, about 50 a day, toward `--pids-limit`.
-/// It alone stays root, and a job can neither read it nor signal it.
+/// It alone stays root, and a job can neither read it nor signal it. Every one-off box runs with 6 GB.
 fn box_flags() -> Vec<String> {
+    box_flags_with(BOX_MEMORY)
+}
+
+/// The same flags with `memory` as the box's limit: the running box takes 16 GB while it is linked to GitHub.
+fn box_flags_with(memory: &str) -> Vec<String> {
     [
         "--cap-drop", "ALL", "--cap-add", "NET_ADMIN", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "SETPCAP", "--cap-add", "CHOWN",
         "--security-opt", "no-new-privileges:true",
@@ -736,7 +741,7 @@ fn box_flags() -> Vec<String> {
     .map(|s| s.to_string())
     .chain(jail_flags())
     .chain(["--cpus".to_string(), box_cpus()])
-    .chain(["--init", "--memory", "6g", "--pids-limit", "2048", "-v"].iter().map(|s| s.to_string()))
+    .chain(["--init".to_string(), "--memory".to_string(), memory.to_string(), "--pids-limit".to_string(), "2048".to_string(), "-v".to_string()])
     .chain([format!("{BOX_VOLUME}:/home/imd")])
     .collect()
 }
@@ -1778,6 +1783,13 @@ struct DeviceCode {
 /// its own words on the way out if it doesn't sign in. It prints them in colour even with no terminal, so each line is
 /// read without its escapes, from either stream.
 fn device_sign_in_with(args: &[String], shown: impl Fn(&DeviceCode)) -> Result<(), String> {
+    let mut reading = DeviceReading::default();
+    device_sign_in_reading(args, |line| reading.read(line), shown, "Codex's sign-in stopped")
+}
+
+/// A sign-in by one-time code, run by Docker with `args`: each plain line handed to `read`, which says the page and the
+/// code once it has both; those handed to `shown`; and its own words on the way out, else `stopped`, if it doesn't sign in.
+fn device_sign_in_reading(args: &[String], mut read: impl FnMut(&str) -> Option<DeviceCode>, shown: impl Fn(&DeviceCode), stopped: &str) -> Result<(), String> {
     use std::io::BufRead;
     let mut command = docker_command().ok_or("Docker is not installed")?;
     command.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
@@ -1803,11 +1815,10 @@ fn device_sign_in_with(args: &[String], shown: impl Fn(&DeviceCode)) -> Result<(
         })
         .collect();
     drop(lines);
-    let mut reading = DeviceReading::default();
     let mut last = String::new();
     for line in said {
         let line = plain(&line);
-        if let Some(device) = reading.read(&line) {
+        if let Some(device) = read(&line) {
             shown(&device);
         }
         let line = line.trim();
@@ -1823,7 +1834,7 @@ fn device_sign_in_with(args: &[String], shown: impl Fn(&DeviceCode)) -> Result<(
     if status.success() {
         return Ok(());
     }
-    Err(if last.is_empty() { "Codex's sign-in stopped".into() } else { last })
+    Err(if last.is_empty() { stopped.into() } else { last })
 }
 
 /// The page and the code, as Codex's sign-in prints them, each on a line of its own: the page first, then the code.
@@ -2338,9 +2349,13 @@ const RUNTIMES: [&str; 4] = ["claude", "codex", "claude,grok", "codex,grok"];
 fn run_box(runtime: &str) -> Result<(), String> {
     // the image the box it replaces was made from, let go of once this one runs
     let before = run_docker(&["inspect", "--format", "{{.Image}}", BOX_NAME], Duration::from_secs(10)).filter(|(ok, _)| *ok).map(|(_, image)| image);
+    // read while the old box still runs, where the link is asked quickest; not known, the memory the box it replaces had
+    let memory = wanted_memory()
+        .or_else(|| run_docker(&["inspect", "--format", BOX_MADE, BOX_NAME], Duration::from_secs(10)).filter(|(ok, _)| *ok).and_then(|(_, made)| memory_of(&made)))
+        .unwrap_or(BOX_MEMORY);
     let _ = run_docker(&["rm", "-f", BOX_NAME], Duration::from_secs(30));
     let mut args: Vec<String> = ["run", "-d", "--name", BOX_NAME, "--restart", "unless-stopped"].iter().map(|s| s.to_string()).collect();
-    args.extend(box_flags());
+    args.extend(box_flags_with(memory));
     args.extend(juror_flags());
     args.extend([BOX_IMAGE, "imd", "start", "--runtime", runtime, "--auto-update"].iter().map(|s| s.to_string()));
     match run_docker(&args.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(120)) {
@@ -2359,11 +2374,27 @@ fn run_box(runtime: &str) -> Result<(), String> {
 /// own: a template that also asks `.Id` is run on Docker's raw JSON, where a box with no init has no such key and the
 /// whole read fails. The security options come with the seccomp profile's text, spaces and all, so every field after
 /// them is one without a space, read from the end.
-const BOX_MADE: &str = "{{.Image}} {{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}} {{.HostConfig.Init}} {{json .HostConfig.CapAdd}} {{json .HostConfig.Binds}}";
+const BOX_MADE: &str = "{{.Image}} {{.HostConfig.Memory}} {{json .HostConfig.SecurityOpt}} {{len .HostConfig.MaskedPaths}} {{.HostConfig.Init}} {{json .HostConfig.CapAdd}} {{json .HostConfig.Binds}}";
 
 /// Whether a box, as `BOX_MADE` reads it, was made from `image` with the flags above.
 fn made_current(inspect: &str, image: &str) -> bool {
     inspect.split(' ').next() == Some(image) && sealed(inspect)
+}
+
+/// Whether a box, as `BOX_MADE` reads it, was made with `memory` as its limit. Not knowing what it should have says
+/// yes; a read from before the limit was asked (no number second), a box made with the 6 GB every box had.
+fn made_with_memory(inspect: &str, memory: Option<&str>) -> bool {
+    let Some(memory) = memory else { return true };
+    match inspect.split(' ').nth(1).and_then(|field| field.parse::<u64>().ok()) {
+        Some(bytes) => bytes == memory_bytes(memory),
+        None => memory == BOX_MEMORY,
+    }
+}
+
+/// The memory limit a box was made with, as `BOX_MADE` or a plain inspect of it reads.
+fn memory_of(inspect: &str) -> Option<&'static str> {
+    let bytes = inspect.split(' ').nth(1).and_then(|field| field.parse::<u64>().ok())?;
+    [BOX_MEMORY, MORE_MEMORY].into_iter().find(|memory| memory_bytes(memory) == bytes)
 }
 
 /// Whether a box was made with the flags this app gives one, read from `docker inspect` as its security
@@ -2459,7 +2490,7 @@ async fn box_restart(runtime: String) -> Result<(), String> {
         let image = image_id(BOX_IMAGE).unwrap_or_default();
         match made {
             None => Err("Docker is not installed".into()),
-            Some((true, out)) if made_current(&out, &image) => match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
+            Some((true, out)) if made_current(&out, &image) && made_with_memory(&out, wanted_memory()) => match run_docker(&["restart", "--time", "30", BOX_NAME], Duration::from_secs(90)) {
                 Some((true, _)) => Ok(()),
                 Some((false, why)) => Err(why),
                 None => Err("Docker is not installed".into()),
@@ -2915,6 +2946,380 @@ async fn jury_cancel() {
     let _ = tauri::async_runtime::spawn_blocking(stop_jury_setup).await;
 }
 
+// ---------------------------------------------------------------------------------------------
+// This computer's box's memory: 6 GB, or 16 GB where its holder turns Memory on, for the jobs that ask a machine for it
+// (a batch's `requires.minMemoryGb`: goals, and outside proof desks, whose Lean loads all of Mathlib).
+// ---------------------------------------------------------------------------------------------
+
+/// The memory every box runs with, and a box with Memory on.
+const BOX_MEMORY: &str = "6g";
+const MORE_MEMORY: &str = "16g";
+const GIB: u64 = 1 << 30;
+/// The least memory Docker can have for a box to read as 16 GB: the network counts whole GiB to the nearest
+/// (protocol `reportedGb`), and a box reports the smaller of its limit and Docker's own memory.
+const MORE_DOCKER_LEAST: u64 = 15 * GIB + GIB / 2;
+/// Where Memory on is kept, in the app's data: a file that is there, or isn't. Set as the app starts.
+static MEMORY_FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn memory_bytes(memory: &str) -> u64 {
+    memory.trim_end_matches('g').parse::<u64>().unwrap_or(6) * GIB
+}
+
+/// The box's memory: 16 GB with Memory on where Docker has room for it, else the 6 GB every box has.
+fn box_memory(on: bool, docker: Option<u64>) -> &'static str {
+    if on && docker.is_some_and(|bytes| bytes >= MORE_DOCKER_LEAST) { MORE_MEMORY } else { BOX_MEMORY }
+}
+
+/// The memory Docker has, as `docker info` says it.
+fn docker_memory() -> Option<u64> {
+    run_docker(&["info", "--format", "{{.MemTotal}}"], Duration::from_secs(10)).and_then(|(ok, out)| if ok { out.trim().parse().ok() } else { None })
+}
+
+/// Whether its holder turned Memory on. Off until they do.
+fn memory_on() -> bool {
+    MEMORY_FILE.get().is_some_and(|path| path.exists())
+}
+
+/// The memory this computer's box should run with now; None when Memory is on and Docker's memory couldn't be read,
+/// which changes nothing about a box: a read that fails never makes one again, as `box_current` holds.
+fn wanted_memory() -> Option<&'static str> {
+    if !memory_on() {
+        return Some(BOX_MEMORY);
+    }
+    docker_memory().map(|docker| box_memory(true, Some(docker)))
+}
+
+/// Memory, as Settings shows it: whether it's on, Docker's memory and the running box's limit, in bytes.
+#[derive(Serialize)]
+struct Memory {
+    on: bool,
+    docker_bytes: Option<u64>,
+    box_bytes: Option<u64>,
+}
+
+#[tauri::command]
+async fn memory_state() -> Memory {
+    tauri::async_runtime::spawn_blocking(|| {
+        let box_bytes = run_docker(&["inspect", "--format", "{{.HostConfig.Memory}}", BOX_NAME], Duration::from_secs(10)).and_then(|(ok, out)| if ok { out.trim().parse().ok() } else { None });
+        Memory { on: memory_on(), docker_bytes: docker_memory(), box_bytes }
+    })
+    .await
+    .unwrap_or(Memory { on: memory_on(), docker_bytes: None, box_bytes: None })
+}
+
+/// Turns Memory on or off. The box isn't current after, so the panel's restart, once it holds no job, makes it again
+/// with its new memory.
+#[tauri::command]
+fn memory_set(on: bool) -> Result<(), String> {
+    let path = MEMORY_FILE.get().ok_or("The app's data folder isn't there")?;
+    let said = if on { std::fs::write(path, MORE_MEMORY) } else { std::fs::remove_file(path).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) };
+    *CURRENT_BOX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    said.map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------------------------
+// This computer's agent on GitHub: outside proof desks (pequalnp.com), worked under the holder's own GitHub account
+// (worker 0.1.43, `imd github`). The box's own gh signs in with a one-time code, the worker's own words say what
+// linking means before it's asked, and each desk's repository is a switch: allowed, or denied, the link kept.
+// ---------------------------------------------------------------------------------------------
+
+/// The one-off box that signs in to GitHub, named so that a cancel can stop it.
+const BOX_GITHUB: &str = "imd-worker-github";
+/// GitHub's one-time codes last 15 minutes; the sign-in waits a minute past them, so GitHub's own words come first.
+const GITHUB_SIGN_IN_WAITS: Duration = Duration::from_secs(16 * 60);
+static GITHUB_ROUND: AtomicU64 = AtomicU64::new(0);
+static GITHUB_STOPPED: AtomicU64 = AtomicU64::new(0);
+/// The page and code a GitHub sign-in waits at, for the panel to show again when it opens.
+static GITHUB_DEVICE: std::sync::Mutex<Option<DeviceCode>> = std::sync::Mutex::new(None);
+
+/// Prints the link the worker's config holds, its login and the repositories its holder allowed, and nothing else of that
+/// file, which holds the device key; then, from `github-desks.json` beside it (worker 0.1.46), which desks it works and
+/// the network's it works now, as the worker reads that file (`readDesks`, `repoSources`): none there is the network's,
+/// one that doesn't read is `mine`, and nothing denied is listed as worked.
+const GITHUB_LINK_JS: &str = r#"try{const fs=require("fs"),h=process.env.IDENTITYMD_HOME||require("os").homedir()+"/.identitymd",c=JSON.parse(fs.readFileSync(h+"/config.json","utf8")).githubCredit;if(c&&c.login){console.log("linked "+c.login);let d=null;try{d=JSON.parse(fs.readFileSync(h+"/github-desks.json","utf8"))}catch(e){if(e.code!=="ENOENT")d=false}if(d&&(d.v!==1||!Array.isArray(d.network)||!Array.isArray(d.denied)))d=false;const mode=d===false||(d&&d.mode==="mine")?"mine":"network",denied=d?d.denied:[],no=(r,id)=>denied.some(x=>String(x.repo).toLowerCase()===String(r).toLowerCase()||(id!==undefined&&x.id===id));console.log("mode "+mode);for(const r of c.repos||[])if(!no(r.repo,r.id))console.log("repo "+r.repo);if(mode==="network")for(const r of d?d.network:[])if(!no(r.repo,r.id))console.log("net "+r.repo);for(const x of denied)console.log("denied "+x.repo)}}catch{}"#;
+
+/// What this computer's box says of GitHub: its chip, whether it has gh, who gh is signed in as, and the link.
+#[derive(Serialize, Default, Debug, PartialEq)]
+struct GithubHere {
+    arch: String,
+    gh: bool,
+    signed_in: Option<String>,
+    linked: Option<String>,
+    /// The repositories its holder allowed here themselves, none denied.
+    repos: Vec<String>,
+    /// Which desks it works (worker 0.1.46, `github-desks.json`): `network`, the network's besides its holder's own (the
+    /// default), or `mine`, only its holder's.
+    mode: Option<String>,
+    /// The network's desks it works now, in network mode, none denied.
+    network: Vec<String>,
+    /// Repositories denied here, which the network's desks never add back.
+    denied: Vec<String>,
+}
+
+/// A GitHub login as GitHub allows one: letters, digits and single hyphens, 39 at most, no hyphen first.
+fn github_login(login: &str) -> bool {
+    (1..=39).contains(&login.len()) && !login.starts_with('-') && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// An `owner/name` repository.
+fn github_repo(repo: &str) -> bool {
+    repo.split_once('/').is_some_and(|(owner, name)| github_login(owner) && (1..=100).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
+}
+
+/// Reads `GITHUB_LOOK`'s lines and `GITHUB_LINK_JS`'s; anything else, or a name GitHub wouldn't give, is left out.
+fn github_read(out: &str) -> GithubHere {
+    let mut here = GithubHere::default();
+    for line in out.lines().map(str::trim) {
+        let Some((key, value)) = line.split_once(' ') else { continue };
+        match key {
+            "arch" if value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => here.arch = value.to_string(),
+            "gh" => here.gh = value == "yes",
+            "signed" if github_login(value) => here.signed_in = Some(value.to_string()),
+            "linked" if github_login(value) => here.linked = Some(value.to_string()),
+            "repo" if github_repo(value) && here.repos.len() < 16 => here.repos.push(value.to_string()),
+            "mode" if value == "network" || value == "mine" => here.mode = Some(value.to_string()),
+            "net" if github_repo(value) && here.network.len() < 16 => here.network.push(value.to_string()),
+            "denied" if github_repo(value) && here.denied.len() < 256 => here.denied.push(value.to_string()),
+            _ => {}
+        }
+    }
+    here
+}
+
+/// What the box is asked, as the worker's own user: its chip, gh and who it's signed in as (one `gh api user`, as
+/// `imd github link` itself asks), and the link.
+fn github_look() -> String {
+    format!(
+        "echo \"arch $(uname -m)\"; if command -v gh >/dev/null 2>&1; then echo 'gh yes'; login=$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh api user --jq .login 2>/dev/null) && echo \"signed $login\"; fi; node -e '{GITHUB_LINK_JS}'"
+    )
+}
+
+#[derive(Serialize)]
+struct Github {
+    #[serde(flatten)]
+    here: GithubHere,
+    /// The page and code a sign-in waits at.
+    device: Option<DeviceCode>,
+}
+
+/// This computer's agent on GitHub, read from its running box.
+#[tauri::command]
+async fn github_state() -> Option<Github> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (ok, out) = run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", &github_look()], Duration::from_secs(30))?;
+        if !ok {
+            return None;
+        }
+        Some(Github { here: github_read(&out), device: GITHUB_DEVICE.lock().unwrap_or_else(|e| e.into_inner()).clone() })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// GitHub's own page for a one-time code, the only one a GitHub sign-in opens.
+const GITHUB_DEVICE_PAGE: &str = "https://github.com/login/device";
+
+/// The page and the code, as gh's sign-in prints them with no terminal, each on a line of its own:
+/// "! First copy your one-time code: ABCD-1234", then "Open this URL to continue in your web browser: https://github.com/login/device".
+#[derive(Default)]
+struct GithubReading {
+    code: Option<String>,
+    page: bool,
+    shown: bool,
+}
+
+impl GithubReading {
+    fn read(&mut self, line: &str) -> Option<DeviceCode> {
+        if let Some((_, code)) = line.split_once("one-time code: ") {
+            let code = code.trim();
+            if device_code(code) {
+                self.code = Some(code.to_string());
+            }
+        } else if line.split_once("web browser: ").is_some_and(|(_, page)| page.trim() == GITHUB_DEVICE_PAGE) {
+            self.page = true;
+        }
+        match (&self.code, self.page, self.shown) {
+            (Some(code), true, false) => {
+                self.shown = true;
+                Some(DeviceCode { url: GITHUB_DEVICE_PAGE.into(), code: code.clone() })
+            }
+            _ => None,
+        }
+    }
+}
+
+fn set_github_device(app: &tauri::AppHandle, device: Option<DeviceCode>) {
+    *GITHUB_DEVICE.lock().unwrap_or_else(|e| e.into_inner()) = device.clone();
+    let _ = app.emit("github-device", device);
+}
+
+/// Signs the box's gh in to GitHub, gh's own way: `gh auth login --web` in a one-off box, with no terminal. It prints
+/// GitHub's page and a one-time code; the page opens in this computer's browser and the panel shows the code, as the
+/// `github-device` event says. It ends once the code is entered and approved, gh's sign-in kept in the box's volume,
+/// under home, where no job's jail reaches; or when the code runs out.
+#[tauri::command]
+async fn github_sign_in(app: tauri::AppHandle) -> Result<(), String> {
+    let _busy = Busy::new();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = run_docker(&["rm", "-f", BOX_GITHUB], Duration::from_secs(30));
+        let round = GITHUB_ROUND.fetch_add(1, Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(GITHUB_SIGN_IN_WAITS);
+            if GITHUB_ROUND.load(Ordering::SeqCst) == round {
+                GITHUB_STOPPED.store(round, Ordering::SeqCst);
+                let _ = run_docker(&["rm", "-f", BOX_GITHUB], Duration::from_secs(30));
+            }
+        });
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), BOX_GITHUB.into()];
+        args.extend(box_flags());
+        args.extend([BOX_IMAGE, "gh", "auth", "login", "--web", "--hostname", "github.com"].iter().map(|s| s.to_string()));
+        let mut reading = GithubReading::default();
+        let signed = device_sign_in_reading(&args, |line| reading.read(line), |device| {
+            set_github_device(&app, Some(device.clone()));
+            let _ = app.opener().open_url(&device.url, None::<&str>);
+        }, "GitHub's sign-in stopped");
+        set_github_device(&app, None);
+        signed.map_err(|why| if GITHUB_STOPPED.load(Ordering::SeqCst) == round { "timed out".into() } else { why })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Opens GitHub's page for the code again: a tab closed by mistake needs no new code.
+#[tauri::command]
+fn github_open(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener().open_url(GITHUB_DEVICE_PAGE, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Stops a GitHub sign-in waiting for its code.
+#[tauri::command]
+async fn github_sign_in_cancel() {
+    let _ = tauri::async_runtime::spawn_blocking(|| run_docker(&["rm", "-f", BOX_GITHUB], Duration::from_secs(30))).await;
+}
+
+/// What linking would do, in the worker's own words, and the account it would link.
+#[derive(Serialize, Debug, PartialEq)]
+struct GithubPreview {
+    login: String,
+    text: String,
+}
+
+/// `imd github link`'s words, run with no terminal: it says what linking means and which repositories the desks name,
+/// then asks, and with no one to answer says "not linked." and has done nothing. Its words but that last line, and the
+/// login its first line names; or why it said nothing of the kind.
+fn github_preview_of(out: &str, err: &str) -> Result<GithubPreview, String> {
+    let text: String = out.trim_end().strip_suffix("not linked.").unwrap_or(out).trim_end().chars().filter(|c| *c == '\n' || !c.is_control()).collect();
+    let login = text.split_once("to the GitHub account ").and_then(|(_, rest)| rest.split_whitespace().next()).filter(|login| github_login(login));
+    match login {
+        Some(login) if text.len() <= 16_384 => Ok(GithubPreview { login: login.to_string(), text: text.clone() }),
+        _ => Err(err.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("The worker said nothing of linking. Restart this agent, then try again.").chars().filter(|c| !c.is_control()).take(400).collect()),
+    }
+}
+
+#[tauri::command]
+async fn github_preview() -> Result<GithubPreview, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (_, out, err) = docker_said(&["exec", "-u", "imd", BOX_NAME, "imd", "github", "link"], Duration::from_secs(90)).ok_or("Docker is not installed")?;
+        github_preview_of(&out, &err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Why a link didn't, in its own words, and a gist it couldn't delete, which it says on its own line and is the holder's
+/// to remove.
+fn github_link_said(ok: bool, out: &str, err: &str) -> Result<Option<String>, String> {
+    let clean = |line: &str| line.trim().chars().filter(|c| !c.is_control()).take(400).collect::<String>();
+    let gist = err.lines().find(|line| line.starts_with("could not delete the secret gist")).map(clean);
+    if ok && out.contains("linked to ") {
+        return Ok(gist);
+    }
+    let why = err.lines().find(|line| line.starts_with("not linked: ") || line.contains("gh ")).or_else(|| err.lines().chain(out.lines()).rfind(|line| !line.trim().is_empty()));
+    Err(why.map(|line| clean(line.trim_start_matches("not linked: "))).unwrap_or_else(|| "The link didn't go through.".into()))
+}
+
+/// The repositories a link allowed that the holder wasn't shown: `--yes` allows every one the desks name when it runs,
+/// which may be more than the list read a moment before.
+fn not_shown(allowed: &[String], shown: &[String]) -> Vec<String> {
+    allowed.iter().filter(|repo| !shown.iter().any(|seen| seen.eq_ignore_ascii_case(repo))).cloned().collect()
+}
+
+/// Links this computer's worker to the GitHub account its gh is signed in as: `imd github link --yes`, the holder's
+/// yes to what they just read, then each repository it allowed that they weren't shown (`repos`) denied again. The
+/// worker proves the account with a secret gist it deletes at once, and restarts itself for the link once it holds no job.
+#[tauri::command]
+async fn github_link(repos: Vec<String>) -> Result<Option<String>, String> {
+    let _busy = Busy::new();
+    tauri::async_runtime::spawn_blocking(move || {
+        let shown: Vec<String> = repos.into_iter().filter(|repo| github_repo(repo)).collect();
+        let (ok, out, err) = docker_said(&["exec", "-u", "imd", BOX_NAME, "imd", "github", "link", "--yes"], Duration::from_secs(6 * 60)).ok_or("Docker is not installed")?;
+        let said = github_link_said(ok, &out, &err);
+        if said.is_ok() {
+            let allowed = run_docker(&["exec", "-u", "imd", BOX_NAME, "node", "-e", GITHUB_LINK_JS], Duration::from_secs(20)).filter(|(ok, _)| *ok).map(|(_, out)| github_read(&out).repos).unwrap_or_default();
+            for repo in not_shown(&allowed, &shown) {
+                let _ = run_docker(&["exec", "-u", "imd", BOX_NAME, "imd", "github", "deny", &repo], Duration::from_secs(30));
+            }
+        }
+        said
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Unlinks: this computer takes no desk work and opens no pull request, and gh in the box signs out, so its token is
+/// gone too. The worker restarts itself for it once it holds no job.
+#[tauri::command]
+async fn github_unlink() -> Result<(), String> {
+    let _busy = Busy::new();
+    tauri::async_runtime::spawn_blocking(|| {
+        let script = "imd github unlink >/dev/null && { command -v gh >/dev/null 2>&1 && GH_PROMPT_DISABLED=1 gh auth logout --hostname github.com >/dev/null 2>&1; true; }";
+        let said = match run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", script], Duration::from_secs(60)) {
+            Some((true, _)) => Ok(()),
+            Some((false, why)) => Err(why.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("couldn't unlink").to_string()),
+            None => Err("Docker is not installed".into()),
+        };
+        said
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Why the worker didn't change it, in its own words: a worker before 0.1.46, which has no `imd github desks`, answers
+/// with its usage, and takes the change once it updates itself.
+fn github_jobs_said(out: &str, err: &str) -> String {
+    let line = err.lines().chain(out.lines()).map(str::trim).find(|line| !line.is_empty()).unwrap_or("The worker didn't change it.");
+    if line.starts_with("usage") || line.starts_with("imd github") {
+        return "Its worker is too old for this. It updates itself once it holds no job; try again then.".into();
+    }
+    line.trim_start_matches("not allowed: ").trim_start_matches("not denied: ").chars().filter(|c| !c.is_control()).take(400).collect()
+}
+
+/// GitHub's one switch (worker 0.1.46): on follows the network's desks (`imd github desks network`), each repository in
+/// `repos` allowed again (`imd github allow <repo> --yes`, which clears a denial, the holder's yes being newer); off works
+/// only the holder's own (`imd github desks mine`), each in `repos` denied (their own, which mine would keep). The link
+/// stays either way, and a running worker reads the change within a minute.
+#[tauri::command]
+async fn github_jobs(on: bool, repos: Vec<String>) -> Result<(), String> {
+    let repos: Vec<String> = repos.into_iter().filter(|repo| github_repo(repo)).take(16).collect();
+    let _busy = Busy::new();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut steps: Vec<Vec<&str>> = vec![vec!["desks", if on { "network" } else { "mine" }]];
+        steps.extend(repos.iter().map(|repo| if on { vec!["allow", repo.as_str(), "--yes"] } else { vec!["deny", repo.as_str()] }));
+        for step in steps {
+            let mut args = vec!["exec", "-u", "imd", BOX_NAME, "imd", "github"];
+            args.extend(step);
+            let (ok, out, err) = docker_said(&args, Duration::from_secs(60)).ok_or("Docker is not installed")?;
+            if !ok {
+                return Err(github_jobs_said(&out, &err));
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The worker's heartbeat saying it holds no work: "alive 17m · idle · 0 submitted · …". Any other last line says
 /// nothing, and the box waits for the next.
 fn worker_idle(line: &str) -> bool {
@@ -2936,6 +3341,12 @@ fn self_test_line(out: &str, err: &str) -> Option<String> {
 /// Docker's CLI run for what it writes on both streams, each read as it comes so a long answer can't fill a pipe and
 /// stall; None when Docker is missing, refuses, or takes longer than `timeout`.
 fn docker_streams(args: &[&str], timeout: Duration) -> Option<(String, String)> {
+    docker_said(args, timeout).and_then(|(ok, out, err)| ok.then_some((out, err)))
+}
+
+/// Docker's CLI run as `docker_streams` runs it, its two streams kept whether or not it succeeded: a command that ends
+/// non-zero by design, as `imd github link` asked nothing, still says what it would do. None when Docker is missing.
+fn docker_said(args: &[&str], timeout: Duration) -> Option<(bool, String, String)> {
     use std::io::Read;
     let mut command = docker_command()?;
     command.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
@@ -2965,7 +3376,7 @@ fn docker_streams(args: &[&str], timeout: Duration) -> Option<(String, String)> 
         }
     };
     let (out, err) = (read_out.join().ok()?, read_err.join().ok()?);
-    ok.then(|| (String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned()))
+    Some((ok, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned()))
 }
 
 /// What the worker in this computer's box last said of its self-test, for the panel to say why an agent the network
@@ -3702,13 +4113,14 @@ pub fn run() {
             box_state, box_start, box_stop, box_restart, box_renewal, box_hold, worker_releases, open_explorer,
             box_setup_state, docker_open, box_pull, box_install, box_sign_in, box_sign_in_codex, box_sign_in_code, box_sign_in_open, box_sign_in_cancel, box_pair, box_pair_cancel, pairing_pending, open_pairing, open_lend, lend_vault, lend_span, box_unlink, copy_pairing, hide_panel, fit_panel, quit, set_tray_state, update_check, update_install,
             docker_install, open_setup, setup_done, open_docker_terms, fit_setup, open_setup_help, open_seats, open_claude_plans, open_chatgpt_plans, free_space, play_sound, set_theme,
-            restart_pc, set_open_at_login, lend_owned, rpc_state, rpc_setup, open_alchemy, jury_state, jury_join, jury_open, jury_cancel
+            restart_pc, set_open_at_login, lend_owned, rpc_state, rpc_setup, open_alchemy, jury_state, jury_join, jury_open, jury_cancel, github_state, github_sign_in, github_open, github_sign_in_cancel, github_preview, github_link, github_unlink, github_jobs, memory_state, memory_set
         ])
         .setup(|app| {
             // The log of what went wrong, and a panic's place in it before the app goes.
             if let Ok(dir) = app.path().app_local_data_dir() {
                 let _ = std::fs::create_dir_all(&dir);
                 let _ = LOG.set(dir.join("imd-agents.log"));
+                let _ = MEMORY_FILE.set(dir.join("box-memory"));
             }
             let before = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
@@ -4208,6 +4620,158 @@ mod tests {
     #[test]
     fn the_box_clears_what_jobs_leave_behind() {
         assert!(box_flags().iter().any(|flag| flag == "--init"));
+    }
+
+    #[test]
+    fn memory_on_takes_16_gb_only_where_docker_has_it() {
+        let gib = 1u64 << 30;
+        assert_eq!(box_memory(false, Some(32 * gib)), "6g");
+        assert_eq!(box_memory(true, Some(32 * gib)), "16g");
+        // Docker given 16 GB says about 15.6 GiB, which the network counts as 16
+        assert_eq!(box_memory(true, Some(15 * gib + 650 * (1 << 20))), "16g");
+        assert_eq!(box_memory(true, Some(8_318_976_000)), "6g", "this Mac's Docker, 7.7 GiB");
+        assert_eq!(box_memory(true, None), "6g");
+        // off until its holder turns it on: no file kept, every box 6 GB
+        assert!(!memory_on());
+        assert_eq!(wanted_memory(), Some("6g"));
+        let flags = box_flags_with("16g");
+        assert!(flags.windows(2).any(|pair| pair[0] == "--memory" && pair[1] == "16g"));
+        assert!(box_flags().windows(2).any(|pair| pair[0] == "--memory" && pair[1] == "6g"), "one-off boxes keep 6 GB");
+    }
+
+    #[test]
+    fn a_box_is_current_only_with_the_memory_it_should_have() {
+        let made = |memory: &str| format!(r#"sha256:aaa {memory} ["no-new-privileges:true","seccomp={{\"defaultAction\": \"SCMP_ACT_ERRNO\"}}"] 0 true ["CAP_NET_ADMIN","CAP_DAC_READ_SEARCH"] ["imd-worker-home:/home/imd","imd-juror-home:/var/lib/imd-juror","imd-juror-code:/opt/imd-juror"]"#);
+        assert!(made_current(&made("6442450944"), "sha256:aaa"), "the memory field leaves the rest of the read as it was");
+        assert!(made_with_memory(&made("6442450944"), Some("6g")));
+        assert!(!made_with_memory(&made("6442450944"), Some("16g")));
+        assert!(made_with_memory(&made("17179869184"), Some("16g")));
+        // Docker's memory that couldn't be read changes nothing: a 16 GB box isn't made again with 6
+        assert!(made_with_memory(&made("17179869184"), None));
+        assert_eq!(memory_of(&made("17179869184")), Some("16g"));
+        assert!(made_with_memory(&made("17179869184"), None) && made_with_memory(&made("6442450944"), None));
+        assert_eq!(memory_of(&made("17179869184")), Some("16g"));
+        assert_eq!(memory_of(&made("6442450944")), Some("6g"));
+        // a read with no memory field, as before it was asked: a box made with 6 GB
+        let old = r#"sha256:aaa ["no-new-privileges:true"] 0 true [] []"#;
+        assert!(made_with_memory(old, Some("6g")) && !made_with_memory(old, Some("16g")));
+        assert_eq!(memory_of(old), None);
+    }
+
+    #[test]
+    fn reads_what_the_box_says_of_github() {
+        let out = "arch x86_64\ngh yes\nsigned octocat\nlinked octocat\nrepo brilliant-hq/pequalnp-proofs\n";
+        assert_eq!(github_read(out), GithubHere { arch: "x86_64".into(), gh: true, signed_in: Some("octocat".into()), linked: Some("octocat".into()), repos: vec!["brilliant-hq/pequalnp-proofs".into()], ..Default::default() });
+        // worker 0.1.46: the network's desks it works, and what's denied, from github-desks.json
+        let network = github_read("linked octocat\nmode network\nnet open-goat/pequalnp-proofs\ndenied someone/else\n");
+        assert_eq!(network.mode.as_deref(), Some("network"));
+        assert_eq!((network.network, network.denied, network.repos), (vec!["open-goat/pequalnp-proofs".to_string()], vec!["someone/else".to_string()], vec![]));
+        assert_eq!(github_read("mode mine\n").mode.as_deref(), Some("mine"));
+        assert_eq!(github_read("mode everything\nnet a/b c\n"), GithubHere::default());
+        assert_eq!(github_read("arch aarch64\n"), GithubHere { arch: "aarch64".into(), ..Default::default() });
+        // nothing GitHub wouldn't name gets through, nor anything else the box might print
+        let odd = github_read("arch x86_64; rm\nsigned -bad\nlinked <b>x</b>\nrepo a/b c\nrepo ../x\nkey 0xabc\n");
+        assert_eq!(odd, GithubHere::default());
+    }
+
+    #[test]
+    fn reads_the_page_and_code_gh_prints_with_no_terminal() {
+        // as gh 2.103.3 printed them in the box on 2026-11-24, with no clipboard there
+        let lines = [
+            "! Failed to copy one-time code to clipboard",
+            "  No clipboard utilities available. Please install xsel, xclip, wl-clipboard or Termux:API add-on for termux-clipboard-get/set.",
+            "! First copy your one-time code: 4F2A-9C1D",
+            "Open this URL to continue in your web browser: https://github.com/login/device",
+        ];
+        let mut reading = GithubReading::default();
+        let shown: Vec<DeviceCode> = lines.iter().filter_map(|line| reading.read(line)).collect();
+        assert_eq!(shown, vec![DeviceCode { url: "https://github.com/login/device".into(), code: "4F2A-9C1D".into() }]);
+        // any other page is never opened
+        let mut other = GithubReading::default();
+        assert!(other.read("! First copy your one-time code: 4F2A-9C1D").is_none());
+        assert!(other.read("Open this URL to continue in your web browser: https://evil.test/login/device").is_none());
+    }
+
+    #[test]
+    fn the_link_preview_is_the_workers_own_words() {
+        let out = "This links this machine to the GitHub account octocat for outside proof desks: public proof efforts whose steps the\nnetwork works and submits as pull requests, each to a repository you allow here, one by one.\n\nThe desks this plane works now, each allowed here only if you say yes to it:\n  - brilliant-hq/pequalnp-proofs (desk pequalnp, kind pequalnp-v1): Lean 4 proofs.\n\nnot linked.\n";
+        let preview = github_preview_of(out, "").unwrap();
+        assert_eq!(preview.login, "octocat");
+        assert!(preview.text.starts_with("This links this machine") && preview.text.ends_with("Lean 4 proofs."), "{}", preview.text);
+        let signed_out = "gh is not signed in: To get started with GitHub CLI, please run:  gh auth login. Install the GitHub CLI and run gh auth login, then imd github link again.\n";
+        assert!(github_preview_of("", signed_out).unwrap_err().starts_with("gh is not signed in"));
+        // what worker 0.1.47 says before it asks (its linkNotice and desksNotice), for a gh that answered "octocat"
+        let real = github_preview_of(include_str!("../../src/github-link.fixture.txt"), "").unwrap();
+        assert_eq!(real.login, "octocat");
+        assert!(real.text.ends_with("fetched once and kept.") && !real.text.contains("not linked."), "{}", real.text);
+        // a box whose jail doesn't hold is refused, in the worker's words
+        let jail = "not linked: while linked, every task on this machine runs jailed, away from the home folder where gh keeps your token, and the read jail does not hold here (claude: bubblewrap cannot start here).\nfix: sudo imd sandbox, then imd github link again\n";
+        assert!(github_preview_of("", jail).unwrap_err().starts_with("not linked: while linked, every task"));
+    }
+
+    /// `gh auth login --web` as `github_sign_in` runs it, flags, entrypoint and all, in a throwaway box with a volume of
+    /// its own: GitHub's page and the one-time code read off it, then the sign-in stopped, as Cancel stops it. Nothing is
+    /// approved. Needs Docker, the network, and a box image with gh, as `imd-gh-test` (the box image plus install-gh.sh)
+    /// until the published box has it.
+    #[test]
+    #[ignore]
+    fn reads_a_real_github_sign_in() {
+        use std::time::Duration;
+        let (volume, name) = ("imd-github-signin-test", "imd-github-signin-test");
+        let _ = super::run_docker(&["volume", "rm", "-f", volume], Duration::from_secs(30));
+        let home = format!("{}:/home/imd", super::BOX_VOLUME);
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into(), "--name".into(), name.into()];
+        args.extend(super::box_flags().into_iter().map(|flag| if flag == home { format!("{volume}:/home/imd") } else { flag }));
+        args.extend(["imd-gh-test", "gh", "auth", "login", "--web", "--hostname", "github.com"].iter().map(|s| s.to_string()));
+        let shown = std::sync::Mutex::new(None::<super::DeviceCode>);
+        let mut reading = super::GithubReading::default();
+        let ended = super::device_sign_in_reading(&args, |line| reading.read(line), |device| {
+            *shown.lock().unwrap() = Some(device.clone());
+            std::thread::spawn(move || super::run_docker(&["rm", "-f", "imd-github-signin-test"], Duration::from_secs(30)));
+        }, "GitHub's sign-in stopped");
+        let _ = super::run_docker(&["volume", "rm", "-f", volume], Duration::from_secs(30));
+        let device = shown.into_inner().unwrap().expect("a page and a code");
+        assert_eq!(device.url, "https://github.com/login/device");
+        assert!(super::device_code(&device.code), "{}", device.code);
+        assert!(ended.is_err(), "stopped before anything was approved");
+    }
+
+    /// This computer's box, asked what it says of GitHub, as Settings asks it: read only. Needs Docker and a running box.
+    #[test]
+    #[ignore]
+    fn reads_this_computers_github() {
+        use std::time::Duration;
+        let (ok, out) = super::run_docker(&["exec", "-u", "imd", super::BOX_NAME, "sh", "-c", &super::github_look()], Duration::from_secs(30)).expect("docker answers");
+        assert!(ok, "{out}");
+        let here = super::github_read(&out);
+        assert!(["x86_64", "aarch64"].contains(&here.arch.as_str()), "{out}");
+        println!("{here:?}; Docker has {:?} bytes; this box wants {:?}", super::docker_memory(), super::wanted_memory());
+    }
+
+    #[test]
+    fn the_job_switch_says_why_the_worker_did_not() {
+        assert_eq!(github_jobs_said("", "not denied: the desks file could not be read; imd github desks network or imd github desks mine writes it again\n"), "the desks file could not be read; imd github desks network or imd github desks mine writes it again");
+        assert_eq!(github_jobs_said("", "not allowed: no desk this plane works names a/b\n"), "no desk this plane works names a/b");
+        // a worker before 0.1.46 has no `desks`, and answers with its usage
+        assert!(github_jobs_said("", "usage: imd github link [--yes]\n").starts_with("Its worker is too old"));
+        assert_eq!(github_jobs_said("", ""), "The worker didn't change it.");
+    }
+
+    #[test]
+    fn a_link_keeps_only_the_repositories_its_holder_was_shown() {
+        let allowed = vec!["brilliant-hq/pequalnp-proofs".to_string(), "someone/new-desk".to_string()];
+        assert_eq!(not_shown(&allowed, &["Brilliant-HQ/pequalnp-proofs".to_string()]), vec!["someone/new-desk".to_string()]);
+        assert!(not_shown(&allowed, &allowed).is_empty());
+        // nothing read off what was shown: nothing stays allowed
+        assert_eq!(not_shown(&allowed, &[]), allowed);
+    }
+
+    #[test]
+    fn a_link_says_why_not_and_a_gist_left_behind() {
+        assert_eq!(github_link_said(true, "Proving the account is yours with a short-lived secret gist...\nlinked to octocat, through gh at /usr/local/bin/gh.\n", ""), Ok(None));
+        let left = "could not delete the secret gist 0123456789abcdef0123 (HTTP 502); delete it at https://gist.github.com/octocat/0123456789abcdef0123\n";
+        assert_eq!(github_link_said(true, "linked to octocat\n", left), Ok(Some(left.trim().into())));
+        assert_eq!(github_link_said(false, "Proving the account is yours with a short-lived secret gist...\n", "not linked: the plane did not take the proof: gist not found\n"), Err("the plane did not take the proof: gist not found".into()));
     }
 
     /// This computer's box, asked what its worker's self-test last said: both streams of its log come back, a long

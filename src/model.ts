@@ -558,3 +558,127 @@ export function setupErrorWords(raw: string): string {
   const telling = lines.find((line) => /error|denied|failed|cannot|can't|unable/i.test(line)) ?? lines[lines.length - 1] ?? "Something went wrong. Try again.";
   return telling.replace(/^docker: /, "").replace(/^Error response from daemon: /i, "").slice(0, 200);
 }
+
+// ---------------------------------------------------------------------------------------------
+// This computer's box's memory, and its agent on GitHub: outside proof desks (pequalnp.com) under the holder's own
+// account. Each is a way to take more work, turned on in Settings.
+// ---------------------------------------------------------------------------------------------
+
+/** Memory as the network counts it: whole GiB to the nearest (protocol `reportedGb`). */
+export const memoryGb = (bytes: number | null) => (bytes === null ? 0 : Math.round(bytes / 2 ** 30));
+
+/** What Memory on gives a box, and what every box has. */
+export const MORE_MEMORY_GB = 16;
+export const BOX_MEMORY_GB = 6;
+
+/** Memory as the app reads it (`memory_state`): on or off, Docker's memory, and the running box's limit, in bytes. */
+export type MemorySays = { on: boolean; docker_bytes: number | null; box_bytes: number | null };
+
+/** Which Memory line Settings shows: off; on, Docker short of it; on or off, the box not made with it yet; on. */
+export type MemoryLine = { kind: "off" } | { kind: "docker" } | { kind: "moving"; on: boolean } | { kind: "on" };
+
+export function memoryLine(m: MemorySays): MemoryLine {
+  const box = memoryGb(m.box_bytes);
+  if (!m.on) return m.box_bytes !== null && box > BOX_MEMORY_GB ? { kind: "moving", on: false } : { kind: "off" };
+  if (memoryGb(m.docker_bytes) < MORE_MEMORY_GB) return { kind: "docker" };
+  return box < MORE_MEMORY_GB ? { kind: "moving", on: true } : { kind: "on" };
+}
+
+/** What its box says of GitHub, as the app reads it (`github_state`). */
+export type GithubSays = {
+  arch: string; gh: boolean; signed_in: string | null; linked: string | null;
+  /** The repositories its holder allowed here themselves, none denied. */
+  repos: string[];
+  /** Which desks it works (worker 0.1.46): the network's besides its holder's own, the default, or only its holder's. */
+  mode?: "network" | "mine" | null;
+  /** The network's desks it works now, and what's denied here, which the network never adds back. */
+  network?: string[]; denied?: string[];
+};
+
+/** A desk the plane works, as `GET /github/desks` lists it; what it needs of a machine, where it says. */
+export type Desk = { name: string; kind: string; repo: string; path: string; requires?: { platform?: string[]; minMemoryGb?: number } };
+
+/**
+ * What a desk asks of a machine when it doesn't say, as the plane's own default does (control-plane
+ * outside-desks/desks.ts: linux-x64 and 16 GB, for prebuilt Lean files made for x64 and a checker that loads all of
+ * Mathlib). A desk that says its own wins.
+ */
+export const DESK_NEEDS = { platforms: ["linux-x64"], memoryGb: 16 };
+export const deskNeeds = (desk: Pick<Desk, "requires"> | undefined) =>
+  desk?.requires?.platform?.length ? { platforms: desk.requires.platform, memoryGb: desk.requires.minMemoryGb ?? 0 } : DESK_NEEDS;
+
+/** The platform a box is, as the network names one: its Linux, on this computer's chip. */
+export const boxPlatform = (arch: string) => (arch === "x86_64" || arch === "amd64" ? "linux-x64" : arch === "aarch64" || arch === "arm64" ? "linux-arm64" : `linux-${arch}`);
+
+/** Which GitHub line Settings shows, if any. */
+export type GithubLine =
+  | { kind: "none" }
+  | { kind: "update" }
+  | { kind: "link" }
+  | { kind: "signin"; login: string }
+  | { kind: "linked"; login: string };
+
+/**
+ * The line: none where no desk would send this box work (its chip, today an Arm Mac's) and nothing is linked; a box from
+ * before gh came in asks for its update; else Connect. Connected, it says as whom, or that gh signed out or in as
+ * someone else.
+ */
+export function githubLine(g: GithubSays | null, desks: Desk[] | null): GithubLine {
+  if (!g) return { kind: "none" };
+  const login = g.linked;
+  const fits = (desks?.length ? desks : [undefined]).some((desk) => deskNeeds(desk).platforms.includes(boxPlatform(g.arch)));
+  if (!login && !fits) return { kind: "none" };
+  if (!g.gh) return login ? { kind: "signin", login } : { kind: "update" };
+  if (!login) return { kind: "link" };
+  if (g.signed_in?.toLowerCase() !== login.toLowerCase()) return { kind: "signin", login };
+  return { kind: "linked", login };
+}
+
+/**
+ * GitHub's one switch, connected: every job GitHub brings, whichever desk it comes from. On while it follows the
+ * network's desks (worker 0.1.46's network mode, which connecting chose) or works a repository its holder allowed; off
+ * works only its holder's own, each of them denied. On follows the network's again, a denial of a desk this chip takes
+ * cleared (`clear`): connecting was the yes to them. What stands between it and its jobs: a chip no desk takes, or
+ * memory short of what its desks ask.
+ */
+export type GithubJobs = { on: boolean; clear: string[]; needs: null | "platform" | "memory"; memoryGb: number };
+
+export function githubJobs(g: GithubSays, desks: Desk[] | null, memory: MemorySays | null): GithubJobs {
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  const denied = (repo: string) => (g.denied ?? []).some((r) => same(r, repo));
+  const fit = (desks ?? []).filter((desk) => deskNeeds(desk).platforms.includes(boxPlatform(g.arch)));
+  const on = g.mode === "network" || g.repos.length > 0;
+  const clear = fit.map((desk) => desk.repo).filter((repo, i, all) => denied(repo) && all.findIndex((r) => same(r, repo)) === i);
+  // what its desks ask: the ones it works while on, every one this chip takes while off, since on clears their denials
+  const asks = Math.max(0, ...fit.filter((desk) => !on || !denied(desk.repo)).map((desk) => deskNeeds(desk).memoryGb));
+  // the memory the box will have: what Memory asks, where Docker has room for it
+  const boxGb = memory?.on && memoryGb(memory.docker_bytes) >= MORE_MEMORY_GB ? MORE_MEMORY_GB : BOX_MEMORY_GB;
+  const needs = desks?.length && !fit.length ? "platform" : on && boxGb < asks ? "memory" : null;
+  return { on, clear, needs, memoryGb: asks };
+}
+
+/** The worker's own words, its lines rejoined where it broke them for a terminal: paragraphs, and the items it lists. */
+export function noticeBlocks(text: string): Array<{ item: boolean; text: string }> {
+  const blocks: Array<{ item: boolean; text: string }> = [];
+  let open = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { open = false; continue; }
+    const item = /^\s+- /.test(line);
+    if (item) { blocks.push({ item: true, text: line.replace(/^\s+- /, "") }); open = true; continue; }
+    const last = blocks[blocks.length - 1];
+    // a line ending in a colon heads what follows, a block of its own; anything else carries on what it follows
+    if (open && last && !last.text.endsWith(":") && !line.endsWith(":")) last.text += ` ${line.trim()}`;
+    else blocks.push({ item: false, text: line.trim() });
+    open = true;
+  }
+  return blocks;
+}
+
+/** What the worker's words name that the panel says in its own: the repositories it would allow, and the disk Lean takes. */
+export function noticeFacts(text: string): { repos: string[]; diskGb: number | null } {
+  const desks = text.split("The desks this plane works now")[1] ?? "";
+  const repos = [...desks.matchAll(/^\s+- ([A-Za-z0-9-]+\/[A-Za-z0-9._-]+) \(desk /gm)].map((hit) => hit[1]!);
+  const disk = desks.match(/about (\d+) GB of disk/);
+  return { repos, diskGb: disk ? Number(disk[1]) : null };
+}
