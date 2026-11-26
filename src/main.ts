@@ -6,7 +6,7 @@ import * as api from "./api";
 import { lendingOn, lendReader, type Lending, type Terms } from "./lending";
 import { faceFor, loadFace } from "./masks";
 import { ctrl, mac, shift, windows } from "./platform";
-import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow, holdOf, holdsWork, holdingWords, runtimeName, type Hold } from "./model";
+import { acceptedPerDay, acceptedToday, addDays, amountWords, behindWords, boxDue, currentWorker, dayStart, dotOf, elapsed, failureWords, jailFix, jailWords, judgedRate, tookJob, localPhase, modelName, newerRelease, phaseOf, runLength, setupErrorWords, shortAgo, statusLine, stepTitle, trayState, upSince, usdText, watchKind, watchParts, type Agent, type Box, type Earning, type Phase, type WorkRow, holdOf, holdsWork, holdingWords, runtimeName, type Hold, deskNeeds, githubJobs, githubLine, memoryLine, noticeBlocks, noticeFacts, BOX_MEMORY_GB, MORE_MEMORY_GB, type Desk } from "./model";
 
 // ---------------------------------------------------------------------------------------------
 // What the app remembers between runs: wallets, the network it signs for, names. Nothing secret:
@@ -54,7 +54,7 @@ const save = () => { try { localStorage.setItem(STORE, JSON.stringify(settings))
 const lend = lendReader({ vault: api.lendVault, span: api.lendSpan }, settings.vaults, save);
 
 const state = {
-  view: "home" as "home" | "settings" | "watching" | "lend",
+  view: "home" as "home" | "settings" | "watching" | "here" | "lend" | "github",
   /** The agent the Lend view is for. */
   lending: null as string | null,
   /** Seats in imdLend vaults, by seat: a connected wallet's lent out, or this computer's borrowed. */
@@ -119,6 +119,21 @@ const state = {
   updatingBox: false,
   boxWords: null as string | null,
   updateWhenIdle: false,
+  /** This computer's box's memory, read as Settings opens; its switch under way; and what went wrong, said on its line. */
+  memory: null as api.Memory | null,
+  memoryBusy: false,
+  memorySaid: null as string | null,
+  /** This computer's agent on GitHub, read as Settings opens; the desks the plane works; a step under way; what went
+   * wrong, said on its line; what linking or turning its jobs on means, in the worker's words, while the holder reads
+   * it; and its job switch under way. */
+  github: null as api.Github | null,
+  desks: null as Desk[] | null,
+  githubBusy: null as "signin" | "reading" | "linking" | "unlinking" | null,
+  githubSaid: null as string | null,
+  githubPreview: null as api.GithubPreview | null,
+  jobsBusy: false,
+  /** Whether this link's sign-in was made here just now, so a Cancel signs gh out again rather than leave its token. */
+  githubSignedNow: false,
   loaded: false,
 };
 
@@ -399,6 +414,8 @@ async function restartLocal(runtime = settings.runtime): Promise<void> {
     state.note = { text: String(error), bad: true };
   }
   state.box = await api.boxState().catch(() => state.box);
+  // a box made again for its Memory says so on its line
+  if (state.memory) state.memory = await api.memoryState().catch(() => state.memory);
   await refresh(true);
 }
 
@@ -452,7 +469,7 @@ async function toggle(agent: Agent): Promise<void> {
     if (error === "app_not_linked") {
       settings.wallets = [];
       save();
-      state.note = { text: "Your wallet is no longer connected here. Connect it again in Settings.", bad: true };
+      state.note = { text: "Your wallet is no longer connected here. Connect it again in Settings, Wallets.", bad: true };
     } else {
       state.note = {
         text: error === "not_token_owner" ? `That wallet no longer holds ${nameOf(agent.tokenId)}.`
@@ -563,7 +580,7 @@ function unwatchSeat(tokenId: string): void {
 
 /** Connecting a wallet to pause and resume: a code, the approval page in the browser, and this panel watching the code. */
 async function connect(): Promise<void> {
-  state.view = "settings";
+  state.view = "watching";
   if (state.linking) return void api.linkReopen(state.linking.code);
   state.note = null;
   try {
@@ -1139,9 +1156,9 @@ function walletHtml(): string {
 }
 
 /**
- * Settings' agents, one row each: its face, its name to change in place, and where it runs. Then setting
- * one up here, and the way into what shows: the agents above come from it. Restart stays in the agent's
- * own tray, beside what it fixes.
+ * Settings' agents, one row each: its face, its name, and where it runs; this computer's opens its own page, the rest are
+ * named in place. Then setting one up here, and Wallets: the agents above come from it. Restart stays in the agent's own
+ * tray, beside what it fixes.
  */
 function agentSettingsHtml(): string {
   const rows = state.agents.map((agent) => {
@@ -1149,11 +1166,20 @@ function agentSettingsHtml(): string {
     const face = faceFor(agent.tokenId, "on");
     // its number shows in its title until it has a name of its own
     const named = Boolean(labelOf(agent.tokenId));
+    const where = esc([named ? `#${agent.tokenId}` : "", local ? "On this computer" : "On another computer"].filter(Boolean).join(" · "));
+    // this computer's agent opens a page of its own, its name among what's there: the rest are named in place
+    if (local && agent.tokenId === state.localToken) {
+      return `<button class="line agent-line opens" data-action="here" id="named-${esc(agent.tokenId)}" title="Its name, AI and more jobs">
+      <span class="face">${face ? `<img src="${esc(face)}" alt="" draggable="false">` : `<span class="mask-blank"></span>`}</span>
+      <span class="agent-line-text"><span class="agent-name">${esc(labelOf(agent.tokenId) || `Agent #${agent.tokenId}`)}</span><span class="sub">${where}</span></span>
+      <span class="chev">${CHEVRON}</span>
+    </button>`;
+    }
     return `<div class="line agent-line" id="named-${esc(agent.tokenId)}">
       <span class="face">${face ? `<img src="${esc(face)}" alt="" draggable="false">` : `<span class="mask-blank"></span>`}</span>
       <span class="agent-line-text">
         <input class="inline-input name-input" data-name="${esc(agent.tokenId)}" value="${esc(settings.names[agent.tokenId] ?? "")}" placeholder="${esc(`Agent #${agent.tokenId}`)}" maxlength="40" spellcheck="false" autocomplete="off" title="Rename" aria-label="${esc(`Name for agent #${agent.tokenId}`)}">
-        <span class="sub">${esc([named ? `#${agent.tokenId}` : "", local ? "On this computer" : "On another computer"].filter(Boolean).join(" · "))}</span>
+        <span class="sub">${where}</span>
       </span>
     </div>`;
   }).join("");
@@ -1161,12 +1187,12 @@ function agentSettingsHtml(): string {
   return `<section class="card list">${rows}${setUp}${watchingLineHtml()}</section>`;
 }
 
-/** The Agents card's last line, into Watching: how many wallets and seats show here. */
+/** The Agents card's last line, into Wallets: how many wallets and seats show here. */
 function watchingLineHtml(): string {
   const wallets = watched().length;
   const seats = settings.seats.length;
   const count = [wallets ? `${wallets} wallet${wallets === 1 ? "" : "s"}` : "", seats ? `${seats} seat${seats === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ") || "Nothing yet";
-  return `<button class="line opens" data-action="watching" title="Wallets and seats you watch (W)"><span>Watching</span><span class="line-value">${esc(count)}<span class="chev">${CHEVRON}</span></span></button>`;
+  return `<button class="line opens" data-action="watching" title="Wallets and seats you watch, and the one that pauses and resumes (W)"><span>Wallets</span><span class="line-value">${esc(count)}<span class="chev">${CHEVRON}</span></span></button>`;
 }
 
 /**
@@ -1196,10 +1222,11 @@ function watchingHtml(): string {
   }).join("");
   return `<header class="settings-head">
       <button class="back" data-action="settings" title="Back (Esc)">‹ Back</button>
-      <div class="title">Watching</div>
+      <div class="title">Wallets</div>
       <span></span>
     </header>
     ${wallets || seats ? `<section class="card list">${wallets}${seats}</section>` : ""}
+    ${walletHtml()}
     <section class="card list spaced">
       <form class="line" data-form="watch"><input class="inline-input" data-field="add" placeholder="0x…, name.eth or 14 25 56" spellcheck="false" autocomplete="off" aria-label="Wallets, ENS names or seat numbers to watch (W)"><button class="pill" type="submit" title="Add (Enter)" ${state.resolving ? "disabled" : ""}>${state.resolving ? "Finding…" : "Add"}</button></form>
     </section>
@@ -1308,8 +1335,6 @@ function settingsHtml(): string {
       <span></span>
     </header>
     ${agentSettingsHtml()}
-    ${computerHtml()}
-    ${walletHtml()}
     <section class="card list spaced">
       <label class="line"><span>Open at login</span><button class="switch${state.openAtLogin ? " on" : ""}" role="switch" aria-checked="${state.openAtLogin}" data-action="login"><span></span></button></label>
       <div class="line"><span>Appearance</span><span class="choices" role="radiogroup" title="Appearance (A)">${THEMES.map(([theme, name]) => `<button role="radio" aria-checked="${settings.theme === theme}" class="${settings.theme === theme ? "on" : ""}" data-action="theme" data-theme="${theme}">${name}</button>`).join("")}</span></div>
@@ -1331,26 +1356,55 @@ const THEMES: Array<[api.Theme, string]> = [["system", "System"], ["light", "Lig
 const CHAIN_NAMES: Record<string, string> = { "1": "Ethereum", "8453": "Base", "4663": "Robinhood Chain" };
 const hereRunning = () => Boolean(state.localToken && state.box?.state === "running" && !state.unpaired);
 
-/** Its RPC and its seat on the jury, read from its box. */
+/** Its RPC, its memory, its seat on the jury and GitHub, read from its box; and the desks the plane works. */
 async function readComputer(): Promise<void> {
   if (!hereRunning()) return;
-  const [rpc, jury] = await Promise.all([api.rpcState().catch(() => null), api.juryState().catch(() => null)]);
+  const [rpc, jury, github, desks, memory] = await Promise.all([
+    api.rpcState().catch(() => null), api.juryState().catch(() => null), api.githubState().catch(() => null), api.githubDesks().catch(() => null), api.memoryState().catch(() => null),
+  ]);
   state.rpc = rpc;
   state.jury = jury;
+  state.github = github;
+  state.desks = desks ?? state.desks;
+  state.memory = memory;
   if (jury?.link && !state.juryLink) state.juryLink = jury.link;
   render();
 }
 
 /** Named for what each does, as the lines below are, so no heading is needed. Drawn once the box has answered. */
-function computerHtml(): string {
-  if (!hereRunning() || !state.jury) return "";
-  const named = (state.rpc?.chains ?? []).map((id) => CHAIN_NAMES[id]).filter((name): name is string => Boolean(name));
+/**
+ * This computer's agent, a page of its own from its row in Settings: its name and the AI it thinks with; then each way it
+ * takes more work, a line each, said as what it brings. Those are commands in its box, so they show while it runs.
+ */
+function hereHtml(): string {
+  const id = state.localToken;
+  const head = `<header class="settings-head">
+      <button class="back" data-action="settings" title="Back (Esc)">‹ Back</button>
+      <div class="title">${esc(id ? labelOf(id) || `Agent #${id}` : "This computer")}</div>
+      <span></span>
+    </header>`;
+  if (!id) return `${head}<p class="footnote">This ${thisComputer} runs no agent.</p>`;
+  const name = `<label class="line"><span>Name</span><input class="inline-input name-value" data-name="${esc(id)}" value="${esc(settings.names[id] ?? "")}" placeholder="${esc(`Agent #${id}`)}" maxlength="40" spellcheck="false" autocomplete="off" title="Rename" aria-label="${esc(`Name for agent #${id}`)}"></label>`;
+  if (!hereRunning() || !state.jury) return `${head}<section class="card list">${name}</section><p class="footnote">Turn it on to change its AI and give it more jobs.</p>${noteHtml()}`;
+  const named = (state.rpc?.chains ?? []).map((chain) => CHAIN_NAMES[chain]).filter((chain): chain is string => Boolean(chain));
   // what went wrong with a key goes under its field, where the next one is pasted
   const said = state.rpcSaid ? `<span class="sub bad" role="status">${esc(state.rpcSaid)}</span>` : "";
   const rpc = state.rpcField
     ? `<form class="line" data-form="rpc"><span class="field-stack"><input class="inline-input" data-field="rpc" type="password" placeholder="Paste an Alchemy key" spellcheck="false" autocomplete="off" aria-label="Alchemy API key">${said}</span><button type="button" class="link" data-action="alchemy" title="Alchemy's sign-up: one free key covers all three chains">Get one</button><button class="pill" type="submit" title="Save (Enter)" ${state.rpcBusy ? "disabled" : ""}>${state.rpcBusy ? "Checking…" : "Save"}</button></form>`
-    : `<div class="line"><span>RPC<span class="sub">${esc(named.length ? named.join(", ") : "One Alchemy key, for more jobs")}</span></span><button class="pill" data-action="rpc" title="${named.length ? "Change the key" : "Add an Alchemy key"} (K)">${named.length ? "Change" : "Add key"}</button></div>`;
-  return `<section class="card list spaced">${aiLineHtml()}${rpc}${juryLineHtml(state.localToken!, state.jury, named.length > 0)}</section>`;
+    : `<div class="line"><span>RPC<span class="sub">${esc(named.length ? named.join(", ") : "Onchain jobs, with one free Alchemy key")}</span></span><button class="pill" data-action="rpc" title="${named.length ? "Change the key" : "Add an Alchemy key"} (K)">${named.length ? "Change" : "Add key"}</button></div>`;
+  return `${head}
+    <section class="card list">${name}${aiLineHtml()}</section>
+    <section class="card list spaced">${rpc}${memoryLineHtml()}${juryLineHtml(id, state.jury, named.length > 0)}${githubLineHtml()}</section>
+    <p class="footnote">Each one gets it jobs other agents can't take.</p>
+    ${noteHtml()}`;
+}
+
+/** This computer's agent's page, from its row in Settings or a key that acts on one of its lines. */
+function openHere(): void {
+  if (state.view === "here" || !state.localToken) return;
+  state.view = "here";
+  void readComputer();
+  render();
 }
 
 /** The AI this computer's agent thinks with, as its box runs it. Change asks setup's question again, which takes it over. */
@@ -1473,7 +1527,7 @@ async function joinJury(): Promise<void> {
   try {
     await api.juryJoin();
     // the juror says its key within a minute of starting
-    setTimeout(() => { if (state.view === "settings") void readComputer(); }, 40_000);
+    setTimeout(() => { if (state.view === "here") void readComputer(); }, 40_000);
   } catch (error) {
     const why = String(error).replace(/^Error: /, "");
     if (why !== "stopped") state.jurySaid = why;
@@ -1481,6 +1535,248 @@ async function joinJury(): Promise<void> {
     state.joining = false;
     state.juryLink = null;
     await readComputer();
+    render();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Memory: 6 GB, or 16 GB for the jobs that ask a machine for it. A switch, kept by the app; the box takes it as it's
+// made again, which the switch does at once, or once its job is done.
+// ---------------------------------------------------------------------------------------------
+
+function memoryLineHtml(): string {
+  const m = state.memory;
+  if (!m) return "";
+  const gb = MORE_MEMORY_GB;
+  const shown = memoryLine(m);
+  const later = state.restartWhenIdle ? "after this job" : "after a restart";
+  const sub = state.memorySaid ?? {
+    // one sentence for on and off alike, as a switch's line says what it does
+    off: `Up to ${gb} GB instead of ${BOX_MEMORY_GB}, for bigger jobs`,
+    on: `Up to ${gb} GB instead of ${BOX_MEMORY_GB}, for bigger jobs`,
+    moving: `${"on" in shown && shown.on ? gb : BOX_MEMORY_GB} GB ${later}`,
+    // on Windows Docker runs in WSL, whose memory is set in .wslconfig: no button there opens it
+    docker: windows ? `Give Docker ${gb} GB: memory=${gb}GB in .wslconfig` : `Give Docker ${gb} GB first`,
+  }[shown.kind];
+  const bad = Boolean(state.memorySaid);
+  // the box takes it as it's made again: a restart, which the switch asks for itself, or Docker given room since
+  const docker = shown.kind === "docker" && !windows ? `<button class="link" data-action="docker-open" title="Docker's Settings, Resources: Memory, ${gb} GB">Open Docker</button>`
+    : shown.kind === "moving" && !state.restartWhenIdle ? `<button class="link" data-action="restart" title="Restart this computer's agent (U)">Restart</button>` : "";
+  const toggle = `<button class="switch${m.on ? " on" : ""}" role="switch" aria-checked="${m.on}" data-action="memory" title="${m.on ? `Back to ${BOX_MEMORY_GB} GB` : `${gb} GB, for the jobs that need it`} (M)" ${state.memoryBusy ? "disabled" : ""}><span></span></button>`;
+  return `<div class="line"><span>More memory<span class="sub${bad ? " bad" : ""}"${bad ? ' role="status"' : ""}>${esc(sub)}</span></span>${docker ? `<span class="line-value">${docker}${toggle}</span>` : toggle}</div>`;
+}
+
+/** Memory on or off; the agent restarts for it, once it holds no job. */
+async function flipMemory(): Promise<void> {
+  const m = state.memory;
+  if (!m || state.memoryBusy || !hereRunning()) return;
+  state.memoryBusy = true;
+  state.memorySaid = null;
+  render();
+  try {
+    await api.memorySet(!m.on);
+    state.memory = { ...m, on: !m.on };
+    if (memoryLine(state.memory).kind === "moving") void restartLocal();
+  } catch (error) {
+    state.memorySaid = `Couldn't change it: ${String(error).replace(/^Error: /, "")}`;
+  } finally {
+    state.memoryBusy = false;
+    render();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// GitHub: jobs that open pull requests from the holder's own account (today, proofs for pequalnp.com). The box's gh signs
+// in with a one-time code, the worker says what connecting means, and Connect is the holder's yes to it. Connected, one
+// switch takes its jobs or not, the account kept either way; which desks they come from is the consent's to name.
+// ---------------------------------------------------------------------------------------------
+
+function githubLineHtml(): string {
+  const line = (sub: string, button = "", bad = false, more = "") =>
+    `<div class="line"><span>GitHub<span class="sub${bad ? " bad" : ""}"${bad ? ' role="status"' : ""}>${esc(sub)}</span>${more ? `<span class="sub key-words">${esc(more)}</span>` : ""}</span>${button}</div>`;
+  const device = state.github?.device;
+  if (device) {
+    return line("Enter on GitHub's page", `<span class="line-value"><button class="link" data-action="github-cancel" title="Cancel">Cancel</button><button class="pill" data-action="github-open" title="Open GitHub's page again (G)">Open page</button></span>`, false, device.code);
+  }
+  const busy = { signin: "Opening GitHub…", reading: "Reading what connecting means…", linking: "Connecting: proving the account is yours…", unlinking: "Disconnecting…" } as const;
+  if (state.githubBusy) return line(busy[state.githubBusy]);
+  const shown = githubLine(state.github, state.desks);
+  const said = state.githubSaid;
+  const pill = (action: string, words: string, title: string) => `<button class="pill" data-action="${action}" title="${esc(title)}">${words}</button>`;
+  switch (shown.kind) {
+    case "none": return "";
+    case "update": return line(state.jurySaid ?? "Its box needs an update first", pill("box-update", "Update", "Download the new box and restart on it"), Boolean(state.jurySaid));
+    case "link": return line(said ?? "Jobs that open pull requests as you", pill("github-link", "Connect", "Connect your GitHub account (G)"), Boolean(said));
+    case "signin": return line(said ?? `Sign in to GitHub as ${shown.login} again`, pill("github-link", "Sign in", `Sign in as ${shown.login} (G)`), Boolean(said));
+    case "linked": {
+      const jobs = githubJobs(state.github!, state.desks, state.memory);
+      const sub = said ?? (jobs.needs === "platform" ? "Not on this computer's chip yet"
+        : jobs.needs === "memory" ? (state.memory?.on ? `Waits for ${jobs.memoryGb} GB of memory` : "Needs More memory on")
+        : jobs.on ? `Taking jobs as ${shown.login}` : `No jobs · connected as ${shown.login}`);
+      const off = state.jobsBusy || (!jobs.on && jobs.needs === "platform");
+      const toggle = `<button class="switch${jobs.on ? " on" : ""}" role="switch" aria-checked="${jobs.on}" data-action="github-jobs" title="${jobs.on ? "No more GitHub jobs, the account kept" : "Take GitHub jobs"}" ${off ? "disabled" : ""}><span></span></button>`;
+      const disconnect = `<button class="link" data-action="github-unlink" title="Disconnect: no GitHub jobs, and GitHub signed out of this agent's box">Disconnect</button>`;
+      return line(sub, `<span class="line-value">${disconnect}${toggle}</span>`, Boolean(said));
+    }
+  }
+}
+
+/**
+ * What connecting means, in five plain lines drawn from the worker's own words, which follow in full a click below; and
+ * Connect, the holder's yes to them, which covers the public contest repositories the network runs, now and later
+ * (worker 0.1.46). The repositories and the disk are read from those words, so the lines say what the worker would do now.
+ */
+function githubHtml(): string {
+  const preview = state.githubPreview;
+  const head = `<header class="settings-head">
+      <button class="back" data-action="github-cancel" title="Back (Esc)">‹ Back</button>
+      <div class="title">Connect GitHub</div>
+      <span></span>
+    </header>`;
+  if (!preview) return head;
+  const login = esc(preview.login);
+  const facts = noticeFacts(preview.text);
+  const repos = facts.repos;
+  const diskGb = facts.diskGb;
+  const where = repos.length ? repos.map(esc).join(" and ") : "the repositories listed below";
+  const need = Math.max(0, ...repos.map((repo) => deskNeeds(state.desks?.find((d) => d.repo.toLowerCase() === repo.toLowerCase())).memoryGb));
+  const costs = [diskGb ? `Lean and Mathlib take about ${diskGb} GB of disk.` : "", need > BOX_MEMORY_GB && !state.memory?.on ? `These jobs need ${need} GB of memory: turn on More memory.` : ""].filter(Boolean).join(" ");
+  const lines = [
+    `This computer works proof steps for public contests like pequalnp.com under your handle: up to 5 at a time, on your own Claude or Codex plan.`,
+    `Each proof that passes opens a public pull request from ${login} on ${where}, or another public contest repository the network adds. It uses a fork in your account and GitHub's noreply address.`,
+    `Your GitHub token stays in this computer's box, and every job runs sandboxed away from it. The network never sees it, and no job sees your login.`,
+    `A secret gist proves the account is yours. It's deleted as soon as the network reads it.`,
+    costs,
+  ];
+  const blocks = noticeBlocks(preview.text);
+  let full = "";
+  for (let i = 0; i < blocks.length; i++) {
+    if (!blocks[i]!.item) { full += `<p>${esc(blocks[i]!.text)}</p>`; continue; }
+    let items = "";
+    for (; i < blocks.length && blocks[i]!.item; i++) items += `<li>${esc(blocks[i]!.text)}</li>`;
+    i--;
+    full += `<ul>${items}</ul>`;
+  }
+  const confirming = state.githubBusy === "linking";
+  const yes = confirming ? "Connecting…" : `Connect ${login}`;
+  return `${head}
+    <section class="card notice"><ul>${lines.filter(Boolean).map((line) => `<li>${line}</li>`).join("")}</ul></section>
+    <details class="notice-full"><summary>The worker's own words</summary><section class="card notice">${full}</section></details>
+    ${state.githubSaid ? `<p class="note bad" role="status">${esc(state.githubSaid)}</p>` : ""}
+    <div class="actions notice-actions"><button class="pill" data-action="github-cancel" title="Cancel (Esc)">Cancel</button><button class="pill" data-action="github-confirm" title="Connect (Enter)" ${confirming ? "disabled" : ""}>${yes}</button></div>
+    <p class="footnote">Switch its jobs off any time, or disconnect.</p>`;
+}
+
+/**
+ * Connect, or Sign in: gh signs in first where it isn't, as the account to link; then, for a box not linked yet, the
+ * worker's words on what connecting means, read before anything is linked.
+ */
+let githubCancelled = false;
+
+async function linkGithub(): Promise<void> {
+  if (state.githubBusy || !hereRunning()) return;
+  if (state.github?.device) return void api.githubOpen().catch(() => undefined);
+  state.githubSaid = null;
+  const g = state.github;
+  try {
+    if (!g?.signed_in || (g.linked && g.signed_in.toLowerCase() !== g.linked.toLowerCase())) {
+      state.githubBusy = "signin";
+      render();
+      await api.githubSignIn();
+      state.githubSignedNow = true;
+    }
+    if (!g?.linked) {
+      state.githubBusy = "reading";
+      render();
+      state.githubPreview = await api.githubPreview();
+      state.view = "github";
+    }
+  } catch (error) {
+    const why = String(error).replace(/^Error: /, "").replace(/^not linked: /, "");
+    // the worker links only a box whose jail holds, as every task runs jailed while linked
+    if (!githubCancelled) state.githubSaid = why === "timed out" ? "The code ran out. Connect again for a new one." : /^while linked, every task/.test(why) ? "Its sandbox isn't running. Restart this agent, then connect." : why;
+  } finally {
+    githubCancelled = false;
+    state.githubBusy = null;
+    state.github = await api.githubState().catch(() => state.github);
+    render();
+  }
+}
+
+/** Connect: the holder's yes to what they just read. The worker restarts itself for it once it holds no job. */
+async function confirmGithub(): Promise<void> {
+  if (state.githubBusy || !state.githubPreview) return;
+  state.githubBusy = "linking";
+  state.githubSaid = null;
+  render();
+  try {
+    const left = await api.githubLink(noticeFacts(state.githubPreview.text).repos);
+    state.githubPreview = null;
+    state.githubSignedNow = false;
+    state.view = "here";
+    // a gist the worker couldn't delete is the holder's to remove, so its line stays said
+    if (left) state.githubSaid = left;
+  } catch (error) {
+    state.githubSaid = String(error).replace(/^Error: /, "");
+  } finally {
+    state.githubBusy = null;
+    state.github = await api.githubState().catch(() => state.github);
+    render();
+  }
+}
+
+/**
+ * GitHub's switch, the account kept: off works only its holder's own repositories, each denied, so none is worked; on
+ * follows the network's desks again, a denial of one this chip takes cleared. Connecting was the yes to them, so nothing
+ * is asked again. What comes back from the box is what the switch shows, even part done.
+ */
+async function flipGithubJobs(): Promise<void> {
+  const g = state.github;
+  if (!g?.linked || state.jobsBusy || state.githubBusy || !hereRunning()) return;
+  const jobs = githubJobs(g, state.desks, state.memory);
+  if (!jobs.on && jobs.needs === "platform") return;
+  state.jobsBusy = true;
+  state.githubSaid = null;
+  render();
+  try {
+    await api.githubJobs(!jobs.on, jobs.on ? g.repos : jobs.clear);
+  } catch (error) {
+    state.githubSaid = `Couldn't turn its jobs ${jobs.on ? "off" : "on"}: ${String(error).replace(/^Error: /, "")}`;
+  } finally {
+    state.jobsBusy = false;
+    state.github = await api.githubState().catch(() => state.github);
+    render();
+  }
+}
+
+/** Cancel: a sign-in waiting for its code stops; a link not said yes to leaves nothing behind, gh signed out again. */
+async function cancelGithub(): Promise<void> {
+  if (state.githubBusy === "linking" || state.githubBusy === "unlinking") return;
+  if (state.github?.device) { githubCancelled = true; void api.githubSignInCancel().catch(() => undefined); return; }
+  state.view = "here";
+  state.githubPreview = null;
+  state.githubSaid = null;
+  render();
+  if (state.githubSignedNow && !state.github?.linked) {
+    state.githubSignedNow = false;
+    await api.githubUnlink().catch(() => undefined);
+    state.github = await api.githubState().catch(() => state.github);
+    render();
+  }
+}
+
+async function unlinkGithub(): Promise<void> {
+  if (state.githubBusy || !state.github?.linked) return;
+  state.githubBusy = "unlinking";
+  state.githubSaid = null;
+  render();
+  try {
+    await api.githubUnlink();
+  } catch (error) {
+    state.githubSaid = `Couldn't disconnect: ${String(error).replace(/^Error: /, "")}`;
+  } finally {
+    state.githubBusy = null;
+    state.github = await api.githubState().catch(() => state.github);
     render();
   }
 }
@@ -1532,7 +1828,7 @@ function remember(): void {
 }
 
 /** How deep each view sits, so the next slides in from the side it lives on. */
-const DEPTH = { home: 0, settings: 1, lend: 1, watching: 2 } as const;
+const DEPTH = { home: 0, settings: 1, lend: 1, watching: 2, here: 2, github: 3 } as const;
 let shownView = state.view;
 let drawn = false;
 let lastTray = "";
@@ -1543,7 +1839,7 @@ function render(): void {
   const from = drawn ? panel.offsetHeight : 0;
   // a note belongs to the view it was said on
   if (state.view !== shownView) state.note = null;
-  const html = state.view === "watching" ? watchingHtml() : state.view === "settings" ? settingsHtml() : state.view === "lend" ? lendHtml() : homeHtml();
+  const html = state.view === "watching" ? watchingHtml() : state.view === "here" ? hereHtml() : state.view === "settings" ? settingsHtml() : state.view === "lend" ? lendHtml() : state.view === "github" ? githubHtml() : homeHtml();
   if (state.view !== shownView) {
     scroller.scrollTop = 0;
     slide(html, DEPTH[state.view] > DEPTH[shownView]);
@@ -1726,6 +2022,7 @@ void listen<{ step: string; words: string }>("setup-step-progress", (event) => {
 });
 // a join's link, each time one comes, and none once it has ended
 void listen<api.JuryLink | null>("jury-link", (event) => { state.juryLink = event.payload; render(); });
+void listen<api.Github["device"]>("github-device", (event) => { if (state.github) state.github = { ...state.github, device: event.payload }; render(); });
 
 void listen<boolean>("panel-shown", (event) => {
   playIn(event.payload === true);
@@ -1820,6 +2117,7 @@ app.addEventListener("click", (event) => {
   const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action === "settings") return openSettings();
   if (action === "watching") { state.view = "watching"; return render(); }
+  if (action === "here") return openHere();
   if (action === "home") { state.view = "home"; return render(); }
   if (action === "setup") return void api.openSetup();
   if (action === "update") return updateNow();
@@ -1836,6 +2134,14 @@ app.addEventListener("click", (event) => {
   if (action === "jury-join" || action === "jury-open") return void joinJury();
   if (action === "jury-cancel") return void api.juryCancel().catch(() => undefined);
   if (action === "box-update") return void updateBox();
+  if (action === "github-link") return void linkGithub();
+  if (action === "github-open") return void api.githubOpen().catch(() => undefined);
+  if (action === "github-cancel") return void cancelGithub();
+  if (action === "github-confirm") return void confirmGithub();
+  if (action === "github-unlink") return void unlinkGithub();
+  if (action === "github-jobs") return void flipGithubJobs();
+  if (action === "memory") return void flipMemory();
+  if (action === "docker-open") return void api.dockerOpen().catch(() => undefined);
   if (action === "theme") return setTheme(target.closest<HTMLElement>("[data-theme]")!.dataset.theme as api.Theme);
   if (action === "sounds") {
     event.preventDefault();
@@ -1922,6 +2228,8 @@ app.addEventListener("change", (event) => {
   if (input.dataset.name) {
     settings.names[input.dataset.name] = input.value.trim().slice(0, 40);
     save();
+    // this computer's agent's page wears its name as its title
+    if (state.view === "here") render();
   }
 });
 
@@ -1940,7 +2248,8 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape") {
     if (state.scrub !== null) return scrubTo(null);
-    if (state.view === "watching") openSettings();
+    if (state.view === "github" || (state.view === "here" && state.github?.device)) void cancelGithub();
+    else if (state.view === "watching" || state.view === "here") openSettings();
     else if (state.view === "settings" || state.view === "lend") { state.view = "home"; render(); } else close();
     return;
   }
@@ -1960,9 +2269,15 @@ window.addEventListener("keydown", (event) => {
     if (event.key === "l") return void listSeat(state.lending);
   }
   if (event.key === "L" && state.view === "home") return openLend(state.openAgent);
-  if (state.view === "settings" && event.key === "k") { event.preventDefault(); return openRpcField(); }
-  if (state.view === "settings" && event.key === "i" && hereRunning() && state.jury) return askAiAgain();
-  if (state.view === "settings" && event.key === "j") return void joinJury();
+  // this computer's agent's keys act only where its lines show: from Settings, they open its page
+  const hereKey = ["i", "k", "m", "j", "g"].includes(event.key) && hereRunning() && Boolean(state.jury);
+  if (state.view === "settings" && hereKey) return openHere();
+  if (state.view === "here" && hereKey && event.key === "i") return askAiAgain();
+  if (state.view === "here" && hereKey && event.key === "k") { event.preventDefault(); return openRpcField(); }
+  if (state.view === "here" && hereKey && event.key === "j") return void joinJury();
+  if (state.view === "here" && hereKey && event.key === "g" && (state.github?.device || ["link", "signin"].includes(githubLine(state.github, state.desks).kind))) return void linkGithub();
+  if (state.view === "here" && hereKey && event.key === "m" && state.memory) return void flipMemory();
+  if (state.view === "github" && event.key === "Enter") return void confirmGithub();
   if (event.key === "w") { event.preventDefault(); return focusWatch(); }
   if (event.key === "l") return void connect();
   if (event.key === "c") return claim();

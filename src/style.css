@@ -306,6 +306,8 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 .line + .line::before, .ticker + .line::before, .work + .line::before, .tray::before { content: ""; position: absolute; top: 0; right: 0; left: 14px; height: 0.5px; background: var(--line); }
 .line-label { color: var(--ink-2); }
 .line-value { display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+/* a link beside a switch keeps the line's gap: its own pull to the edge is for a link that ends the line */
+.line-value .link + .switch { margin-left: 6px; }
 .pulse { position: relative; width: 7px; height: 7px; border-radius: 50%; background: var(--on); }
 
 /* the swarm's ticker: what just happened, one line at a time */
@@ -456,6 +458,13 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 .name-input:hover { background: var(--card-hover); }
 .name-input:focus { background: var(--bg); box-shadow: 0 0 0 0.5px var(--line); }
 .name-input:focus::placeholder { color: var(--ink-3); }
+/* this computer's agent: its row opens its own page, where its name is a field on the right, as a value is */
+.agent-name { overflow: hidden; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.name-value { margin-right: -6px; padding: 0 6px; line-height: 19px; border-radius: 6px; text-align: right; color: var(--ink-2); transition: background-color 0.15s, box-shadow 0.15s; }
+.name-value::placeholder { color: var(--ink-2); }
+.name-value:hover { background: var(--card-hover); }
+.name-value:focus { color: var(--ink); background: var(--bg); box-shadow: 0 0 0 0.5px var(--line); }
+.name-value:focus::placeholder { color: var(--ink-3); }
 /* Watching: a line in from Settings, then one line for each wallet and seat */
 .line.opens { transition: background-color 0.15s; }
 .line.opens:hover { background: var(--card-hover); }
@@ -466,6 +475,15 @@ button.job-now:hover, button.done:hover { background: var(--card-hover); }
 .remove-link:hover { color: var(--danger); }
 .list form.line .pill { margin-right: -6px; }
 .footnote { margin: 0; padding: 6px 14px 0; font-size: 11px; line-height: 1.45; color: var(--ink-3); }
+/* what linking GitHub means, in the worker's own words, read before Link */
+.card.notice { margin-top: 10px; padding: 10px 14px; font-size: 12px; line-height: 1.45; color: var(--ink-2); }
+.notice p, .notice ul { margin: 0 0 8px; }
+.notice ul { padding-left: 14px; }
+.notice > :last-child { margin-bottom: 0; }
+.notice-actions { margin-top: 10px; }
+.notice-full { margin-top: 8px; }
+.notice-full summary { padding: 0 14px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
+.notice-full .card.notice { margin-top: 8px; }
 .sub { display: block; font-size: 11px; color: var(--ink-2); }
 .sub.bad { color: var(--danger); }
 /* a key is one long word: it wraps anywhere rather than past the line's edge */

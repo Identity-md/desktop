@@ -1,0 +1,30 @@
+This links this machine to the GitHub account octocat for outside proof desks: public proof efforts whose steps the
+network works and submits as pull requests.
+
+What it means:
+  - The network takes a desk's steps under your handle, octocat, at most five at a time, and works them on this machine.
+  - It runs on this machine and uses your own Claude Code or Codex usage, as any task here does.
+  - The network may add the public contest repositories it runs, the ones listed below and any it runs later, each checked
+    here to be public. Each pull request is one proof file, under your GitHub name. imd github deny <owner/repo> blocks
+    one; imd github desks mine lets you choose them yourself (imd github allow <owner/repo>).
+
+What becomes public, for each proof this machine writes that passes its checks:
+  - a pull request opened by octocat on one of those public repositories, showing your handle and avatar, and a
+    fork of that repository in your account if you have none;
+  - one commit on it, authored and committed as octocat <583231+octocat@users.noreply.github.com>, GitHub's noreply address for you.
+
+To prove the account is yours, a short-lived secret gist is made in it and deleted as soon as the network has read it.
+
+While linked, every task on this machine runs jailed, whatever it is: away from your home folder, where gh keeps your token
+(in plain text on a server, ~/.config/gh/hosts.yml), a task reads only its own workspace and the tools it runs. Where the jail
+stops holding, this machine takes no task until it holds again or you unlink (imd doctor says which).
+
+It is opened by this worker through your own gh, which keeps your token; the worker never reads it, and no task is told your login.
+The worker opens only a file one of its own tasks on this machine wrote, at a path the desk's kind allows, in a repository
+worked here. Nothing is ever opened under anyone else's account. imd github unlink stops it at any time.
+The desks this plane works now, each allowed here only if you say yes to it:
+  - open-goat/pequalnp-proofs (desk pequalnp, kind pequalnp-v1): Lean 4 proofs against Mathlib, one file a step, held to pequalnp.com's contributing rules.
+    Each proof goes at lean/PEqualNP/Outside/L_<gap>.lean, <gap> being the step. Lean and Mathlib take about 10 GB of disk here, fetched once and kept.
+
+
+not linked.
