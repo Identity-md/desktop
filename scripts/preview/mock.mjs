@@ -40,6 +40,8 @@ export function installMock({ fixtures, scenario }) {
     // the box's pairing, retired when its seat moved on: `unpaired: true`, or `window.__unpaired = true` once open
     if (path === `/workers/${deviceKey}/standing?queue=0`) return { status: 200, body: { enrollment: { status: scenario.unpaired || window.__unpaired ? "stale" : "active", tokenId: local } } };
     // the plane's one outside desk, as GET /github/desks listed it on 2026-11-25
+    // `window.__desksDown = true`: the plane didn't answer for them
+    if (path === "/github/desks" && window.__desksDown) return { status: 503, body: null };
     if (path === "/github/desks") return { status: 200, body: { desks: [{ name: "pequalnp", kind: "pequalnp-v1", repo: "open-goat/pequalnp-proofs", path: "lean/PEqualNP/Outside/L_<gap>.lean" }] } };
     const hit = window.__fixtures.api[path];
     if (!hit) return { status: 404, body: null };
