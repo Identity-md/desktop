@@ -1355,6 +1355,11 @@ const THEMES: Array<[api.Theme, string]> = [["system", "System"], ["light", "Lig
 /** The chains `imd rpc setup` fills from one Alchemy key, by id. */
 const CHAIN_NAMES: Record<string, string> = { "1": "Ethereum", "8453": "Base", "4663": "Robinhood Chain" };
 const hereRunning = () => Boolean(state.localToken && state.box?.state === "running" && !state.unpaired);
+/** Whether this computer's agent holds a job now. */
+const hereWorking = () => {
+  const agent = state.agents.find((a) => a.tokenId === state.localToken);
+  return Boolean(agent && phaseFor(agent).kind === "working");
+};
 
 /** Its RPC, its memory, its seat on the jury and GitHub, read from its box; and the desks the plane works. */
 async function readComputer(): Promise<void> {
@@ -1603,11 +1608,19 @@ function githubLineHtml(): string {
   const shown = githubLine(state.github, state.desks);
   const said = state.githubSaid;
   const pill = (action: string, words: string, title: string) => `<button class="pill" data-action="${action}" title="${esc(title)}">${words}</button>`;
+  // while linked, in every state of it: gh signed out or in as someone else is no reason to keep a holder linked; not while
+  // the switch is mid-change, whose write of the link would put it back
+  const disconnect = `<button class="link" data-action="github-unlink" title="Disconnect: no GitHub jobs, and GitHub signed out of this agent's box" ${state.jobsBusy ? "disabled" : ""}>Disconnect</button>`;
   switch (shown.kind) {
     case "none": return "";
     case "update": return line(state.jurySaid ?? "Its box needs an update first", pill("box-update", "Update", "Download the new box and restart on it"), Boolean(state.jurySaid));
-    case "link": return line(said ?? "Jobs that open pull requests as you", pill("github-link", "Connect", "Connect your GitHub account (G)"), Boolean(said));
-    case "signin": return line(said ?? `Sign in to GitHub as ${shown.login} again`, pill("github-link", "Sign in", `Sign in as ${shown.login} (G)`), Boolean(said));
+    case "link": {
+      // a job running now started before any login was here, outside the jail a login brings: it could read the token
+      // that signing in writes, so connecting waits for it to finish
+      if (hereWorking()) return line(said ?? "Connect once its job is done", "", Boolean(said));
+      return line(said ?? "Jobs that open pull requests as you", pill("github-link", "Connect", "Connect your GitHub account (G)"), Boolean(said));
+    }
+    case "signin": return line(said ?? `Sign in as ${shown.login} again`, `<span class="line-value">${disconnect}${pill("github-link", "Sign in", `Sign in as ${shown.login} (G)`)}</span>`, Boolean(said));
     case "linked": {
       const jobs = githubJobs(state.github!, state.desks, state.memory);
       const sub = said ?? (jobs.needs === "platform" ? "Not on this computer's chip yet"
@@ -1615,7 +1628,6 @@ function githubLineHtml(): string {
         : jobs.on ? `Taking jobs as ${shown.login}` : `No jobs · connected as ${shown.login}`);
       const off = state.jobsBusy || (!jobs.on && jobs.needs === "platform");
       const toggle = `<button class="switch${jobs.on ? " on" : ""}" role="switch" aria-checked="${jobs.on}" data-action="github-jobs" title="${jobs.on ? "No more GitHub jobs, the account kept" : "Take GitHub jobs"}" ${off ? "disabled" : ""}><span></span></button>`;
-      const disconnect = `<button class="link" data-action="github-unlink" title="Disconnect: no GitHub jobs, and GitHub signed out of this agent's box">Disconnect</button>`;
       return line(sub, `<span class="line-value">${disconnect}${toggle}</span>`, Boolean(said));
     }
   }
@@ -1674,10 +1686,13 @@ function githubHtml(): string {
 let githubCancelled = false;
 
 async function linkGithub(): Promise<void> {
-  if (state.githubBusy || !hereRunning()) return;
+  // the code is showing: G opens GitHub's page for it again
   if (state.github?.device) return void api.githubOpen().catch(() => undefined);
-  state.githubSaid = null;
+  if (state.githubBusy || !hereRunning()) return;
   const g = state.github;
+  if (!g?.linked && hereWorking()) return;
+  state.githubSaid = null;
+  let failed = false;
   try {
     if (!g?.signed_in || (g.linked && g.signed_in.toLowerCase() !== g.linked.toLowerCase())) {
       state.githubBusy = "signin";
@@ -1688,15 +1703,28 @@ async function linkGithub(): Promise<void> {
     if (!g?.linked) {
       state.githubBusy = "reading";
       render();
-      state.githubPreview = await api.githubPreview();
-      state.view = "github";
+      const preview = await api.githubPreview();
+      if (githubCancelled) failed = true;
+      else {
+        state.githubPreview = preview;
+        state.view = "github";
+      }
     }
   } catch (error) {
+    failed = true;
     const why = String(error).replace(/^Error: /, "").replace(/^not linked: /, "");
     // the worker links only a box whose jail holds, as every task runs jailed while linked
     if (!githubCancelled) state.githubSaid = why === "timed out" ? "The code ran out. Connect again for a new one." : /^while linked, every task/.test(why) ? "Its sandbox isn't running. Restart this agent, then connect." : why;
   } finally {
     githubCancelled = false;
+    // a sign-in this Connect made, for a link that won't come, goes again: a login left in the box with no link keeps every
+    // task jailed, and where the jail doesn't hold, takes none
+    if (failed && state.githubSignedNow && !g?.linked) {
+      state.githubSignedNow = false;
+      state.githubBusy = "unlinking";
+      render();
+      await api.githubUnlink().catch(() => undefined);
+    }
     state.githubBusy = null;
     state.github = await api.githubState().catch(() => state.github);
     render();
@@ -1739,7 +1767,13 @@ async function flipGithubJobs(): Promise<void> {
   state.githubSaid = null;
   render();
   try {
-    await api.githubJobs(!jobs.on, jobs.on ? g.repos : jobs.clear);
+    // on clears the denials of the desks this chip takes, so it needs them read: without them it would say on and work none
+    if (!jobs.on && !state.desks) {
+      state.desks = await api.githubDesks().catch(() => null);
+      if (!state.desks) throw new Error("the network's desks didn't load. Try again in a minute.");
+    }
+    const now = jobs.on ? jobs : githubJobs(g, state.desks, state.memory);
+    await api.githubJobs(!jobs.on, jobs.on ? g.repos : now.clear);
   } catch (error) {
     state.githubSaid = `Couldn't turn its jobs ${jobs.on ? "off" : "on"}: ${String(error).replace(/^Error: /, "")}`;
   } finally {
@@ -1753,6 +1787,8 @@ async function flipGithubJobs(): Promise<void> {
 async function cancelGithub(): Promise<void> {
   if (state.githubBusy === "linking" || state.githubBusy === "unlinking") return;
   if (state.github?.device) { githubCancelled = true; void api.githubSignInCancel().catch(() => undefined); return; }
+  // still reading what connecting means: Connect, when it hears, opens nothing and signs gh out again itself
+  if (state.githubBusy === "reading") { githubCancelled = true; return; }
   state.view = "here";
   state.githubPreview = null;
   state.githubSaid = null;
@@ -1766,7 +1802,8 @@ async function cancelGithub(): Promise<void> {
 }
 
 async function unlinkGithub(): Promise<void> {
-  if (state.githubBusy || !state.github?.linked) return;
+  // not while the switch is mid-change: its write of the link, read before this, would put the link back
+  if (state.githubBusy || state.jobsBusy || !state.github?.linked) return;
   state.githubBusy = "unlinking";
   state.githubSaid = null;
   render();
@@ -2241,6 +2278,14 @@ window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" || (event.key === "Enter" && (event.target as HTMLElement).dataset.name)) (event.target as HTMLElement).blur();
     return;
   }
+  // what connecting means is answered here and nowhere else: Esc cancels, Enter connects unless a button or the full
+  // text has focus, which Enter presses as it would anywhere; no other key leaves it with gh signed in
+  if (state.view === "github") {
+    if (event.key === "Escape") void cancelGithub();
+    else if (event.key === "Enter" && !(event.target as HTMLElement).closest?.("button, summary, a, details")) void confirmGithub();
+    else if ((event.metaKey || event.ctrlKey) && event.key === "q") void api.quit();
+    return;
+  }
   if ((event.target as HTMLElement).classList?.contains("spark") && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
     event.preventDefault();
     const from = state.scrub ?? DAYS - 1;
@@ -2248,7 +2293,7 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape") {
     if (state.scrub !== null) return scrubTo(null);
-    if (state.view === "github" || (state.view === "here" && state.github?.device)) void cancelGithub();
+    if (state.view === "here" && (state.github?.device || state.githubBusy === "reading")) void cancelGithub();
     else if (state.view === "watching" || state.view === "here") openSettings();
     else if (state.view === "settings" || state.view === "lend") { state.view = "home"; render(); } else close();
     return;
@@ -2277,7 +2322,6 @@ window.addEventListener("keydown", (event) => {
   if (state.view === "here" && hereKey && event.key === "j") return void joinJury();
   if (state.view === "here" && hereKey && event.key === "g" && (state.github?.device || ["link", "signin"].includes(githubLine(state.github, state.desks).kind))) return void linkGithub();
   if (state.view === "here" && hereKey && event.key === "m" && state.memory) return void flipMemory();
-  if (state.view === "github" && event.key === "Enter") return void confirmGithub();
   if (event.key === "w") { event.preventDefault(); return focusWatch(); }
   if (event.key === "l") return void connect();
   if (event.key === "c") return claim();
@@ -2320,7 +2364,8 @@ window.addEventListener("keydown", (event) => {
 
 // The panel closes when it loses focus, as a menu does, or on a click in the room around it, and reads
 // again whenever it opens.
-window.addEventListener("blur", () => { if (!state.linking && !state.joining) close(); });
+// Nor while GitHub's sign-in waits: its page takes the focus, and the panel holds the code to type there.
+window.addEventListener("blur", () => { if (!state.linking && !state.joining && !state.github?.device && state.githubBusy !== "signin") close(); });
 document.addEventListener("pointerdown", (event) => { if (!panel.contains(event.target as Node)) close(); });
 window.addEventListener("focus", () => {
   if (closing) playIn(above);

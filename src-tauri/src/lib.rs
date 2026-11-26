@@ -3220,7 +3220,11 @@ fn github_preview_of(out: &str, err: &str) -> Result<GithubPreview, String> {
 #[tauri::command]
 async fn github_preview() -> Result<GithubPreview, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let (_, out, err) = docker_said(&["exec", "-u", "imd", BOX_NAME, "imd", "github", "link"], Duration::from_secs(90)).ok_or("Docker is not installed")?;
+        let (_, late, out, err) = docker_said_timed(&["exec", "-u", "imd", BOX_NAME, "imd", "github", "link"], Duration::from_secs(90)).ok_or("Docker is not installed")?;
+        // nothing is linked by it, and Connect signs gh out again after: a new try is all it takes
+        if late {
+            return Err("The worker didn't answer in time. Connect again in a minute.".into());
+        }
         github_preview_of(&out, &err)
     })
     .await
@@ -3253,11 +3257,14 @@ async fn github_link(repos: Vec<String>) -> Result<Option<String>, String> {
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
         let shown: Vec<String> = repos.into_iter().filter(|repo| github_repo(repo)).collect();
-        let (ok, out, err) = docker_said(&["exec", "-u", "imd", BOX_NAME, "imd", "github", "link", "--yes"], Duration::from_secs(6 * 60)).ok_or("Docker is not installed")?;
-        let said = github_link_said(ok, &out, &err);
-        if said.is_ok() {
-            let allowed = run_docker(&["exec", "-u", "imd", BOX_NAME, "node", "-e", GITHUB_LINK_JS], Duration::from_secs(20)).filter(|(ok, _)| *ok).map(|(_, out)| github_read(&out).repos).unwrap_or_default();
-            for repo in not_shown(&allowed, &shown) {
+        let (ok, late, out, err) = docker_said_timed(&["exec", "-u", "imd", BOX_NAME, "imd", "github", "link", "--yes"], Duration::from_secs(6 * 60)).ok_or("Docker is not installed")?;
+        let said = if late { Err(TOOK_TOO_LONG.to_string()) } else { github_link_said(ok, &out, &err) };
+        // a box that reads as linked once it returns, whatever it said, has each repository it allowed that the holder
+        // wasn't shown denied again. A link still going on in the box past its time isn't linked yet here, and keeps them:
+        // in network mode, as a first link is, --yes allows none of its own
+        let now = run_docker(&["exec", "-u", "imd", BOX_NAME, "node", "-e", GITHUB_LINK_JS], Duration::from_secs(20)).filter(|(ok, _)| *ok).map(|(_, out)| github_read(&out));
+        if let Some(here) = now.filter(|here| here.linked.is_some()) {
+            for repo in not_shown(&here.repos, &shown) {
                 let _ = run_docker(&["exec", "-u", "imd", BOX_NAME, "imd", "github", "deny", &repo], Duration::from_secs(30));
             }
         }
@@ -3267,14 +3274,18 @@ async fn github_link(repos: Vec<String>) -> Result<Option<String>, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Unlinks, then signs gh out of every GitHub account it keeps in the box. With two kept (a Sign in as the linked
+/// account over another), `gh auth logout` alone refuses, having no terminal to ask which, so each is named; and its
+/// file of tokens goes after, should any be left.
+const GITHUB_UNLINK: &str = r#"imd github unlink >/dev/null && { command -v gh >/dev/null 2>&1 || exit 0; for u in $(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh auth status --hostname github.com --json hosts --jq '.hosts["github.com"][]?.login' 2>/dev/null); do GH_PROMPT_DISABLED=1 gh auth logout --hostname github.com --user "$u" >/dev/null 2>&1; done; rm -f "${GH_CONFIG_DIR:-$HOME/.config/gh}/hosts.yml"; }"#;
+
 /// Unlinks: this computer takes no desk work and opens no pull request, and gh in the box signs out, so its token is
 /// gone too. The worker restarts itself for it once it holds no job.
 #[tauri::command]
 async fn github_unlink() -> Result<(), String> {
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(|| {
-        let script = "imd github unlink >/dev/null && { command -v gh >/dev/null 2>&1 && GH_PROMPT_DISABLED=1 gh auth logout --hostname github.com >/dev/null 2>&1; true; }";
-        let said = match run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", script], Duration::from_secs(60)) {
+        let said = match run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", GITHUB_UNLINK], Duration::from_secs(60)) {
             Some((true, _)) => Ok(()),
             Some((false, why)) => Err(why.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("couldn't unlink").to_string()),
             None => Err("Docker is not installed".into()),
@@ -3309,7 +3320,10 @@ async fn github_jobs(on: bool, repos: Vec<String>) -> Result<(), String> {
         for step in steps {
             let mut args = vec!["exec", "-u", "imd", BOX_NAME, "imd", "github"];
             args.extend(step);
-            let (ok, out, err) = docker_said(&args, Duration::from_secs(60)).ok_or("Docker is not installed")?;
+            let (ok, late, out, err) = docker_said_timed(&args, Duration::from_secs(60)).ok_or("Docker is not installed")?;
+            if late {
+                return Err(TOOK_TOO_LONG.into());
+            }
             if !ok {
                 return Err(github_jobs_said(&out, &err));
             }
@@ -3347,6 +3361,14 @@ fn docker_streams(args: &[&str], timeout: Duration) -> Option<(String, String)> 
 /// Docker's CLI run as `docker_streams` runs it, its two streams kept whether or not it succeeded: a command that ends
 /// non-zero by design, as `imd github link` asked nothing, still says what it would do. None when Docker is missing.
 fn docker_said(args: &[&str], timeout: Duration) -> Option<(bool, String, String)> {
+    docker_said_timed(args, timeout).map(|(ok, _, out, err)| (ok, out, err))
+}
+
+/// Why a command in the box said nothing in its time: Docker's CLI is stopped then, and what it ran in the box goes on.
+const TOOK_TOO_LONG: &str = "The worker took too long to answer. It may still finish: look again in a minute.";
+
+/// `docker_said`, and whether it ran out of time: its CLI is stopped then, though what it ran in a box goes on there.
+fn docker_said_timed(args: &[&str], timeout: Duration) -> Option<(bool, bool, String, String)> {
     use std::io::Read;
     let mut command = docker_command()?;
     command.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
@@ -3363,20 +3385,20 @@ fn docker_said(args: &[&str], timeout: Duration) -> Option<(bool, String, String
         text
     });
     let started = std::time::Instant::now();
-    let ok = loop {
+    let (ok, late) = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
+            Ok(Some(status)) => break (status.success(), false),
             Ok(None) if started.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break false;
+                break (false, true);
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(40)),
-            Err(_) => break false,
+            Err(_) => break (false, false),
         }
     };
     let (out, err) = (read_out.join().ok()?, read_err.join().ok()?);
-    Some((ok, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned()))
+    Some((ok, late, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned()))
 }
 
 /// What the worker in this computer's box last said of its self-test, for the panel to say why an agent the network
