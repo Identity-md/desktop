@@ -358,6 +358,9 @@ async function refresh(full = false): Promise<void> {
   }
   render();
   const local = state.agents.find((a) => a.tokenId === state.localToken);
+  // a box made again that reads as current can be made again later, for the next reason: Docker given room for More
+  // memory, a new box image. One that still isn't, after, isn't made again every minute.
+  if (state.box?.current) renewed = false;
   if (state.restartWhenIdle && local && phaseFor(local).kind !== "working") void restartLocal();
   else if (state.updateWhenIdle && local && phaseFor(local).kind !== "working") void updateBox();
   else if (!renewed && boxDue(state.box, local)) void renewLocal();
@@ -419,7 +422,7 @@ async function restartLocal(runtime = settings.runtime): Promise<void> {
   await refresh(true);
 }
 
-/** One at a time, and once a run of the app: a box still without today's flags after this isn't made again every minute. */
+/** One at a time, and once until the box reads current again: a box still without today's flags after this isn't made again every minute. */
 let renewed = false;
 
 /**
