@@ -598,7 +598,7 @@ struct BoxState {
 
 /// The running box's id and its worker's device key, once read.
 static DEVICE_KEY: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
-/// The running box's id and the box image's, once the box was read as made the way this app makes one now.
+/// The running box's id and start, and the box image's, once the box was read as made the way this app makes one now.
 static CURRENT_BOX: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
 
 /// Whether the box was made the way this app makes one now: from the box image here, with the flags above. Both are a
@@ -634,20 +634,22 @@ async fn box_state() -> BoxState {
             return BoxState { state: "docker-down", installed: true, device_key: None, current: true, runtime: None };
         }
         // The box answering means the engine does: Docker's own check only when there is no box to ask.
-        let inspected = run_docker(&["inspect", "-f", "{{.Id}} {{.State.Running}} {{json .Config.Cmd}}", BOX_NAME], Duration::from_secs(10));
+        let inspected = run_docker(&["inspect", "-f", "{{.Id}} {{.State.Running}} {{.State.StartedAt}} {{json .Config.Cmd}}", BOX_NAME], Duration::from_secs(10));
         if !inspected.as_ref().is_some_and(|(ok, _)| *ok) && !run_docker(&["info", "--format", "{{.ServerVersion}}"], Duration::from_secs(10)).is_some_and(|(ok, _)| ok) {
             return BoxState { state: "docker-down", installed: true, device_key: None, current: true, runtime: None };
         }
         let image = image_id(BOX_IMAGE);
         let installed = image.is_some();
-        let (container, running, command) = match &inspected {
+        let (container, running, started, command) = match &inspected {
             Some((true, out)) => {
-                let mut fields = out.splitn(3, ' ');
-                (fields.next().unwrap_or_default().to_string(), fields.next() == Some("true"), fields.next().unwrap_or_default().to_string())
+                let mut fields = out.splitn(4, ' ');
+                (fields.next().unwrap_or_default().to_string(), fields.next() == Some("true"), fields.next().unwrap_or_default().to_string(), fields.next().unwrap_or_default().to_string())
             }
-            _ => (String::new(), false, String::new()),
+            _ => (String::new(), false, String::new(), String::new()),
         };
-        let current = !running || image.as_deref().is_none_or(|image| box_current(&container, image));
+        // asked again each time the box starts: a box made at 6 GB while Docker had too little for More memory is current
+        // then, and Docker given more restarts it, with the same id, as one that no longer is
+        let current = !running || image.as_deref().is_none_or(|image| box_current(&format!("{container} {started}"), image));
         // The worker's key is the box's for its life: asked once per box, not on every look.
         let device_key = if running {
             let mut known = DEVICE_KEY.lock().unwrap_or_else(|e| e.into_inner());
@@ -3036,7 +3038,7 @@ static GITHUB_DEVICE: std::sync::Mutex<Option<DeviceCode>> = std::sync::Mutex::n
 /// file, which holds the device key; then, from `github-desks.json` beside it (worker 0.1.46), which desks it works and
 /// the network's it works now, as the worker reads that file (`readDesks`, `repoSources`): none there is the network's,
 /// one that doesn't read is `mine`, and nothing denied is listed as worked.
-const GITHUB_LINK_JS: &str = r#"try{const fs=require("fs"),h=process.env.IDENTITYMD_HOME||require("os").homedir()+"/.identitymd",c=JSON.parse(fs.readFileSync(h+"/config.json","utf8")).githubCredit;if(c&&c.login){console.log("linked "+c.login);let d=null;try{d=JSON.parse(fs.readFileSync(h+"/github-desks.json","utf8"))}catch(e){if(e.code!=="ENOENT")d=false}if(d&&(d.v!==1||!Array.isArray(d.network)||!Array.isArray(d.denied)))d=false;const mode=d===false||(d&&d.mode==="mine")?"mine":"network",denied=d?d.denied:[],no=(r,id)=>denied.some(x=>String(x.repo).toLowerCase()===String(r).toLowerCase()||(id!==undefined&&x.id===id));console.log("mode "+mode);for(const r of c.repos||[])if(!no(r.repo,r.id))console.log("repo "+r.repo);if(mode==="network")for(const r of d?d.network:[])if(!no(r.repo,r.id))console.log("net "+r.repo);for(const x of denied)console.log("denied "+x.repo)}}catch{}"#;
+const GITHUB_LINK_JS: &str = r#"try{const fs=require("fs"),h=process.env.IDENTITYMD_HOME||require("os").homedir()+"/.identitymd",c=JSON.parse(fs.readFileSync(h+"/config.json","utf8")).githubCredit;if(c&&c.login){console.log("linked "+c.login);let v=null;try{let p=fs.realpathSync(require("child_process").execSync("command -v imd",{encoding:"utf8"}).trim());for(let i=0;i<8&&!v;i++){p=require("path").dirname(p);try{const k=JSON.parse(fs.readFileSync(p+"/package.json","utf8"));if(k.name==="@identitymd/worker")v=k.version}catch{}}}catch{}const old=typeof v==="string"&&v.split(".").map(Number).reduce((a,n,i)=>a!==0?a:n-[0,1,46][i],0)<0;let d=null;try{d=JSON.parse(fs.readFileSync(h+"/github-desks.json","utf8"))}catch(e){if(e.code!=="ENOENT")d=false}if(d&&(d.v!==1||!Array.isArray(d.network)||!Array.isArray(d.denied)))d=false;const mode=old||d===false||(d&&d.mode==="mine")?"mine":"network",denied=d?d.denied:[],no=(r,id)=>denied.some(x=>String(x.repo).toLowerCase()===String(r).toLowerCase()||(id!==undefined&&x.id===id));console.log("mode "+mode);for(const r of c.repos||[])if(!no(r.repo,r.id))console.log("repo "+r.repo);if(mode==="network")for(const r of d?d.network:[])if(!no(r.repo,r.id))console.log("net "+r.repo);for(const x of denied)console.log("denied "+x.repo)}}catch{}"#;
 
 /// What this computer's box says of GitHub: its chip, whether it has gh, who gh is signed in as, and the link.
 #[derive(Serialize, Default, Debug, PartialEq)]
@@ -3090,7 +3092,8 @@ fn github_read(out: &str) -> GithubHere {
 /// `imd github link` itself asks), and the link.
 fn github_look() -> String {
     format!(
-        "echo \"arch $(uname -m)\"; if command -v gh >/dev/null 2>&1; then echo 'gh yes'; login=$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh api user --jq .login 2>/dev/null) && echo \"signed $login\"; fi; node -e '{GITHUB_LINK_JS}'"
+        "echo \"arch $(uname -m)\"; {} if command -v gh >/dev/null 2>&1; then echo 'gh yes'; login=$(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh api user --jq .login 2>/dev/null) && echo \"signed $login\"; fi; node -e '{GITHUB_LINK_JS}'",
+        github_pending_look()
     )
 }
 
@@ -3110,12 +3113,51 @@ async fn github_state() -> Option<Github> {
         if !ok {
             return None;
         }
+        if out.lines().any(|line| line.trim() == "pending yes") && !GITHUB_SIGNING.load(Ordering::SeqCst) {
+            github_pending_clear();
+        }
         Some(Github { here: github_read(&out), device: GITHUB_DEVICE.lock().unwrap_or_else(|e| e.into_inner()).clone() })
     })
     .await
     .ok()
     .flatten()
 }
+
+/// Where the box's git keeps credentials it was given (git-credential-store(1)), by the worker's own rule (`gitCredentialFiles`,
+/// worker 0.1.44): a shell line that sets `f` to it.
+const GITHUB_PENDING_FILE: &str = r#"f=$HOME/.config/git/credentials; [ -n "$XDG_CONFIG_HOME" ] && f=$XDG_CONFIG_HOME/git/credentials;"#;
+/// What that file holds while gh signs in: a github.com credential, with nothing in it. The worker reads it as a GitHub
+/// login (`ghLoginOnMachine`), so from the moment Connect starts the sign-in every task it takes runs jailed, as it will once
+/// gh's own login lands, and none where the jail doesn't hold: a job taken while the code is typed never sees the token
+/// arrive. Neither git nor gh reads it: the box gives git no credential helper.
+const GITHUB_PENDING: &str = "https://github.com";
+
+/// Writes `GITHUB_PENDING` where no credentials are; a file that holds any is left as it is.
+fn github_pending_set_script() -> String {
+    format!("{GITHUB_PENDING_FILE} [ -s \"$f\" ] || {{ mkdir -p \"$(dirname \"$f\")\" && printf '%s\\n' {GITHUB_PENDING} > \"$f\"; }}")
+}
+
+/// Empties the file again where it holds `GITHUB_PENDING` and nothing else: an empty file is no login to the worker.
+fn github_pending_clear_script() -> String {
+    format!("{GITHUB_PENDING_FILE} [ \"$(cat \"$f\" 2>/dev/null)\" = {GITHUB_PENDING} ] && : > \"$f\"; true")
+}
+
+/// Says `pending yes` where the file holds `GITHUB_PENDING` and nothing else.
+fn github_pending_look() -> String {
+    format!("{GITHUB_PENDING_FILE} [ \"$(cat \"$f\" 2>/dev/null)\" = {GITHUB_PENDING} ] && echo 'pending yes';")
+}
+
+fn github_pending_set() -> bool {
+    run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", &github_pending_set_script()], Duration::from_secs(20)).is_some_and(|(ok, _)| ok)
+}
+
+fn github_pending_clear() {
+    let _ = run_docker(&["exec", "-u", "imd", BOX_NAME, "sh", "-c", &github_pending_clear_script()], Duration::from_secs(20));
+}
+
+/// Whether a sign-in runs now, in this run of the app: a `GITHUB_PENDING` left by one that didn't end here (the app quit
+/// mid-sign-in) is cleared at the next look.
+static GITHUB_SIGNING: AtomicBool = AtomicBool::new(false);
 
 /// GitHub's own page for a one-time code, the only one a GitHub sign-in opens.
 const GITHUB_DEVICE_PAGE: &str = "https://github.com/login/device";
@@ -3163,6 +3205,11 @@ async fn github_sign_in(app: tauri::AppHandle) -> Result<(), String> {
     let _busy = Busy::new();
     tauri::async_runtime::spawn_blocking(move || {
         let _ = run_docker(&["rm", "-f", BOX_GITHUB], Duration::from_secs(30));
+        GITHUB_SIGNING.store(true, Ordering::SeqCst);
+        if !github_pending_set() {
+            GITHUB_SIGNING.store(false, Ordering::SeqCst);
+            return Err("Couldn't ready its box to sign in. Restart this agent, then connect.".to_string());
+        }
         let round = GITHUB_ROUND.fetch_add(1, Ordering::SeqCst) + 1;
         std::thread::spawn(move || {
             std::thread::sleep(GITHUB_SIGN_IN_WAITS);
@@ -3180,6 +3227,9 @@ async fn github_sign_in(app: tauri::AppHandle) -> Result<(), String> {
             let _ = app.opener().open_url(&device.url, None::<&str>);
         }, "GitHub's sign-in stopped");
         set_github_device(&app, None);
+        // gh's own login, where it landed, keeps every task jailed from here
+        github_pending_clear();
+        GITHUB_SIGNING.store(false, Ordering::SeqCst);
         signed.map_err(|why| if GITHUB_STOPPED.load(Ordering::SeqCst) == round { "timed out".into() } else { why })
     })
     .await
@@ -3276,8 +3326,8 @@ async fn github_link(repos: Vec<String>) -> Result<Option<String>, String> {
 
 /// Unlinks, then signs gh out of every GitHub account it keeps in the box. With two kept (a Sign in as the linked
 /// account over another), `gh auth logout` alone refuses, having no terminal to ask which, so each is named; and its
-/// file of tokens goes after, should any be left.
-const GITHUB_UNLINK: &str = r#"imd github unlink >/dev/null && { command -v gh >/dev/null 2>&1 || exit 0; for u in $(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh auth status --hostname github.com --json hosts --jq '.hosts["github.com"][]?.login' 2>/dev/null); do GH_PROMPT_DISABLED=1 gh auth logout --hostname github.com --user "$u" >/dev/null 2>&1; done; rm -f "${GH_CONFIG_DIR:-$HOME/.config/gh}/hosts.yml"; }"#;
+/// file of tokens is emptied after, should any be left.
+const GITHUB_UNLINK: &str = r#"imd github unlink >/dev/null && { command -v gh >/dev/null 2>&1 || exit 0; for u in $(GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh auth status --hostname github.com --json hosts --jq '.hosts["github.com"][]?.login' 2>/dev/null); do GH_PROMPT_DISABLED=1 gh auth logout --hostname github.com --user "$u" >/dev/null 2>&1; done; h="${GH_CONFIG_DIR:-$HOME/.config/gh}/hosts.yml"; [ -f "$h" ] && : > "$h"; true; }"#;
 
 /// Unlinks: this computer takes no desk work and opens no pull request, and gh in the box signs out, so its token is
 /// gone too. The worker restarts itself for it once it holds no job.
@@ -5016,6 +5066,122 @@ mod tests {
         for bad in ["https://evil.test/x", "//evil.test", "/../admin", "/a\\b", "/a b"] {
             assert!(api_path(bad).is_err(), "{bad}");
         }
+    }
+
+    /// A folder of its own under the system's temp folder, for a test that runs a script against files.
+    #[cfg(unix)]
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("imd-agents-{name}-{}", nonce()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `sh -c script` with HOME at `home` and PATH at `path`, its output and whether it succeeded.
+    #[cfg(unix)]
+    fn sh_at(script: &str, home: &std::path::Path, path: &str, env: &[(&str, &str)]) -> (bool, String) {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-c").arg(script).env_clear().env("HOME", home).env("PATH", path);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let out = command.output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Where a program is on this computer's PATH, if it is.
+    #[cfg(unix)]
+    fn found(program: &str) -> Option<std::path::PathBuf> {
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(format!("command -v {program}")).output().ok()?;
+        out.status.success().then(|| std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sign_in_marks_the_box_as_holding_a_login_and_clears_only_its_own_mark() {
+        let home = scratch("pending");
+        let file = home.join(".config/git/credentials");
+        let path = "/usr/bin:/bin";
+        let read = || std::fs::read_to_string(&file).unwrap_or_default();
+        // none there: the mark goes in, the look says so, and clearing empties it, which the worker reads as no login
+        assert!(sh_at(&github_pending_set_script(), &home, path, &[]).0);
+        assert_eq!(read(), "https://github.com\n");
+        assert_eq!(sh_at(&github_pending_look(), &home, path, &[]).1, "pending yes\n");
+        assert!(sh_at(&github_pending_clear_script(), &home, path, &[]).0);
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
+        assert_eq!(sh_at(&github_pending_look(), &home, path, &[]).1, "");
+        // emptied, it takes the mark again for the next sign-in
+        assert!(sh_at(&github_pending_set_script(), &home, path, &[]).0);
+        assert_eq!(read(), "https://github.com\n");
+        sh_at(&github_pending_clear_script(), &home, path, &[]);
+        // credentials of anyone's own are never written over, nor emptied
+        std::fs::write(&file, "https://someone:token@github.com\n").unwrap();
+        assert!(sh_at(&github_pending_set_script(), &home, path, &[]).0);
+        assert!(sh_at(&github_pending_clear_script(), &home, path, &[]).0);
+        assert_eq!(read(), "https://someone:token@github.com\n");
+        assert_eq!(sh_at(&github_pending_look(), &home, path, &[]).1, "");
+        // where XDG_CONFIG_HOME says, as the worker looks
+        let xdg = home.join("xdg");
+        assert!(sh_at(&github_pending_set_script(), &home, path, &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())]).0);
+        assert_eq!(std::fs::read_to_string(xdg.join("git/credentials")).unwrap(), "https://github.com\n");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_before_0_1_46_reads_as_working_only_its_holders_own_repositories() {
+        let Some(node) = found("node") else { return };
+        let run = |version: Option<&str>| {
+            let root = scratch("worker");
+            let config = root.join("config");
+            std::fs::create_dir_all(&config).unwrap();
+            std::fs::write(config.join("config.json"), r#"{"githubCredit":{"login":"octocat","repos":[{"repo":"octocat/proofs"}]}}"#).unwrap();
+            let bin = root.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            if let Some(version) = version {
+                // as npm installs it: bin/imd a link to the package's dist/cli.js
+                let package = root.join("lib/node_modules/@identitymd/worker");
+                std::fs::create_dir_all(package.join("dist")).unwrap();
+                std::fs::write(package.join("package.json"), format!(r#"{{"name":"@identitymd/worker","version":"{version}"}}"#)).unwrap();
+                std::fs::write(package.join("dist/cli.js"), "").unwrap();
+                std::os::unix::fs::symlink(package.join("dist/cli.js"), bin.join("imd")).unwrap();
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(package.join("dist/cli.js"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let out = std::process::Command::new(&node).arg("-e").arg(GITHUB_LINK_JS).env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display())).env("HOME", &root).env("IDENTITYMD_HOME", &config)
+                .output().unwrap();
+            let _ = std::fs::remove_dir_all(root);
+            github_read(&String::from_utf8_lossy(&out.stdout))
+        };
+        let old = run(Some("0.1.43"));
+        assert_eq!((old.mode.as_deref(), old.repos.clone()), (Some("mine"), vec!["octocat/proofs".to_string()]));
+        // 0.1.46 and after follow the network's desks where no file says otherwise; a version not found reads as they do
+        for version in [Some("0.1.46"), Some("0.1.48"), Some("0.2.0"), None] {
+            assert_eq!(run(version).mode.as_deref(), Some("network"), "{version:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disconnect_signs_gh_out_of_every_account_it_keeps() {
+        let Some(gh) = found("gh") else { return };
+        let home = scratch("unlink");
+        let hosts = home.join(".config/gh/hosts.yml");
+        std::fs::create_dir_all(hosts.parent().unwrap()).unwrap();
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("imd"), "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin.join("imd"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}:/usr/bin:/bin", bin.display(), gh.parent().unwrap().display());
+        // two accounts, as a Sign in as the linked one over another leaves: gh auth logout alone refuses to pick
+        let two = "github.com:\n    users:\n        alice:\n            oauth_token: gho_testAAAA\n        bob:\n            oauth_token: gho_testBBBB\n    git_protocol: https\n    oauth_token: gho_testBBBB\n    user: bob\n";
+        for kept in [two, "github.com:\n    users:\n        alice:\n            oauth_token: gho_testAAAA\n    oauth_token: gho_testAAAA\n    user: alice\n"] {
+            std::fs::write(&hosts, kept).unwrap();
+            assert!(sh_at(GITHUB_UNLINK, &home, &path, &[("GH_NO_UPDATE_NOTIFIER", "1")]).0);
+            assert!(!std::fs::read_to_string(&hosts).unwrap_or_default().contains("oauth_token"), "{kept}");
+        }
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
